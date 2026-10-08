@@ -4,9 +4,9 @@ import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 import type { IncomingMessage } from "node:http";
 
-// Version 7 uses the Sui MCP resource, metadata and response-field identities.
-// Clients must not attach to an owner that serves the previous package contract.
-export const INTERNAL_API_VERSION = 7;
+import { SERVER_VERSION } from "../../mcp/serverInfo.js";
+
+// Peers use the one package release identity, with no separate API counter.
 export const IDENTITY_PATH = "/__runtime/identity";
 export const INTERNAL_MCP_PATH = "/__runtime/mcp";
 export const IDENTITY_CHALLENGE_HEADER = "x-sui-mcp-identity-challenge";
@@ -17,7 +17,7 @@ const secretSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 export const serverIdentitySchema = z.object({
   service: z.literal("sui-mcp"),
   role: z.literal("shared-server"),
-  apiVersion: z.literal(INTERNAL_API_VERSION),
+  packageVersion: z.literal(SERVER_VERSION),
   databaseId: z.string().regex(/^[0-9a-f]{64}$/),
   configurationId: z.string().regex(/^[0-9a-f]{64}$/),
   instanceId: z.string().uuid(),
@@ -53,12 +53,12 @@ export async function loadControlIdentity(databasePath: string, configuration: u
 }
 
 function identityPayload(identity: Omit<ServerIdentity, "proof">): string {
-  return JSON.stringify([identity.service, identity.role, identity.apiVersion, identity.databaseId,
+  return JSON.stringify([identity.service, identity.role, identity.packageVersion, identity.databaseId,
     identity.configurationId, identity.instanceId, identity.pid, identity.challenge]);
 }
 export function createServerIdentity(control: ControlIdentity, instanceId: string, challenge: string): ServerIdentity {
   secretSchema.parse(challenge);
-  const identity = { service: "sui-mcp", role: "shared-server", apiVersion: INTERNAL_API_VERSION,
+  const identity = { service: "sui-mcp", role: "shared-server", packageVersion: SERVER_VERSION,
     databaseId: control.databaseId, configurationId: control.configurationId,
     instanceId, pid: process.pid, challenge } as const;
   return { ...identity, proof: createHmac("sha256", control.key).update(identityPayload(identity)).digest("base64url") };

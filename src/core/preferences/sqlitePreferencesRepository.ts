@@ -81,7 +81,9 @@ export class SqlitePreferencesRepository implements PreferencesRepository {
     return this.setSuiGraphqlUrl(defaultUrl, now);
   }
 
-  async getLocalSetting(key: string): Promise<LocalSettingRecord | undefined> {
+  async getLocalSetting(key: string): Promise<LocalSettingRecord | undefined> { return this.getLocalSettingSync(key); }
+
+  getLocalSettingSync(key: string): LocalSettingRecord | undefined {
     const settingKey = assertLocalSettingKey(key);
     const row = this.db
       .prepare(
@@ -93,7 +95,9 @@ export class SqlitePreferencesRepository implements PreferencesRepository {
     return row ? rowToLocalSetting(row) : undefined;
   }
 
-  async setLocalSetting(key: string, value: unknown, now = new Date()): Promise<LocalSettingRecord> {
+  async setLocalSetting(key: string, value: unknown, now = new Date()): Promise<LocalSettingRecord> { return this.setLocalSettingSync(key, value, now); }
+
+  setLocalSettingSync(key: string, value: unknown, now = new Date()): LocalSettingRecord {
     const settingKey = assertLocalSettingKey(key);
     this.db
       .prepare(
@@ -104,7 +108,7 @@ export class SqlitePreferencesRepository implements PreferencesRepository {
            updated_at = excluded.updated_at`
       )
       .run(settingKey, encodeSettingValue(settingKey, value), now.toISOString());
-    const record = await this.getLocalSetting(settingKey);
+    const record = this.getLocalSettingSync(settingKey);
     if (!record) {
       throw new PreferencesStoreError("not_recorded", "Local setting was not recorded", { key: settingKey });
     }

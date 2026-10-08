@@ -37,14 +37,8 @@ const requiredFiles = [
   "dist/runtime/walletSdkChildRuntime.js",
   "dist/runtime/walletSdkProcess.js",
   "dist/runtime/walletSdkIpc.js",
-  ...["account", "receipt", "chart", "connect", "review"].flatMap((kind) => [`dist/mcp-app/${kind}.html`, `dist/mcp-app/${kind}.notices.txt`]),
+  ...["account", "receipt", "chart", "connect", "review", "settings"].flatMap((kind) => [`dist/mcp-app/${kind}.html`, `dist/mcp-app/${kind}.notices.txt`]),
   "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt",
-  "dist/review-app/settings.js",
-  "dist/review-app/settings.css",
-  "dist/review-app/ui.css",
-  "dist/review-app/favicon.svg",
-  "dist/review-app/brand-light.svg",
-  "dist/review-app/brand-dark.svg",
   "docs/UTILITY_INDEX.md",
   ...MCP_RESOURCES.map((resource) => resource.path)
 ] as const;
@@ -56,7 +50,13 @@ const forbiddenPrefixes = [
   "scripts/",
   "registry/generated/",
   "submission/",
-  "dist/review-app/connect."
+  "dist/review-app/",
+  "dist/review-server/settingsApi.",
+  "dist/review-server/html.",
+  "dist/review-server/assets.",
+  "dist/core/session/settingsSession.",
+  "dist/core/session/settingsSessions.",
+  "dist/core/session/keyedRecordStore."
 ] as const;
 
 function run(command: string, args: string[], cwd = process.cwd()): void {
@@ -223,25 +223,28 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
       const read = await client.readResource({ uri });
       if (!read.contents.some((item) => "text" in item && item.text.trim().length > 0)) throw new Error(`Installed resource is empty: ${uri}`);
     }
-    stage = "Settings page and assets";
+    stage = "Settings card and retired-route rejection";
     const result = await client.callTool({ name: TOOL_NAMES.settingsCreateLocalSettingsSession, arguments: {} });
-    const body = result.structuredContent as { ok?: boolean; data?: { settingsUrl?: string } } | undefined;
-    if (result.isError || body?.ok !== true || !body.data?.settingsUrl) throw new Error("Installed Settings session could not be created.");
-    const settings = new URL(body.data.settingsUrl);
-    if (settings.origin !== `http://127.0.0.1:${port}` || !settings.pathname.startsWith("/settings/")) throw new Error("Unexpected installed Settings origin.");
-    const get = async (path: string, headers?: Record<string, string>) => {
-      const response = await fetch(new URL(path, settings.origin), { ...(headers ? { headers } : {}),
-        signal: AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MSEC), redirect: "error" });
-      if (!response.ok) throw new Error(`Installed Settings response failed: ${response.status}`);
-      return response;
-    };
-    const html = await (await get(settings.pathname)).text();
-    if (!html.includes('id="settings-app"')) throw new Error("Installed Settings shell is missing.");
-    for (const asset of ["settings.js", "settings.css", "ui.css", "favicon.svg", "brand-light.svg", "brand-dark.svg"]) {
-      if (!(await (await get(`/review-assets/${asset}`)).text()).trim()) throw new Error(`Installed asset is empty: ${asset}`);
+    const body = result.structuredContent as { ok?: boolean; data?: unknown } | undefined;
+    if (result.isError || body?.ok !== true || !body.data) throw new Error("Installed Settings card could not be created.");
+    const settings = cardSnapshotSchema.parse(body.data);
+    const settingsRef = cardReferenceSchema.parse(result._meta?.[CARD_METADATA_KEY]);
+    if (settings.kind !== "settings" || settings.state !== "ready" ||
+        JSON.stringify(body.data).match(/settingsUrl|openTarget|settingsSessionId|permission/)) throw new Error("Installed Settings card contract mismatch.");
+    for (const name of [CARD_TOOLS.act, CARD_TOOLS.readSettingsFile]) {
+      const tool = tools.tools.find((tool) => tool.name === name);
+      if (JSON.stringify(tool?._meta?.ui) !== JSON.stringify({ visibility: ["app"] })) throw new Error(`Installed tool must be app-only: ${name}`);
     }
-    const status = await (await get(`/api${settings.pathname}`, { "x-sui-mcp-token": settings.hash.slice(1) })).json() as { server?: { version?: string; network?: string } };
-    if (status.server?.version !== manifest.version || status.server.network !== "mainnet") throw new Error("Installed Settings server metadata mismatch.");
+    const readSettings = await client.callTool({ name: CARD_TOOLS.read, arguments: settingsRef });
+    const readBody = readSettings.structuredContent as { ok?: boolean; data?: unknown } | undefined;
+    if (readSettings.isError || readBody?.ok !== true || !readBody.data) throw new Error("Installed Settings card read failed.");
+    const currentSettings = cardSnapshotSchema.parse(readBody.data);
+    const facts = (currentSettings.data as { facts?: { server?: { version?: string; network?: string } } }).facts;
+    if (facts?.server?.version !== manifest.version || facts.server.network !== "mainnet") throw new Error("Installed Settings server metadata mismatch.");
+    for (const path of ["/settings/retired", "/api/settings/retired", "/review-assets/settings.js"]) {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MSEC), redirect: "error" });
+      if (response.status !== 404) throw new Error(`Retired Settings route is still exposed: ${path}`);
+    }
     stage = "packaged wallet child and retired-input rejection";
     const parentPid = transport.pid;
     const resultData = (value: Awaited<ReturnType<Client["callTool"]>>) => {

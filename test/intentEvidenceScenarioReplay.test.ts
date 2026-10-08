@@ -77,7 +77,6 @@ async function connectReplayClient(readService: SuiReadService) {
     sessions,
     activityStore,
     localSettings: new InMemoryLocalSettingsService(repository),
-    reviewBaseUrl: "http://127.0.0.1:4173",
     logger,
     readService,
     transactionActivityService: new TransactionActivityService({

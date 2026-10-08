@@ -12,8 +12,6 @@ import {
   type PrivateReviewArtifacts
 } from "./privateReviewArtifacts.js";
 import type { SessionRecordStore } from "./sessionRecordStore.js";
-import type { KeyedRecordStore } from "./keyedRecordStore.js";
-import type { SettingsSession } from "./settingsSession.js";
 import { LIVE_REVIEW_SESSION_WRITE_CONTRACT_VERSION } from "./liveReviewSessionContract.js";
 import { INITIAL_CHAIN_OBSERVATION_STATUSES } from "./transactionRequest.js";
 
@@ -188,56 +186,6 @@ export class SqlitePrivateReviewArtifactStore implements PrivateReviewArtifactSt
   clear(): void {
     this.db.prepare(`DELETE FROM live_private_review_artifacts`).run();
   }
-}
-
-/**
- * SQLite-backed id-keyed store for the short-lived settings
- * session manager. Each record is a JSON blob keyed by id; the table name is a
- * trusted constant supplied by the factories below (never user input).
- */
-export class SqliteKeyedRecordStore<T> implements KeyedRecordStore<T> {
-  constructor(
-    private readonly db: SqliteDatabase,
-    private readonly table: string,
-    private readonly revive: (raw: unknown) => T
-  ) {}
-
-  get(id: string): T | undefined {
-    const row = this.db
-      .prepare(`SELECT session_json FROM ${this.table} WHERE id = ?`)
-      .get(id) as { session_json: string } | undefined;
-    return row ? this.revive(JSON.parse(row.session_json)) : undefined;
-  }
-
-  set(id: string, value: T): void {
-    this.db
-      .prepare(
-        `INSERT INTO ${this.table} (id, session_json) VALUES (?, ?)
-         ON CONFLICT(id) DO UPDATE SET session_json = excluded.session_json`
-      )
-      .run(id, JSON.stringify(value));
-  }
-
-  delete(id: string): void {
-    this.db.prepare(`DELETE FROM ${this.table} WHERE id = ?`).run(id);
-  }
-
-  ids(): string[] {
-    const rows = this.db.prepare(`SELECT id FROM ${this.table}`).all() as { id: string }[];
-    return rows.map((row) => row.id);
-  }
-
-  clear(): void {
-    this.db.prepare(`DELETE FROM ${this.table}`).run();
-  }
-}
-
-export function createSqliteSettingsRecordStore(db: SqliteDatabase): KeyedRecordStore<SettingsSession> {
-  return new SqliteKeyedRecordStore<SettingsSession>(
-    db,
-    "live_settings_sessions",
-    (raw) => raw as SettingsSession
-  );
 }
 
 // Reconstruct the ReviewSession from columns + JSON blobs. Optional fields are

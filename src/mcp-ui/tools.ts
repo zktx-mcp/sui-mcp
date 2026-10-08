@@ -1,4 +1,6 @@
 import { workflowActionSchema } from "../core/session/workflowView.js";
+import { settingsActionSchema } from "../core/session/settingsOperation.js";
+import { MAX_JSON_BODY_BYTES, settingsJsonSize, settingsRawChunkBudget } from "../core/session/settingsFileProtocol.js";
 import { sessionDomainToolError } from "../mcp/toolErrors.js";
 import { accountInputSchema, receiptInputSchema, chartOpenInputSchema } from "../core/read/readCardInputs.js";
 import { readFile } from "node:fs/promises";
@@ -11,11 +13,11 @@ import { okToolResult, errorToolResult } from "../mcp/result.js";
 import { CardError } from "../core/session/cardSessionStore.js";
 import { resolveExplicitOrActiveAccount } from "../mcp/tools/read/readToolHelpers.js";
 import type { CardResponse } from "../core/session/cardSession.js";
-import { CARD_METADATA_KEY, CARD_DISPLAY_METADATA_KEY, WALLET_DISPLAY_METADATA_KEY, CARD_RESOURCE_PREFIX, CARD_RESOURCE_URIS, CARD_TOOLS,
+import { CARD_METADATA_KEY, CARD_DISPLAY_METADATA_KEY, WALLET_DISPLAY_METADATA_KEY, SETTINGS_FILE_METADATA_KEY, CARD_RESOURCE_PREFIX, CARD_RESOURCE_URIS, CARD_TOOLS,
   cardReceiptDisplaySchema, cardWalletDisplaySchema, cardReferenceSchema,
   cardSubmissionSchema, cardInputRequiredSchema } from "./contracts.js";
 
-const cardActionSchema = cardReferenceSchema.extend({ revision: z.number().int().nonnegative(), input: workflowActionSchema }).strict();
+const cardActionSchema = cardReferenceSchema.extend({ revision: z.number().int().nonnegative().safe(), input: z.union([workflowActionSchema, settingsActionSchema]) }).strict();
 
 export const cardMetadata = (kind: keyof typeof CARD_RESOURCE_URIS): NonNullable<McpUiAppToolConfig["_meta"]> => ({
   ui: { resourceUri: CARD_RESOURCE_URIS[kind], visibility: ["model"] },
@@ -49,7 +51,7 @@ export function cardToolResult(response: CardResponse, savedLink = false): CallT
 }
 
 export async function createWorkflowCard(server: McpServer, deps: Pick<McpServerDeps, "cards">,
-  kind: "connect" | "review", input: Record<string, unknown>, gateway?: Record<string, unknown>): Promise<CallToolResult> {
+  kind: "connect" | "review" | "settings", input: Record<string, unknown>, gateway?: Record<string, unknown>): Promise<CallToolResult> {
   if (!supportsCards(server)) return errorToolResult({ kind: "ui_unavailable", details: { reason: "This MCP client does not provide an internal card." } });
   if (!deps.cards) return errorToolResult({ kind: "internal_error", details: { reason: "Card service unavailable." } });
   const created = await deps.cards.store.create(kind, input);
@@ -127,4 +129,29 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
       }
     });
   }
+  const fileInput = cardReferenceSchema.extend({ operationId: z.string().uuid(), fileId: z.string().uuid(), offset: z.number().int().nonnegative().safe(),
+    limit: z.number().int().positive().safe().optional() }).strict();
+  registerAppTool(server, CARD_TOOLS.readSettingsFile, { description: "Read a completed local backup file.", inputSchema: fileInput,
+    _meta: { ui: { visibility: ["app"] } }, annotations: { readOnlyHint: true, openWorldHint: false }
+  }, async (input, extra) => {
+    try {
+      if (!deps.cards) throw new CardError("Card service is unavailable.");
+      // Measure the actual response shape, including its text fallback and UI
+      // metadata. Reserve maximum safe-integer digit widths for size fields.
+      const base = okToolResult({ status: "read", fileId: input.fileId, offset: input.offset, rangeSize: Number.MAX_SAFE_INTEGER });
+      const metadata = { cardId: input.cardId, operationId: input.operationId, fileId: input.fileId, offset: input.offset, totalSize: Number.MAX_SAFE_INTEGER,
+        sha256: "0".repeat(64), chunkBase64: "" };
+      base._meta = { [SETTINGS_FILE_METADATA_KEY]: metadata };
+      const budget = settingsRawChunkBudget({ jsonrpc: "2.0", id: extra.requestId, result: base });
+      if (!budget) throw new CardError("The backup response cannot fit the app's message envelope.");
+      const read = await deps.cards.store.readSettingsFile(input, Math.min(input.limit ?? budget, budget));
+      const rangeSize = Buffer.from(read.chunkBase64, "base64").length;
+      const result = okToolResult({ status: "read", fileId: input.fileId, offset: input.offset, rangeSize });
+      result._meta = { [SETTINGS_FILE_METADATA_KEY]: { ...metadata, totalSize: read.file.totalSize, sha256: read.file.sha256, chunkBase64: read.chunkBase64 } };
+      if (settingsJsonSize({ jsonrpc: "2.0", id: extra.requestId, result }) > MAX_JSON_BODY_BYTES) throw new CardError("The backup response exceeds its message limit.");
+      return result;
+    } catch {
+      return errorToolResult({ kind: "input_invalid", details: { reason: "This backup file could not be read or verified." } });
+    }
+  });
 }

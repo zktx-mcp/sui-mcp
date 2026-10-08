@@ -5,6 +5,8 @@ import { dirname } from "node:path";
 import { WalletSdkProcess } from "./walletSdkProcess.js";
 import { WALLETCONNECT_PROJECT_ID } from "./walletConnectConfig.js";
 import { WalletWorkflow } from "../core/session/walletWorkflow.js";
+import { SettingsWorkflow } from "../core/session/settingsWorkflow.js";
+import { SettingsFileStore } from "../core/session/settingsFileStore.js";
 import { randomUUID } from "node:crypto";
 import { SqliteActivityStore } from "../core/activity/sqliteActivityStore.js";
 import { validateSupportedAdapterLifecycle } from "../adapters/adapterLifecycleValidators.js";
@@ -73,7 +75,7 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
       bootSuiGrpcUrl: config.suiGrpcUrl,
       bootSuiGraphqlUrl: config.suiGraphqlUrl
     });
-    const workflowRecords = store.createWalletWorkflowStore(ownerId);
+    const workflowRecords = store.createWalletWorkflowStore(ownerId, () => new Date(), () => walletRuntime?.snapshot());
     const localData = store.createLocalDataService({
       advanceRequestDeadlines: (now) => workflowRecords.advanceRequestDeadlines(now),
       onDataReplaced: () => { access.dataReplaced(); workflow?.dataReplaced(); chart?.clearCache(); },
@@ -100,8 +102,7 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
       validateAdapterLifecycle: validateSupportedAdapterLifecycle,
       sessions: store.createSessionRecordStore(),
       artifacts: store.createPrivateReviewArtifactStore(),
-      ownerId,
-      settingsStore: store.createSettingsRecordStore()
+      ownerId
     });
     const readService = createSuiReadService({
       client: suiClient,
@@ -131,9 +132,7 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
       );
     const reviewComputationDeps = createRuntimeReviewDependencies({ client: suiClient, chainIdentifier,
       expectedChainIdentifier: config.expectedChainIdentifier, materialStore: transactionMaterialStore, readService });
-    const httpHandler = createReviewRequestHandler({ host: config.reviewHost, store: sessions, logger,
-      activityStore: store, localSettings, localData,
-      serverInfo: { name: SERVER_NAME, version: SERVER_VERSION, network: SERVER_NETWORK } });
+    const httpHandler = createReviewRequestHandler({ logger });
     const cardRecords = store.createCardRecordStore();
     let metadata: { name: string; description: string; homepage: string } | undefined;
     try {
@@ -154,10 +153,27 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
       },
       submitTransaction: (transaction, signature) => suiClient.core.executeTransaction({ transaction, signatures: [signature] })
     });
+    const settingsRecords = store.createSettingsWorkflowStore(ownerId);
+    const settings = new SettingsWorkflow({ records: settingsRecords, files: new SettingsFileStore(dirname(bootConfig.activityDatabasePath)),
+      activity: store, localData, preferences: preferencesRepository, wallet: workflow, assertCurrent: access.assertCurrent,
+      resolveEndpoint: (input) => localSettings.resolveEndpointChange(input),
+      verifyEndpoint: (input) => localSettings.prepareEndpointChange(input),
+      interruptRun: (runId) => workflowRecords.invalidateWalletRun("wallet_service_restarted", new Date(), runId),
+      readFacts: async () => settingsRecords.transaction(() => {
+        const context = workflow!.currentConnectionContext(), account = store.getActiveAccountSync();
+        const observedAt = context.walletObservation?.observedAt;
+        return { server: { name: SERVER_NAME, version: SERVER_VERSION, network: SERVER_NETWORK },
+          localSettings: localSettings.getLocalSettingsSync((key) => preferencesRepository.getLocalSettingSync(key)),
+          ...(account ? { readAddress: account.address } : {}),
+          assetReadAccount: context.assetReadAccount, walletAvailability: context.walletAvailability,
+          ...(context.connectionReconciliationRequired ? { connectionReconciliationRequired: true as const } : {}),
+          ...(observedAt ? { observedAt } : {}), counts: localData.getDataCountsSync() };
+      }) });
+    settings.recoverOwner();
     await workflow.start();
 
     chart = createDeepbookUsdcChartService({ assertCurrent: access.assertCurrent });
-    cards = createReadCardStore({ readService, publicChainReceiptReader, chart, records: cardRecords, ownerId, assertCurrent: access.assertCurrent, logger, workflow });
+    cards = createReadCardStore({ readService, publicChainReceiptReader, chart, records: cardRecords, ownerId, assertCurrent: access.assertCurrent, logger, workflow, settings });
     const transactionActivityService = new TransactionActivityService({
         activityStore: store,
         source: new GraphqlSuiTransactionActivitySource({
@@ -171,7 +187,6 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
       promptSurfaces: ADAPTER_PROMPT_SURFACES,
       sessions,
       activityStore: store,
-      reviewBaseUrl: `http://${config.reviewHost}:${config.reviewPort}`,
       readService,
       transactionActivityService,
       localSettings,
@@ -179,6 +194,9 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
     }));
 
     access.ready();
+    void access.run(() => settings.cleanupAfterOwnerChange()).catch(() => {
+      try { logger.error("Temporary settings file cleanup is incomplete", { stage: "settings_file_cleanup" }); } catch { /* Stored cleanup facts remain authoritative. */ }
+    });
     return {
       handleMcp: (request, response) => access.run(() => mcp.handle(request, response)),
       handleHttp: (request, response) => access.run(() => httpHandler(request, response)),

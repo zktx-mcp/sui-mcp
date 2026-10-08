@@ -207,10 +207,8 @@ describe("shared SQLite state hardening baseline", () => {
       );
       db.prepare(`INSERT INTO live_private_review_artifacts (review_session_id, artifacts_json) VALUES (?, ?)`)
         .run(session.id, JSON.stringify({ transactionMaterial: { materialId: "material_1" } }));
-      db.pragma("user_version = 5");
 
       expect(() => initializeDatabase(db)).toThrow("format does not match");
-      expect(db.pragma("user_version", { simple: true })).toBe(5);
       expect(db.prepare("SELECT plans_json FROM live_review_sessions WHERE id = ?").get(session.id))
         .toEqual({ plans_json: JSON.stringify(session.plans) });
       expect((db.prepare("SELECT COUNT(*) AS count FROM live_private_review_artifacts").get() as { count: number }).count).toBe(1);

@@ -1,47 +1,22 @@
-import { EventEmitter } from "node:events";
+import { WalletSdkPeer } from "./fixtures/walletSdkPeer.js";
 import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, expect, it, vi } from "vitest";
 import { WalletSdkProcess } from "../src/runtime/walletSdkProcess.js";
-import type { WalletCommand, WalletEvent } from "../src/runtime/walletSdkIpc.js";
 import { workflowViewSchema } from "../src/core/session/workflowView.js";
 import { waitForWalletConnection } from "../src/core/session/wait.js";
 import { walletWorkflowFixture } from "./fixtures/walletWorkflow.js";
 
 // Only the OS/IPC peer is synthetic. Admission, supervisor, Workflow, SQLite,
 // projection and waits are the product path. Real SDK/process integration is separate.
-class Peer extends EventEmitter {
-  connected = true; pid = 123; exitCode: number | null = null; signalCode: string | null = null;
-  killMode: "exit" | "false" | "throw" | "hold" = "exit";
-  kills = 0; commands: WalletCommand[] = [];
-  constructor(private readonly startup: "ready" | "fail" | "hold") { super(); }
-  send(command: WalletCommand, callback: (error: Error | null) => void) {
-    this.commands.push(command); callback(null);
-    if (command.type !== "init") throw new Error("Unexpected wallet command in the persistence fixture");
-    if (this.startup === "hold") return true;
-    queueMicrotask(() => this.emit("message", this.startup === "fail"
-      ? { protocolVersion: 1, runId: command.runId, type: "failure", reason: "initialization_failed" } satisfies WalletEvent
-      : { protocolVersion: 1, runId: command.runId, type: "snapshot", ready: true,
-        snapshot: { runId: command.runId, sequence: 1, observedAt: new Date().toISOString(), sessions: [] } } satisfies WalletEvent));
-    return true;
-  }
-  kill() {
-    this.kills++;
-    if (this.killMode === "throw") throw new Error("Fixture signal failure");
-    if (this.killMode === "false") return false;
-    if (this.killMode === "exit") queueMicrotask(() => this.finish());
-    return true;
-  }
-  finish() { if (this.signalCode) return; this.connected = false; this.signalCode = "SIGKILL"; this.emit("exit", null, "SIGKILL"); }
-}
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
 async function fixture() {
-  const peers: Peer[] = [], startups: ("ready" | "fail" | "hold")[] = [];
+  const peers: WalletSdkPeer[] = [], startups: ("ready" | "fail" | "hold")[] = [];
   const f = await walletWorkflowFixture({ createRuntime: (directory) => new WalletSdkProcess({ dataDirectory: directory,
     projectId: "0".repeat(32), metadata: { name: "Fixture", description: "Synthetic OS peer", url: "https://example.invalid" },
-    spawn: () => { const peer = new Peer(startups.shift() ?? "ready"); peers.push(peer); return peer as unknown as ChildProcess; }
+    spawn: () => { const peer = new WalletSdkPeer(startups.shift() ?? "ready"); peers.push(peer); return peer as unknown as ChildProcess; }
   }) });
   const db = new Database(join(f.directory, "activity.sqlite"));
   cleanup.push(async () => { for (const peer of peers) { peer.killMode = "exit"; peer.finish(); } await f.runtime.close(); db.close(); f.close(); });

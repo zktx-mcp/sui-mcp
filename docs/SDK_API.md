@@ -34,7 +34,21 @@ dependency update requires rebuilding and distributing the card resources.
 
 ## MCP Apps
 
-`@modelcontextprotocol/ext-apps` is pinned to `1.7.5`, with MCP SDK `1.29.0`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect and Review are separate self-contained resources, so an account card does not load the PTB or chart renderer. The server keeps app-only permissions out of model content.
+`@modelcontextprotocol/ext-apps` is pinned to `1.7.5`, with MCP SDK `1.29.0`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
+
+Settings completes a selected upload's verification and restore preparation on
+the backend. The card renders the stored `restoreCheck` result and collects one
+final restore confirmation; it does not parse backup contents, decide backend
+eligibility or apply data automatically. The complete file, preparation and
+final input remain bound to their card/operation identity and current revision.
+The backend distinguishes unsealed receiving, active checking, a sealed file
+needing a new check, a current confirmation and actual rejection. Definite
+file/mainnet rejection is independent of local-data confirmation revision and
+survives Back until explicit file selection changes. The View's current file-job
+progress describes communication only; it cannot grant restoration authority.
+
+Recorded backup locations use backend-native folder and file-name fields;
+optional `App.downloadFile` delivery remains separate from local publication.
 
 The shared server uses the pinned MCP SDK Streamable HTTP transport behind authenticated loopback access. Stdio clients forward tool, resource and prompt requests with their original client identity and capabilities. Ordinary MCP input schemas remain unchanged by the transport; the 64 KiB card/HTTP input limit includes the card call envelope.
 
@@ -186,13 +200,15 @@ facts; its absence/timeout does not prove execution failure.
 SDK session storage persists only the pinned connection namespaces. History,
 requests and unknown queue keys are volatile. The SDK has no supported complete
 in-process disposal; its owner process lifetime bounds callbacks and storage.
-The parent uses a fixed packaged Node child entrypoint and private versioned IPC.
+The parent uses a fixed packaged Node child entrypoint and private package-bound IPC.
 Only the SDK child owns SDK storage. The supervisor fences a terminating run,
 sends SIGKILL to its owned child and waits for actual exit. Its explicit
-replacement primitive remains private infrastructure; Connect and Settings do
-not expose a restart command. Closing relay transport or receiving an IPC disconnection is not
-evidence that the SDK operation ended. No SDK private teardown, source patch,
-automatic financial retry or overlapping storage writer is used.
+replacement primitive is private infrastructure. Settings/Troubleshooting
+owns explicit run/impact preparation, atomic input revocation/admission,
+old-child exit, next-run reservation and ready/failure recording. Connect does
+not own restart. A new explicit Settings operation can supersede a startup
+still pending; known failure and its first timestamp remain immutable.
+Late callbacks cannot reopen old authority or submit another transaction.
 
 Snapshots and per-session versions distinguish present, absent and unusable
 sessions. Source inspection failure disables the service instead of becoming an

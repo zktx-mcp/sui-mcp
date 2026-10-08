@@ -513,9 +513,11 @@ describe("disconnect admission and completion share the stored card operation", 
     const f = await fixture(), { connection } = await f.approve(), card = await f.createConnection();
     const pending = deferred<void>(); vi.mocked(f.transport.disconnect).mockImplementationOnce(() => pending.promise);
     await f.act(card, { action: "disconnect", connectionId: connection.connectionId }); f.workflow.stop();
-    const nextRecords = f.activity.createWalletWorkflowStore("replacement"), disconnect = vi.fn();
+    const disconnect = vi.fn();
+    const runtime = new FixtureWalletRuntime({ ...f.transport, disconnect, restore: async () => [f.transport.session("fixture-topic")!] });
+    const nextRecords = f.activity.createWalletWorkflowStore("replacement", f.now, () => runtime.snapshot());
     const next = new WalletWorkflow({ records: nextRecords, sessions: f.sessions,
-      ownerId: "replacement", runtime: new FixtureWalletRuntime({ ...f.transport, disconnect, restore: async () => [f.transport.session("fixture-topic")!] }),
+      ownerId: "replacement", runtime,
       computation: f.computation, verifyReceipt: f.verifyReceipt, verifyNetwork: f.verifyNetwork, submitTransaction: f.submit,
       assertCurrent: f.access.assertCurrent, bindExternalEvent: (work) => f.access.bind(work), logger: f.logger, now: f.now });
     try {
@@ -525,16 +527,20 @@ describe("disconnect admission and completion share the stored card operation", 
       pending.resolve(); await new Promise((resolve) => setImmediate(resolve));
       expect(f.run(() => nextRecords.connection(connection.connectionId)?.connection.status)).toBe("failed");
       expect(disconnect).not.toHaveBeenCalled(); expect(f.transport.disconnect).toHaveBeenCalledOnce();
+      expect(f.run(() => next.reconcileConnectionContext())).toMatchObject({ manageableConnectionIds: [connection.connectionId],
+        connections: [expect.objectContaining({ status: "failed" })], assetReadAccount: { status: "address_required" } });
     } finally { next.stop(); }
   });
 
-  it("does not recreate a connection when disconnect finishes after local reset", async () => {
+  it("refuses local reset until a disconnect's SDK callback settles, then retains its journal without old card authority", async () => {
     const f = await fixture(), { connection } = await f.approve(), card = await f.createConnection();
     const pending = deferred<void>(); vi.mocked(f.transport.disconnect).mockImplementationOnce(() => pending.promise);
     await f.act(card, { action: "disconnect", connectionId: connection.connectionId });
-    await f.run(() => f.localData.resetLocalData());
+    await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
     pending.resolve(); await new Promise((resolve) => setImmediate(resolve));
-    expect(f.run(() => f.records.connections())).toEqual([]);
+    await vi.waitFor(() => expect(f.run(() => f.records.connection(connection.connectionId)?.sdkPending)).toBe(false));
+    await f.run(() => f.localData.resetLocalData());
+    expect(f.run(() => f.records.connections())).toMatchObject([{ connection: { connectionId: connection.connectionId, status: "disconnected" }, sdkPending: false }]);
     expect(f.run(() => f.cardRecords.get(card.snapshot.cardId))).toBeUndefined();
   });
 });
@@ -993,10 +999,76 @@ it("blocks account selection but preserves targeted disconnection for multiple s
   const card = await f.run(() => f.cards.create("connect", { intent: "manage" }));
   expect(card.snapshot.data).toMatchObject({ connections: expect.arrayContaining(records.map((record) => expect.objectContaining({ connectionId: record.connection.connectionId }))) });
   expect((await f.act(card, { action: "use_account", connectionId: records[1]!.connection.connectionId, account: sessions[1]!.accounts[0] })).error?.code).toBe("card_conflict");
-  expect(f.run(() => f.records.connectionViews())).toHaveLength(2);
+  expect(f.run(() => f.records.readConnectionFacts(f.now()).connections)).toHaveLength(2);
   const disconnect = await f.run(() => f.cards.create("connect", { intent: "disconnect" }));
   expect((await f.act(disconnect, { action: "disconnect", connectionId: records[0]!.connection.connectionId })).error).toBeUndefined();
   await vi.waitFor(() => expect(f.run(() => f.records.connection(records[0]!.connection.connectionId)?.connection.status)).toBe("disconnected"));
   expect(f.run(() => f.records.connection(records[1]!.connection.connectionId)?.connection.status)).toBe("connected");
   expect(f.connect).not.toHaveBeenCalled(); expect(f.transport.disconnect).toHaveBeenCalledOnce(); expect(f.sign).not.toHaveBeenCalled();
+});
+
+it("retains a failed disconnect result while requiring a new scoped disconnect for its SDK session", async () => {
+  const f = await fixture(), { connection } = await f.approve();
+  const failed = await f.run(() => f.cards.create("connect", { intent: "disconnect" }));
+  vi.mocked(f.transport.disconnect).mockRejectedValueOnce(new Error("Synthetic relay response failure"));
+  await f.act(failed, { action: "disconnect", connectionId: connection.connectionId });
+  await vi.waitFor(() => expect(f.run(() => f.records.connection(connection.connectionId))).toMatchObject({ sdkPending: false, connection: { status: "failed" } }));
+  expect(f.transport.session("fixture-topic")).toBeDefined();
+  const saved = (await f.read(failed)).snapshot.data;
+  const manage = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+  expect(manage.snapshot.data).toMatchObject({ manageableConnectionIds: [connection.connectionId], assetReadAccount: { status: "address_required" }, allowedActions: ["cancel", "disconnect"] });
+  expect((await f.act(manage, { action: "connect" })).error?.code).toBe("card_conflict");
+  expect((await f.act(manage, { action: "use_account", connectionId: connection.connectionId, account: f.account })).error?.code).toBe("card_conflict");
+  // An identical consumed input returns its saved result; it cannot retry I/O.
+  expect((await f.act(failed, { action: "disconnect", connectionId: connection.connectionId })).snapshot.data).toMatchObject({ connectionAction: "disconnect", connection: (saved as any).connection });
+  expect(f.transport.disconnect).toHaveBeenCalledOnce();
+  await f.act(await f.read(manage), { action: "disconnect", connectionId: connection.connectionId });
+  await vi.waitFor(() => expect(f.run(() => f.records.connection(connection.connectionId)?.connection.status)).toBe("disconnected"));
+  expect((await f.read(failed)).snapshot.data).toMatchObject({ connectionAction: "disconnect", connection: (saved as any).connection });
+  const empty = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+  expect(empty.snapshot.data).toMatchObject({ allowedActions: ["cancel", "connect"] });
+  expect(f.connect).toHaveBeenCalledOnce(); expect(f.transport.disconnect).toHaveBeenCalledTimes(2); expect(f.submit).not.toHaveBeenCalled();
+});
+
+it("blocks use, pairing and final submission when a current SDK session has no journal target", async () => {
+  const f = await fixture(), { connection } = await f.approve(), ready = await f.prepare(connection.connectionId);
+  const original = f.transport.session("fixture-topic")!;
+  const unknown = { ...original, topic: "unrecorded-sdk-session" };
+  f.verifyNetwork.mockImplementationOnce(async () => {
+    vi.spyOn(f.transport, "inspectAll").mockImplementation(() => [original, unknown].map((session) => ({ topic: session.topic, status: "present" as const, session })));
+    f.observe();
+  });
+  await f.act(ready.card, { action: "request_signature", connectionId: connection.connectionId, account: f.account, reviewRevision: ready.session.reviewRevision });
+  await vi.waitFor(() => expect(f.run(() => f.records.currentRequest(ready.session.id)?.requestStatus)).toBe("stopped"));
+  const request = f.run(() => f.records.currentRequest(ready.session.id))!;
+  expect(f.run(() => f.records.authority(request.attemptId)?.can_submit)).toBe(0);
+  const context = f.run(() => f.workflow.reconcileConnectionContext());
+  expect(context).toMatchObject({ walletAvailability: { status: "available" }, connectionReconciliationRequired: true,
+    manageableConnectionIds: [connection.connectionId], assetReadAccount: { status: "address_required" } });
+  expect(context.connectionConflict).toBeUndefined();
+  expect(JSON.stringify(context)).not.toContain("unrecorded-sdk-session");
+  const card = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+  expect(card.snapshot.data).toMatchObject({ allowedActions: ["cancel", "disconnect"], connectionReconciliationRequired: true });
+  expect((await f.act(card, { action: "connect" })).error?.code).toBe("card_conflict");
+  expect((await f.act(card, { action: "use_account", connectionId: connection.connectionId, account: f.account })).error?.code).toBe("card_conflict");
+  expect(f.sign).toHaveBeenCalledOnce(); expect(f.submit).not.toHaveBeenCalled(); expect(f.connect).toHaveBeenCalledOnce();
+});
+
+it("keeps ordinary approval registration pending without declaring an unrecorded SDK session a recovery failure", async () => {
+  const f = await fixture(), card = await f.createConnection();
+  await f.act(card, { action: "connect" });
+  await vi.waitFor(() => expect(f.connect).toHaveBeenCalledOnce());
+  const session = { topic: "not-yet-registered", accounts: [f.account], methods: ["sui_signTransaction"], chain: "sui:mainnet" as const,
+    expiresAt: new Date(f.now().getTime() + 60_000).toISOString() };
+  vi.spyOn(f.transport, "inspectAll").mockReturnValue([{ topic: session.topic, status: "present", session }]);
+  f.observe();
+  const context = f.run(() => f.workflow.reconcileConnectionContext());
+  expect(context.connectionReconciliationRequired).toBeUndefined(); expect(context.connectionConflict).toBeUndefined();
+  const management = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+  expect(management.snapshot.data).toMatchObject({ allowedActions: ["cancel"], assetReadAccount: { status: "address_required" } });
+  expect((await f.act(management, { action: "connect" })).error?.code).toBe("card_conflict");
+  f.approval.resolve(session);
+  await vi.waitFor(() => expect(f.run(() => f.records.readConnectionFacts(f.now()).connections[0]?.status)).toBe("connected"));
+  expect(f.run(() => f.workflow.reconcileConnectionContext()).connectionReconciliationRequired).toBeUndefined();
+  expect(f.connect).toHaveBeenCalledOnce();
 });

@@ -26,7 +26,6 @@ export type McpServerDeps = {
   sessions: SessionStore;
   activityStore: ActivityStore;
   localSettings: LocalSettingsService;
-  reviewBaseUrl?: string | undefined;
   readService: SuiReadService;
   transactionActivityService: TransactionActivityService;
   logger: {

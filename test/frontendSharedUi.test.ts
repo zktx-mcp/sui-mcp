@@ -1,29 +1,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { themeToggleIcon } from "../review-app/src/ui/shell.js";
-
-describe("theme toggle icon reflects the current theme (Plan B)", () => {
-  // The toggle must show the icon for the theme that is active right now, not the
-  // theme it would switch to: a moon while dark, a sun while light. The moon glyph
-  // is one distinctive path; the sun is a centre circle with rays.
-  it("shows a moon while dark", () => {
-    const icon = themeToggleIcon("dark");
-    expect(icon).toContain("M21 12.8");
-    expect(icon).not.toContain("circle");
-  });
-
-  it("shows a sun while light", () => {
-    const icon = themeToggleIcon("light");
-    expect(icon).toContain('circle cx="12" cy="12" r="4"');
-    expect(icon).not.toContain("M21 12.8");
-  });
-});
 
 const BARE_INTERACTIVE_ELEMENTS = ["button", "input", "select", "textarea"];
 
 it("internal cards do not invoke clipboard APIs or offer copy controls", () => {
-  for (const file of ["src/mcp-ui/view/lifecycle.ts", "src/mcp-ui/view/account.ts", "src/mcp-ui/view/receipt.ts", "src/mcp-ui/view/chart.ts", "src/mcp-ui/view/review.ts", "src/mcp-ui/view/connect.ts", "review-app/src/ui/receiptSummary.ts", "review-app/src/ui/receiptView.ts", "review-app/src/ui/chainReceiptView.ts", "review-app/src/ui/ui.ts", "review-app/src/ui/ptbDiagram.ts"]) {
+  for (const file of ["src/mcp-ui/view/lifecycle.ts", "src/mcp-ui/view/account.ts", "src/mcp-ui/view/receipt.ts", "src/mcp-ui/view/chart.ts", "src/mcp-ui/view/review.ts", "src/mcp-ui/view/connect.ts", "src/mcp-ui/view/settings.ts", "review-app/src/ui/receiptSummary.ts", "review-app/src/ui/receiptView.ts", "review-app/src/ui/chainReceiptView.ts", "review-app/src/ui/ui.ts", "review-app/src/ui/ptbDiagram.ts"]) {
     const source = readFileSync(join(process.cwd(), file), "utf8");
     expect(source, file).not.toMatch(/navigator\.clipboard|execCommand|copyTextButton|copyIconButton|copyButton|Copy Markdown|window\.prompt/);
   }
@@ -51,11 +33,21 @@ function targetsBareInteractiveElement(selector: string): boolean {
 }
 
 describe("shared-vs-page styling boundary (Plan B B1)", () => {
+  it("keeps the single Settings operation action scoped and depth motion optional", () => {
+    const ui = readCss("review-app/public/ui.css");
+    const row = ui.match(/\.settings-card \.settings-action-row\s*\{([^}]+)\}/)?.[1];
+    expect(row).toContain("display: grid");
+    expect(row).toContain("grid-template-columns: minmax(0, 1fr)");
+    const controls = ui.match(/\.settings-card \.settings-action-row > \.ui-btn\s*\{([^}]+)\}/)?.[1];
+    expect(controls).toContain("min-width: 0"); expect(controls).toContain("white-space: normal");
+    expect(ui).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*settings-page--forward[^}]*settings-page--back[^}]*animation: none/s);
+    expect(ui).toContain("translateX(16px)"); expect(ui).toContain("translateX(-16px)");
+    expect(selectorsOf(ui).filter((selector) => selector.includes("settings-action-row")))
+      .toEqual([".settings-card .settings-action-row", ".settings-card .settings-action-row > .ui-btn"]);
+  });
   it("the shared stylesheet owns the ui- atomic components", () => {
     const ui = readCss("review-app/public/ui.css");
     const atoms = [
-      ".ui-shell",
-      ".ui-header",
       ".ui-btn",
       ".ui-btn-row",
       ".ui-input",
@@ -67,8 +59,7 @@ describe("shared-vs-page styling boundary (Plan B B1)", () => {
       ".ui-ptb-graph",
       ".ui-accordion",
       ".ui-feedback",
-      ".ui-placeholder",
-      ".ui-overlay"
+      ".ui-placeholder"
     ];
     for (const atom of atoms) {
       expect(ui, `ui.css declares ${atom}`).toContain(atom);
@@ -79,8 +70,7 @@ describe("shared-vs-page styling boundary (Plan B B1)", () => {
   const migratedPageCss = [
     "review-app/src/account.css",
     "src/mcp-ui/view/workflow.css",
-    "src/mcp-ui/view/style.css",
-    "review-app/src/settings.css"
+    "src/mcp-ui/view/style.css"
   ];
 
   it("migrated page stylesheets declare no ui- class rule and no bare interactive-element rule", () => {

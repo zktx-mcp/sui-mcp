@@ -43,7 +43,7 @@ Source-checkout scripts are not packaged product commands, MCP tools, review-tim
 | Live Sui sent-function activity summary | `read.summarize_sui_function_activity_scan` | Implemented | Summarizes bounded sent-function rows. Not P&L, route recommendation, or signing readiness. |
 | Stored Sui activity summary | `read.summarize_sui_account_activity` | Implemented | Summarizes stored normalized Sui activity facts, including stored Move call, balance change, object/event, gas, execution error details, and optional protocol activity labels when evidence is available. |
 | Stored account asset timeline | `read.get_account_asset_timeline` | Implemented | Builds stored local account asset net-flow bars and optional DeepBook USDC token-denominated candle references. Not held balances, complete wallet history, USD value, P&L, cost basis, route advice, transaction building, or signing readiness. |
-| Local settings | `settings.create_local_settings_session`, `settings.get_local_settings` | Implemented | MCP creates or reads local settings sessions. Settings mutations happen in the local settings page after token validation and apply after MCP server restart when they affect the endpoint. |
+| Local settings | `settings.create_local_settings_session`, `settings.get_local_settings` | Implemented | MCP opens an internal Settings card or reads settings. App-only preparation/confirmation owns changes, files and explicit connection-service recovery. Stored endpoints apply after all participating apps restart. |
 | Release package check | `npm run release:check` | Maintainer, source checkout | Verifies metadata, tests/build, tarball assets/licenses and installed MCP/Settings startup. Requires network and loopback access; no wallet pairing, signing or publishing. |
 | Mainnet read smoke | `npm run smoke:mainnet` | Manual | Runs selected mainnet read paths from built `dist/`. Build first. Not part of CI or `release:check`; see notes below. |
 | Sui GraphQL function filter probe | `npm exec -- tsx scripts/sui-graphql-function-filter-probe.ts [--endpoint <mainnet-graphql-url>] [--sample-size <1-50>] [--timeout-ms <ms>]` | Manual, source evidence only | Runs a read-only Sui mainnet GraphQL source-shape probe for function-filter diagnostics; see notes below. |
@@ -64,9 +64,9 @@ is supplied; the actual mainnet checks remain enabled.
 The command checks metadata, types, tests, builds, package contents and licenses,
 then launches the installed package through stdio MCP with a new data directory
 and an independent port. It reads the registered tools and resources, creates a
-Settings session only in that temporary database, and checks the Settings HTML,
-assets and authenticated status. A scoped test card verifies
-that restart input is rejected and opening manage does not pair. The check
+Settings card only in that temporary database, and checks the six internal
+HTML resources, app-only tools, scoped status and retired-route rejection. A scoped test card verifies
+that Connect rejects retired restart input and opening manage does not pair. The check
 verifies the isolated SDK retains exclusive storage ownership until shutdown. It waits
 for process termination before removing its installation. A termination failure preserves the temporary files for cleanup
 after the process stops. It does not pair, sign, submit, publish, or mutate the
@@ -262,7 +262,7 @@ It is not an MCP tool, not a CI check, not packaged product functionality, not r
 - Local replay output is debug evidence only. The utility is not an MCP tool, review-time simulation, wallet authorization, signing readiness, or onchain transaction submission/execution.
 - When a review activity output has `lowSampleWarning: true`, report raw counts and avoid inferring behavior patterns.
 - For review activity list output, `dataScope.recordCount` is the full matching local review count. The returned `activities` array can be shorter when `truncated.activities: true`.
-- Local settings page actions mutate local settings or logical local data only. They do not execute transactions, sign, or create custody. MCP settings tools create a settings page session or read current settings.
+- Settings card actions require scoped permission and explicit confirmation. They change local settings/data or recover the connection service without authorizing a new transaction, signing or custody. Ordinary MCP opens the card or reads settings; app-only file transfer never exposes raw backup bytes to the model.
 
 ### Optional account-bound review smoke
 

@@ -19,9 +19,23 @@ an explicit retry even if the other connection later ends. If multiple valid con
 review preparation or signing. The Connect card shows each exact target for
 user-confirmed disconnection. After recorded disconnections leave one valid
 connection and no pending connection operation, that connection becomes usable;
-with none remaining, a new pairing is allowed. Terminal history alone does not
+with no recorded or SDK-present connection and no pending operation, a new pairing is allowed. Terminal history alone does not
 block it. A failed disconnect remains unconfirmed in the wallet app; its SDK
 session cannot revive the failed product record.
+The current SDK snapshot also gates pairing and account use. A known failed or
+disconnected record whose SDK session remains present is a disconnect target
+on a new card, not a usable wallet. `manageableConnectionIds` identifies those
+exact targets and ordinary connected targets, including expired records.
+An unmapped SDK session in a published available run sets
+`connectionReconciliationRequired: true` after pending registration/cleanup
+ends. An initializing or state_sync memory snapshot does not establish this
+diagnosis, and an absent flag does not prove session absence. Pairing, account use, preparation and signing
+remain blocked. Remove the retained connection in the wallet app, then confirm
+its absence through the current connection service. Settings/Troubleshooting
+can explicitly restart the service to inspect it again, but restarting never
+promotes an unrecorded or failed session into a usable connection. The card does
+not invent a connection ID or report physical SDK failure.
+The SDK's availability and a recorded terminal outcome alone do not prove absence.
 
 The backend validates accounts, Sui mainnet namespace, methods and expiry before
 recording a connection. A single wallet-approved account can become read context
@@ -80,14 +94,21 @@ stored results. Normal startup is shown as initialization, not as a wallet
 rejection. No implicit asset account is offered until the current service run
 confirms a usable connection.
 
-There is no card or Settings control for restarting the connection service.
-If the service stops or a disconnection remains unresponsive, fully quit all
-apps using Sui MCP, then reopen them. Closing a non-owning app or only a
-window does not stop the shared backend; another open client may take over.
-Confirm the new service is available before starting a new wallet operation.
-This does not guarantee that a relay responds or that a connection is removed
-in your wallet app. Multiple saved connections are resolved through their
-individual Disconnect controls, not by assuming an app restart clears them.
+Settings owns explicit connection-service restart. Open its Troubleshooting
+section, inspect the current run and affected requests, then confirm the
+restart. Connect manages connections/approved addresses and retains individual
+Disconnect controls for conflicting saved sessions; it does not own global
+service controls. A restart waits for old child exit, new run reservation and
+complete ready observation. Unsubmitted signing authority is revoked at
+admission; late signatures cannot submit. Already submitted transactions keep
+their original digest and observation. A new explicit Settings operation may
+supersede a still-pending startup without erasing a known failure.
+
+Restart completion does not confirm an interrupted disconnect or remove a
+remote session. Check retained connections in the wallet app. If Settings or
+the parent is unavailable, fully quit all apps using Sui MCP and reopen them;
+closing a peer/window can leave the owner running. Full app restart, rather
+than child restart, applies stored endpoints and installation changes.
 
 A new owner records interrupted connection approval as stopped and unconfirmed
 disconnection as failed. It does not repeat either request or restore their

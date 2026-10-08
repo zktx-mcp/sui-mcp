@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { walletWorkflowFixture, deferred } from "./fixtures/walletWorkflow.js";
 import { workflowViewSchema, reviewWalletChoices } from "../src/core/session/workflowView.js";
@@ -8,6 +9,23 @@ import type { WalletSession } from "../src/core/session/walletConnection.js";
 const fixtures: Awaited<ReturnType<typeof walletWorkflowFixture>>[] = [];
 afterEach(() => { for (const f of fixtures.splice(0)) f.close(); });
 async function fixture() { const f = await walletWorkflowFixture(); fixtures.push(f); return f; }
+
+it.each(["missing", "stale_run"] as const)("does not confirm an unconfirmed snapshot reader input (%s)", async (kind) => {
+  const f = await fixture(); await f.approve();
+  const snapshot = f.runtime.snapshot()!;
+  expect(f.run(() => f.records.readConnectionFacts(f.now())).connectionPresence.confirmed).toBe(true);
+  // This is a private reader contract input, not a claim that an available
+  // product runtime publishes a malformed or missing snapshot.
+  const getter = vi.spyOn(f.runtime, "snapshot").mockReturnValue(kind === "missing" ? undefined : { ...snapshot, runId: randomUUID() });
+  try {
+    const facts = f.run(() => f.records.readConnectionFacts(f.now()));
+    expect(facts.evaluatedAt).toBe(f.now().toISOString());
+    expect(facts.connectionPresence).toEqual({ confirmed: false, connections: [], unrecorded: false, pendingConnectionIds: [] });
+    expect(facts.activeAccountConnectionId).toBe(f.run(() => f.records.connections()[0]!.connection.connectionId));
+  } finally { getter.mockRestore(); }
+  expect(f.run(() => f.records.readConnectionFacts(f.now())).connectionPresence.confirmed).toBe(true);
+  expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+});
 async function storedConnections(count: number, previousOwner = false, selection?: "selected" | "cleared") {
   const f = await fixture();
   // These approved sessions are an external input, not new pairing admissions.
@@ -31,7 +49,7 @@ async function storedConnections(count: number, previousOwner = false, selection
   // never to an ordinary command-time session check.
   if (previousOwner) f.run(() => f.records.applyWalletObservation(f.runtime.snapshot()!, undefined, true));
   const manage = () => f.run(() => f.cards.create("connect", { intent: "manage" }));
-  return { f, saved, manage };
+  return { f, saved, manage, removeSession(topic: string) { sessions = sessions.filter((item) => item.topic !== topic); f.observe(); } };
 }
 
 it.each([false, true])("resolves all stored connections by exact disconnect, including prior owner=%s", async (previousOwner) => {
@@ -42,7 +60,7 @@ it.each([false, true])("resolves all stored connections by exact disconnect, inc
   expect(initial.connectionConflict).toEqual({ reason: "multiple_connections", connectionIds: saved.map((r) => r.connection.connectionId).sort() });
   expect(initial.allowedActions).toContain("disconnect");
   for (const action of ["connect", "use_account", "restart_wallet_service"]) expect(initial.allowedActions).not.toContain(action);
-  expect(f.run(() => f.workflow.readConnectionContext()).assetReadAccount).toEqual({ status: "address_required" });
+  expect(f.run(() => f.workflow.reconcileConnectionContext()).assetReadAccount).toEqual({ status: "address_required" });
   expect((await f.act(card, { action: "use_account", connectionId: saved[0]!.connection.connectionId, account: f.account })).error?.code).toBe("card_conflict");
   for (let index = 0; index < saved.length; index++) {
     card = await manage();
@@ -78,7 +96,7 @@ it("keeps manual manage pairing distinct from automatic connect and rejects reti
 });
 
 it("rejects an old confirmation after another card admits a conflicting-target disconnect", async () => {
-  const { f, saved, manage } = await storedConnections(2);
+  const { f, saved, manage, removeSession } = await storedConnections(2);
   const a = await manage(), b = await manage(), pending = deferred<void>();
   vi.mocked(f.transport.disconnect).mockImplementationOnce(() => pending.promise);
   expect((await f.act(a, { action: "disconnect", connectionId: saved[0]!.connection.connectionId })).error).toBeUndefined();
@@ -89,8 +107,10 @@ it("rejects an old confirmation after another card admits a conflicting-target d
   await vi.waitFor(() => expect(f.run(() => f.records.connection(saved[0]!.connection.connectionId)?.sdkPending)).toBe(false));
   expect(f.run(() => f.records.connection(saved[0]!.connection.connectionId)?.connection.status)).toBe("failed");
   f.observe();
-  expect(workflowViewSchema.parse((await manage()).snapshot.data).connectionConflict).toBeUndefined();
+  expect(workflowViewSchema.parse((await manage()).snapshot.data).connectionConflict?.connectionIds).toEqual(saved.map((r) => r.connection.connectionId).sort());
   expect(f.run(() => f.records.connection(saved[0]!.connection.connectionId)?.connection.status)).toBe("failed");
+  removeSession(saved[0]!.topic!);
+  expect(workflowViewSchema.parse((await manage()).snapshot.data).connectionConflict).toBeUndefined();
 });
 
 it("rolls back conflict-target admission when publishing the new choices fails", async () => {
@@ -111,14 +131,14 @@ it.each([true, false])("qualifies a saved same-address selection by its original
   // data was opened by this version. The address alone cannot choose a session.
   const selected = saved[0]!.connection, other = saved[1]!.connection;
   await f.run(() => f.activity.setActiveAccount(f.account, "wallet_connection", f.now(), { id: selected.connectionId }));
-  expect(f.run(() => f.workflow.readConnectionContext()).assetReadAccount.status).toBe("address_required");
+  expect(f.run(() => f.workflow.reconcileConnectionContext()).assetReadAccount.status).toBe("address_required");
   const removed = removeSelected ? selected : other, remaining = removeSelected ? other : selected;
   expect((await f.act(await manage(), { action: "disconnect", connectionId: removed.connectionId })).error).toBeUndefined();
   await vi.waitFor(() => expect(f.run(() => f.records.connection(removed.connectionId)?.sdkPending)).toBe(false));
   const card = await manage(), view = workflowViewSchema.parse(card.snapshot.data);
   expect(view.usableConnectionId).toBe(remaining.connectionId);
   expect(view.assetReadAccount).toEqual(removeSelected ? { status: "address_required" } : { status: "available", account: f.account });
-  expect(f.run(() => f.workflow.readConnectionContext()).assetReadAccount).toEqual(view.assetReadAccount);
+  expect(f.run(() => f.workflow.reconcileConnectionContext()).assetReadAccount).toEqual(view.assetReadAccount);
   expect(await f.run(() => f.activity.getActiveAccount())).toMatchObject({ address: f.account, walletId: selected.connectionId });
   const { session } = await f.run(() => f.sessions.createReviewSession([f.plan], f.now()));
   const review = await f.run(() => f.cards.create("review", { reviewSessionId: session.id }));
@@ -138,17 +158,17 @@ it.each(["cleared", "missing_source", "different_source"] as const)("requires ex
   if (kind === "cleared") await f.run(() => f.activity.clearActiveAccount(f.now()));
   else await f.run(() => f.activity.setActiveAccount(f.account, "wallet_connection", f.now(), kind === "missing_source" ? undefined : { id: "historical-connection" }));
   const before = await f.run(() => f.activity.getActiveAccount());
-  for (let i = 0; i < 2; i++) expect(f.run(() => f.workflow.readConnectionContext()).assetReadAccount).toEqual({ status: "address_required" });
+  for (let i = 0; i < 2; i++) expect(f.run(() => f.workflow.reconcileConnectionContext()).assetReadAccount).toEqual({ status: "address_required" });
   expect(await f.run(() => f.activity.getActiveAccount())).toEqual(before);
   const card = await f.run(() => f.cards.create("connect", { intent: "manage" }));
   expect(workflowViewSchema.parse(card.snapshot.data)).toMatchObject({ usableConnectionId: connection.connectionId, assetReadAccount: { status: "address_required" } });
   expect((await f.act(card, { action: "use_account", connectionId: connection.connectionId, account: f.account })).error).toBeUndefined();
-  expect(f.run(() => f.workflow.readConnectionContext()).assetReadAccount).toEqual({ status: "available", account: f.account });
+  expect(f.run(() => f.workflow.reconcileConnectionContext()).assetReadAccount).toEqual({ status: "available", account: f.account });
   expect(f.connect).toHaveBeenCalledOnce(); expect(f.sign).not.toHaveBeenCalled();
 });
 
-it.each([-1, 0, 1])("uses the backend expiry boundary for every published choice (offset=%s)", async (offset) => {
-  const { f, saved, manage } = await storedConnections(2);
+it.each([-1, 0, 1])("keeps SDK occupancy separate from backend expiry for every published choice (offset=%s)", async (offset) => {
+  const { f, saved, manage, removeSession } = await storedConnections(2);
   const selected = saved[0]!.connection, expiring = saved[1]!.connection;
   await f.run(() => f.activity.setActiveAccount(f.account, "wallet_connection", f.now(), { id: selected.connectionId }));
   const expiry = f.now().getTime() + 1000;
@@ -157,18 +177,32 @@ it.each([-1, 0, 1])("uses the backend expiry boundary for every published choice
   const view = workflowViewSchema.parse((await manage()).snapshot.data);
   expect(f.run(() => f.records.connection(expiring.connectionId)?.connection.status)).toBe("connected");
   const { session } = await f.run(() => f.sessions.createReviewSession([f.plan], f.now()));
-  const review = workflowViewSchema.parse((await f.run(() => f.cards.create("review", { reviewSessionId: session.id }))).snapshot.data);
-  if (offset < 0) {
-    expect(view.connectionConflict?.connectionIds).toHaveLength(2);
-    expect(view.usableConnectionId).toBeUndefined(); expect(review.automaticAction).toBeUndefined();
-  } else {
-    expect(view.connectionConflict).toBeUndefined(); expect(view.usableConnectionId).toBe(selected.connectionId);
-    expect(view.assetReadAccount).toEqual({ status: "available", account: f.account });
-    expect(reviewWalletChoices(review, f.account).map((item) => item.connectionId)).toEqual([selected.connectionId]);
-    expect(review.automaticAction).toMatchObject({ action: "prepare_review", connectionId: selected.connectionId });
-  }
-  expect(f.run(() => f.workflow.readConnectionContext()).assetReadAccount).toEqual(view.assetReadAccount);
+  const reviewCard = await f.run(() => f.cards.create("review", { reviewSessionId: session.id }));
+  const review = workflowViewSchema.parse(reviewCard.snapshot.data);
+  expect(view.connectionConflict?.connectionIds).toHaveLength(2);
+  expect(view.usableConnectionId).toBeUndefined(); expect(review.automaticAction).toBeUndefined();
+  expect(f.run(() => f.workflow.reconcileConnectionContext()).assetReadAccount).toEqual(view.assetReadAccount);
+  // Expiry does not contradict the still-present external SDK session. A
+  // separately seeded absence observation releases that occupied slot.
+  removeSession(saved[1]!.topic!);
+  const single = workflowViewSchema.parse((await manage()).snapshot.data);
+  const resumed = workflowViewSchema.parse((await f.read(reviewCard)).snapshot.data);
+  expect(single.connectionConflict).toBeUndefined(); expect(single.usableConnectionId).toBe(selected.connectionId);
+  expect(single.assetReadAccount).toEqual({ status: "available", account: f.account });
+  expect(reviewWalletChoices(resumed, f.account).map((item) => item.connectionId)).toEqual([selected.connectionId]);
+  expect(resumed.automaticAction).toMatchObject({ action: "prepare_review", connectionId: selected.connectionId });
   expect(f.transport.disconnect).not.toHaveBeenCalled(); expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+});
+
+it("does not extend SDK session expiry using a longer recorded lifetime", async () => {
+  const f = await fixture(), { connection } = await f.approve();
+  f.run(() => f.records.updateConnection(connection.connectionId, { expiresAt: new Date(Date.parse(connection.expiresAt) + 60_000).toISOString() }, f.now()));
+  f.advance(Date.parse(connection.expiresAt) - f.now().getTime());
+  const card = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+  expect(workflowViewSchema.parse(card.snapshot.data)).toMatchObject({ manageableConnectionIds: [connection.connectionId],
+    allowedActions: ["cancel", "disconnect"], assetReadAccount: { status: "address_required" } });
+  expect(workflowViewSchema.parse(card.snapshot.data).usableConnectionId).toBeUndefined();
+  expect(f.connect).toHaveBeenCalledOnce(); expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
 });
 
 it("keeps an expired pending disconnect locked until its own outcome is recorded", async () => {
@@ -183,6 +217,8 @@ it("keeps an expired pending disconnect locked until its own outcome is recorded
   held.reject(new Error("Fixture remote removal was not confirmed"));
   await vi.waitFor(() => expect(f.run(() => f.records.connection(connection.connectionId)?.sdkPending)).toBe(false));
   expect(f.run(() => f.records.connection(connection.connectionId)?.connection.status)).toBe("failed");
+  expect(workflowViewSchema.parse((await manage()).snapshot.data).allowedActions).not.toContain("connect");
+  f.notify();
   expect(workflowViewSchema.parse((await manage()).snapshot.data).allowedActions).toContain("connect");
   expect(f.transport.disconnect).toHaveBeenCalledOnce();
 });
@@ -222,7 +258,7 @@ it.each(["clear", "source_change"] as const)("does not change an admitted transa
   const request = f.run(() => f.records.currentRequest(review.session.id))!;
   if (change === "clear") await f.run(() => f.activity.clearActiveAccount(f.now()));
   else await f.run(() => f.activity.setActiveAccount(f.account, "wallet_connection", f.now(), { id: "different-source" }));
-  expect(f.run(() => f.workflow.readConnectionContext()).assetReadAccount).toEqual({ status: "address_required" });
+  expect(f.run(() => f.workflow.reconcileConnectionContext()).assetReadAccount).toEqual({ status: "address_required" });
   expect(f.run(() => f.records.authority(request.attemptId)?.can_submit)).toBe(1);
   held.resolve();
   await vi.waitFor(() => expect(f.run(() => f.records.request(request.attemptId)?.requestStatus)).toBe("completed"));

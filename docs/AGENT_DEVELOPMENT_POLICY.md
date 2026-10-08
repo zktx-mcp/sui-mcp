@@ -21,9 +21,10 @@ Target repository structure:
   protocol support must be added through adapter contracts rather than a
   custom-only product path.
 - `src/mcp/`: MCP server and tool definitions.
-- `src/review-server/`: local review HTTP server and session APIs.
-- `review-app/`: the Settings page and shared display helpers/styles.
-- `src/mcp-ui/`: internal Account, Receipt, Chart, Connect and Review cards, their
+- `src/review-server/`: loopback HTTP routing and Host/Origin checks; no public
+  browser page or Settings mutation API.
+- `review-app/`: shared card display helpers/styles; no external Settings page.
+- `src/mcp-ui/`: internal Account, Receipt, Chart, Connect, Review and Settings cards, their
   common lifecycle and view code.
 - `src/runtime/shared/`: authenticated server ownership and MCP forwarding.
 - `registry/`: local policy, allowlists, aliases, and generated mainnet metadata.
@@ -517,10 +518,11 @@ other boundaries, define the equivalent negative combinations before editing.
   sessions and return internal cards, but model calls must not authorize
   signing or execution. Scoped app-only actions admit an exact user selection;
   the backend performs wallet I/O and verifies each resulting signature.
-- The local settings control panel is a review-server frontend mutator. MCP may
-  create a settings session URL and read current settings, but settings
-  mutations must happen through the local settings page after Host/Origin checks
-  and settings-token validation.
+- Settings uses an internal card. Ordinary MCP may create that card or read
+  settings. Only scoped app-only input with current card/operation/revision and
+  explicit confirmation may apply a local change or restart the connection
+  service. Shared HTTP Host/Origin checks and private transport authentication
+  remain separate boundaries; no Settings URL or HTTP mutation fallback exists.
 
 ## Network Policy
 
@@ -635,7 +637,7 @@ only in host UI metadata. Reads never create approval, pairing or a signature
 request. Frame recreation is not an input transition. Its state read may
 reconcile existing deadlines and wallet records without starting a new
 operation. Only the backend owns admission, request deadlines and chain
-observation. Settings page tokens remain in URL fragments and authenticated HTTP headers, never query strings or logs.
+observation. Settings permissions remain in UI metadata and scoped app-only inputs, never URLs, model responses or logs. File bytes use only app-only file-transfer inputs/UI metadata. Same-operation cleanup and verification of an existing backup may resume without reapplying data, creating a backup or restarting the SDK.
 
 ## Utility Script Rule
 
@@ -668,8 +670,8 @@ observation. Settings page tokens remain in URL fragments and authenticated HTTP
 - Validate tool inputs and outputs at the MCP server boundary.
 - Review whether tool authority expanded whenever a tool schema or description
   changes.
-- Settings tools are session-gateway tools. They may create a local settings
-  page session or read current settings. They must not mutate settings directly,
+- Settings tools are card gateways. They may create an internal Settings card
+  or read current settings. They must not mutate settings directly,
   execute transactions, sign, create custody, or produce signing material.
 - For stdio MCP servers, stdout is reserved for valid MCP JSON-RPC messages.
   Send logs to stderr or a file. Do not use `console.log` in stdio server code.
@@ -747,8 +749,10 @@ For API review work, block or fix the change when:
 - Bind the local review server to `127.0.0.1`.
 - Use a dynamic port unless a fixed port is explicitly required.
 - Implement Host and Origin checks in the review server itself.
-- Do not treat Host or Origin checks as authentication. Settings APIs must validate their session token; internal app actions
-  must validate their scoped UI permission and stored target/revision.
+- Do not treat Host or Origin checks as authentication. Private MCP/control
+  routes require their runtime credential; internal app actions must validate
+  their scoped UI permission and stored target/revision. Settings has no public
+  URL or HTTP mutation fallback.
 - Do not use MCP SDK host validation helpers as a substitute for review server
   authentication.
 

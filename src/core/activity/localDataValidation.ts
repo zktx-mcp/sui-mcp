@@ -1,6 +1,5 @@
 import { transactionRequestStatusSchema, transactionRequestSchema } from "../session/transactionRequest.js";
 import { REVIEW_TRANSITION_EVENTS } from "./sqliteActivityStoreRows.js";
-import { DB_USER_VERSION } from "./schemaVersion.js";
 import { z, type ZodType } from "zod";
 import type { AdapterLifecycleValidator } from "../action/adapterLifecycleValidation.js";
 import { assertNoForbiddenMcpFields } from "../action/forbiddenFields.js";
@@ -182,7 +181,6 @@ const payloadSchema: z.ZodType<LocalDataPayload> = z.object({
 }).strict();
 
 const envelopeSchema: z.ZodType<LocalDataEnvelope> = z.object({
-  schemaVersion: z.literal(DB_USER_VERSION),
   format: z.literal(LOCAL_DATA_EXPORT_FORMAT),
   network: z.literal(LOCAL_DATA_NETWORK),
   exportedAt: isoTimestamp,
@@ -476,7 +474,7 @@ export function activeAccountChange(
   return incomingAccount === null ? "cleared" : "set";
 }
 
-function activeAccountAddress(
+export function activeAccountAddress(
   accounts: AccountExportRow[],
   context: ActiveAccountContextExportRow[]
 ): string | null {

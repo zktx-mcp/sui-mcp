@@ -311,7 +311,7 @@ For a connected-account-only read, use `session.get_interaction_status` to disti
 1. `account.get_active_account` reports the stored selection, with `source` and `setAt`. For current assets without a user-provided address, use `session.get_interaction_status.assetReadAccount` to check whether that selection is a usable default. If not, request an address only for tools that accept `account`; connected-account-only tools require the connection/account-selection flow. Do not infer current connection from the stored selection.
 2. An explicit connect/reconnect/disconnect/account replacement request opens an internal
    Connect card with `session.create_wallet_connection`: use `intent: connect` for requested pairing, `intent: disconnect` for requested disconnection, and `intent: manage` for inspection or account selection. The model must not call app-only actions on the user's behalf.
-For "disconnect my wallet", when the wallet service is available and the target is connected, open `session.create_wallet_connection` with `intent: disconnect`. For one connected target the card shows Confirm disconnect or Back directly; Back only returns to the connection view; it does not submit Cancel review or disconnect. The card starts no pairing. Do not substitute `account.clear_active_account`, claim disconnection is unsupported merely because there is no direct model-facing disconnect tool, or equate disconnection with revoking onchain permissions. If disconnection is already pending, read or wait on that exact card instead of opening another operation.
+For "disconnect my wallet", when the wallet service is available and the target is connected, open `session.create_wallet_connection` with `intent: disconnect`. For one connected target the card shows Confirm disconnect or Back directly; Back only returns to the connection view; it does not submit Cancel review or disconnect. The card starts no pairing. Do not substitute the Settings action to clear the default read address, claim disconnection is unsupported merely because there is no direct model-facing disconnect tool, or equate disconnection with revoking onchain permissions. If disconnection is already pending, read or wait on that exact card instead of opening another operation.
 
 3. `session.get_wallet_connection` and `session.wait_wallet_connection` use the
    returned cardId. An unsubmitted card needs input; waiting does not create a
@@ -347,12 +347,28 @@ them. `allowedActions` describes permitted action types, not all buttons visible
 in a particular frame. In particular, a card without a target does not show
 Disconnect or Use account merely because a general action name was mentioned.
 
-There is no service-restart button in Connect or Settings. If the service is
-unavailable or disconnection remains unresponsive, explain the operational
-procedure in the setup guide: fully quit all apps using Sui MCP, then
-reopen them. Closing only a non-owning app or a window may leave the shared
-backend running. Do not kill processes or repeatedly send wallet commands for
-the user, and do not report restart success before the new service is observed.
+Connection-service recovery belongs to Settings. When the service is unavailable
+or a connection operation remains unresponsive, open
+`settings.create_local_settings_session` on the user's request and direct them
+to Troubleshooting. The user inspects the affected run/requests and explicitly
+confirms Restart connection service; do not call app-only actions for them.
+A new Settings card can explicitly supersede a startup still pending. Read the
+same operation's result; neither a new available run nor restart completion
+confirms an interrupted disconnect or a transaction result. Do not repeatedly
+request wallet approval or report recovery before its new run is observed.
+`manageableConnectionIds` names exact disconnect targets, not usable wallet
+choices. A terminal record may remain manageable when its SDK session is still
+present; do not describe the old failed operation as successful. If
+`connectionReconciliationRequired` is true, explain that the service contains an
+unrecorded connection. Ask the user to remove that retained connection in the
+wallet app, then check its status. Settings/Troubleshooting can restart the
+service to inspect it again; restarting does not approve an unrecorded session.
+Do not infer a free pairing slot from a failed or expired record.
+
+If the parent or Settings itself cannot be reached, explain the full app exit
+procedure in the setup guide. All participating apps must quit; closing a peer
+or window can leave the owner alive. Full app restart is also required for
+stored endpoint or installation changes. Do not kill another app's processes.
 
 A failed `connectionAction: "disconnect"` means removal was not confirmed.
 Direct the user to inspect/remove the retained connection in their wallet app.
@@ -468,9 +484,9 @@ For `read.list_review_activity`, `dataScope.recordCount` is the full matching lo
 
 For `read.get_review_session_detail`, transition rows with `isNoOp: true` are repeated lifecycle observations where the stored status did not change. Mention them only as audit details; do not count them as extra funnel progress.
 
-For local settings or local data management, call `settings.create_local_settings_session` and tell the user to open the returned settings URL in the same machine's system browser.
+For local settings, local records or connection-service recovery, call `settings.create_local_settings_session` to open the internal Settings card. Its name is unchanged; no external URL is returned. Explain Address for viewing assets, Local records, Troubleshooting or Advanced settings as needed and leave selection/confirmation to the user.
 
-Do not call MCP tools to mutate settings directly; direct settings mutator tools are not exposed. Do not call clearing active account a wallet disconnect. Endpoint changes apply after MCP server restart.
+Ordinary MCP tools never apply a Settings change. Do not call `ui.act_card` or `ui.read_settings_file` as model work. Never request/paste raw backup bytes or card permissions in chat. Clear default address only changes read context, not wallet connections or admitted transactions. Endpoint changes require quitting/reopening all apps; a connection-service restart does not apply them. Report operation result, temporary-file cleanup and Host download acknowledgment as separate facts. A saved result is not proof that the Host saved a downloaded file. For validation refusal, let the user correct input or choose another file and prepare a new confirmation; reading or returning to a frame never applies it.
 
 ## User Vocabulary
 

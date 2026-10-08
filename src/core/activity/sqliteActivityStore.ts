@@ -22,7 +22,6 @@ import { sameHandle, type LocalTransactionMaterialStore } from "../session/trans
 import {
   SqliteSessionRecordStore,
   SqlitePrivateReviewArtifactStore,
-  createSqliteSettingsRecordStore,
   sessionFromLiveReviewSessionRow,
   insertLiveReviewSessionRow,
   updateLiveReviewSessionRow,
@@ -30,8 +29,7 @@ import {
 } from "../session/sqliteSessionStore.js";
 import type { SessionRecordStore } from "../session/sessionRecordStore.js";
 import type { PrivateReviewArtifactStore } from "../session/privateReviewArtifacts.js";
-import type { KeyedRecordStore } from "../session/keyedRecordStore.js";
-import type { SettingsSession } from "../session/settingsSession.js";
+import { SqliteSettingsWorkflowStore } from "../session/sqliteSettingsWorkflowStore.js";
 import type {
   CoinMetadataCache,
   CoinMetadataCacheLookup,
@@ -235,7 +233,9 @@ export class SqliteActivityStore implements ActivityStore {
     return this.getActiveAccountSync();
   }
 
-  async clearActiveAccount(now = new Date()): Promise<void> {
+  async clearActiveAccount(now = new Date()): Promise<void> { this.clearActiveAccountSync(now); }
+
+  clearActiveAccountSync(now = new Date()): void {
     this.db
       .prepare(
         `INSERT INTO active_account_context (id, account_id, source, set_at)
@@ -932,16 +932,21 @@ export class SqliteActivityStore implements ActivityStore {
     return new SqliteCardRecordStore(this.db);
   }
 
+  createSettingsWorkflowStore(ownerId: string, now: () => Date = () => new Date()): SqliteSettingsWorkflowStore {
+    return new SqliteSettingsWorkflowStore(this.db, ownerId, now);
+  }
+
   createPrivateReviewArtifactStore(): PrivateReviewArtifactStore {
     return new SqlitePrivateReviewArtifactStore(this.db);
   }
 
-  createWalletWorkflowStore(ownerId: string, clock: () => Date = () => new Date()): SqliteWalletWorkflowStore {
+  createWalletWorkflowStore(ownerId: string, clock: () => Date = () => new Date(),
+    readSdkSnapshot: () => import("../session/walletRuntime.js").WalletSnapshot | undefined = () => undefined): SqliteWalletWorkflowStore {
     const records: SqliteWalletWorkflowStore = new SqliteWalletWorkflowStore(this.db, ownerId,
       (address, id, name, now) => this.setActiveAccountSync(address, "wallet_connection", now, { id, name }),
       clock, this.createTransactionMaterialStore(),
-      (input, at) => this.evaluateWorkflowState(input, records, ownerId, at === undefined ? clock : () => at),
-      () => this.getActiveAccountSync());
+      (input, at) => this.reconcileWorkflowState(input, records, ownerId, at === undefined ? clock : () => at),
+      () => this.getActiveAccountSync(), readSdkSnapshot);
     return records;
   }
 
@@ -974,20 +979,27 @@ export class SqliteActivityStore implements ActivityStore {
       status: next.status, reason: "private_review_artifacts_refresh_required", at: now.toISOString() }] };
   }
 
-  private evaluateWorkflowState(input: WorkflowEvaluationInput, records: SqliteWalletWorkflowStore,
+  private reconcileWorkflowState(input: WorkflowEvaluationInput, records: SqliteWalletWorkflowStore,
     ownerId: string, clock: () => Date): EvaluatedWorkflowState {
     return this.db.transaction(() => {
       const now = clock();
+      if (input.purpose !== "current_wallet" && input.purpose !== "review" ||
+          input.purpose === "review" && (!input.readTarget || !input.candidate)) {
+        throw new SessionStoreError("input_invalid", "An explicit workflow evaluation target is required.");
+      }
       const cards = this.createCardRecordStore();
       let record = input.expectedCard && records.currentCard(input.expectedCard);
-      const reviewId = record?.state.kind === "review" ? String(record.state.input.reviewSessionId) : input.reviewSessionId;
+      const reviewId = input.purpose === "review" ? input.reviewSessionId : undefined;
+      if (record && (input.purpose === "review" ? record.state.kind !== "review" || record.state.input.reviewSessionId !== reviewId : record.state.kind !== "connect")) {
+        throw new SessionStoreError("session_mismatch", "The workflow target does not match this card.");
+      }
       const target = reviewId ? records.reviewReadTarget(reviewId, record) : undefined;
-      if (input.readTarget && (!target || input.readTarget.reviewSessionId !== target.reviewSessionId ||
+      if (input.purpose === "review" && (!target || input.readTarget.reviewSessionId !== target.reviewSessionId ||
           input.readTarget.attemptId !== target.attemptId || !input.readTarget.walletDependent && target.walletDependent)) {
         throw new SessionStoreError("session_mismatch", "The review target changed while its state was being read. Check this review again.");
       }
       let evaluated: ReviewEvaluation | undefined;
-      if (reviewId) {
+      if (input.purpose === "review") {
         if (!input.candidate || input.candidate.session.id !== reviewId) throw new SessionStoreError("session_not_found", "The saved review is unavailable.");
         evaluated = this.finalizeReviewEvaluationAt(input.candidate, now);
         if (input.uiObservation && record?.scope === "review") records.markReviewOpened(reviewId, now);
@@ -1002,24 +1014,19 @@ export class SqliteActivityStore implements ActivityStore {
       const authority = request && records.authority(request.attemptId);
       const details = request?.execution && records.executionDetails(request.attemptId);
       const connection = record?.state.kind === "connect" && record.operationId ? records.connection(record.operationId) : undefined;
-      const storedAccount = this.getActiveAccountSync(), activeAccount = storedAccount?.address, targetAccount = session?.account ?? activeAccount;
-      const facts = { evaluatedAt: now.toISOString(), ownerId, record, session, request, authority,
+      const connectionFacts = records.readConnectionFacts(now), targetAccount = session?.account ?? connectionFacts.activeAccount;
+      const facts = { ...connectionFacts, ownerId, record, session, request, authority,
         hasReviewInput: !!session && session.status !== "expired" && Date.parse(session.expiresAt) > now.getTime() &&
           cards.hasReviewInput(session.id, ownerId, now),
-        walletAvailability: input.walletAvailability, walletObservation: input.walletObservation,
-        runtimeRecovery: record && records.walletRecovery(record), activeAccount, activeAccountConnectionId: storedAccount?.walletId,
+        walletAvailability: input.walletAvailability,
+        runtimeRecovery: record && records.walletRecovery(record),
         walletDependent: !target || target.walletDependent,
-        connections: records.connectionViews(),
         connection: connection ? records.connectionView(connection.connection) : undefined,
         boundReview: request && (record?.operationId || record?.scope === "review_manage") ? records.requestReview(request.attemptId) : undefined,
         busyForAccount: !!targetAccount && records.busyForAccount(targetAccount, now),
         receipt: details ? details.data : undefined, receiptDisplay: details ? details.receiptDisplay : undefined };
       return { ...facts, ...workflowEligibility(facts), events: evaluated?.events ?? [] };
     }).immediate();
-  }
-
-  createSettingsRecordStore(): KeyedRecordStore<SettingsSession> {
-    return createSqliteSettingsRecordStore(this.db);
   }
 
   private runLiveReviewSessionMutation(
@@ -1260,7 +1267,7 @@ export class SqliteActivityStore implements ActivityStore {
     };
   }
 
-  private getActiveAccountSync(): ActiveAccountRecord | undefined {
+  getActiveAccountSync(): ActiveAccountRecord | undefined {
     const row = this.db
       .prepare(
         `SELECT a.id AS account_id, a.sui_address AS address, c.source AS source, c.set_at AS set_at,

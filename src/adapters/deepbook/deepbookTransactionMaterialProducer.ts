@@ -248,9 +248,9 @@ export function createDeepbookSwapTransactionMaterialProducer(
       });
       const transaction = new Transaction();
       transaction.setSender(input.account);
-      // The DeepBook SDK reserves a 0.25 SUI gas budget by default, which
-      // blocks small wallets whose balance is close to the swap amount. A
-      // mainnet DeepBook swap costs well under this explicit 0.05 SUI budget.
+      // Set the product's explicit 0.05 SUI spending cap before the SDK's
+      // setGasBudgetIfNotSet fallback (0.25 SUI). This is not a cost estimate;
+      // funding and checks-enabled simulation must validate each transaction.
       transaction.setGasBudget(DEEPBOOK_SWAP_GAS_BUDGET_MIST);
       // input_coin fee mode swaps with an explicit zero DEEP coin; the Move
       // entry point then charges the taker fee in the source coin at the

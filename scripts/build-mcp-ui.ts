@@ -53,7 +53,7 @@ async function notices(moduleIds: string[]): Promise<string> {
 }
 const outDir = resolve(root, "dist/mcp-app");
 await mkdir(outDir, { recursive: true });
-for (const kind of ["account", "receipt", "chart", "connect", "review"]) {
+for (const kind of ["account", "receipt", "chart", "connect", "review", "settings"]) {
   // Assemble only after Vite has finalized CSS and dynamic-import helpers.
   // Moving chunks into HTML in generateBundle prevents later plugins from
   // processing them, even when the user plugin has enforce: "post".

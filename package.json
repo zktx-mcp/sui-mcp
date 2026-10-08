@@ -1,6 +1,6 @@
 {
   "name": "@zktx.io/sui-mcp",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "mcpName": "io.github.zktx-mcp/sui-mcp",
   "description": "Sui MCP is a local-first toolkit for helping AI applications and users inspect Sui DeFi actions before execution.",
   "license": "MIT",
@@ -39,7 +39,7 @@
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc -p tsconfig.build.json && vite build && tsx scripts/build-mcp-ui.ts",
+    "build": "npm run clean && tsc -p tsconfig.build.json && tsx scripts/build-mcp-ui.ts",
     "prepublishOnly": "npm run release:check",
     "release:check": "tsx scripts/release-check.ts",
     "smoke:mainnet": "node dist/runtime/smokeMainnetRead.js",
@@ -52,6 +52,7 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "@mysten/deepbook-v3": "1.3.6",
     "@mysten/sui": "2.17.0",
+    "@noble/hashes": "2.2.0",
     "@scure/bip39": "2.2.0",
     "@walletconnect/sign-client": "2.23.10",
     "@walletconnect/types": "2.23.10",

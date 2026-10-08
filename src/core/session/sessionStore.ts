@@ -49,7 +49,6 @@ import {
   InMemorySessionRecordStore,
   type SessionRecordStore
 } from "./sessionRecordStore.js";
-import type { KeyedRecordStore } from "./keyedRecordStore.js";
 import { isFinalSessionStatus } from "./status.js";
 import { parseSuiAddress } from "../suiAddress.js";
 import {
@@ -59,9 +58,7 @@ import {
   isLocalSessionExpired,
   tokenMatchesHash
 } from "./localSession.js";
-import type { SettingsSession } from "./settingsSession.js";
 import { SessionStoreError } from "./sessionErrors.js";
-import { SettingsSessionManager } from "./settingsSessions.js";
 
 type PrivateDerivedReviewFieldBinding = {
   field: "humanReadableReview" | "simulation";
@@ -109,11 +106,6 @@ export type CreatedReviewSession = {
   token: string;
 };
 
-export type CreatedSettingsSession = {
-  session: SettingsSession;
-  token: string;
-};
-
 export interface SessionStore {
   createReviewSession(plans: ActionPlan[], now?: Date): Promise<CreatedReviewSession>;
   getReviewSession(id: string, clock?: () => Date): Promise<ReviewSession | undefined>;
@@ -138,9 +130,6 @@ export interface SessionStore {
     account: string,
     now?: Date
   ): Promise<ValidatedReviewMaterial>;
-  createSettingsSession(now?: Date): Promise<CreatedSettingsSession>;
-  getSettingsSession(id: string, now?: Date): Promise<SettingsSession | undefined>;
-  validateSettingsToken(id: string, token: string, now?: Date): Promise<boolean>;
   invalidateAllLocalSessions(reason: string, now?: Date): Promise<void>;
 }
 
@@ -163,7 +152,6 @@ export type InMemorySessionStoreOptions = {
 export type LocalSessionStoreOptions = InMemorySessionStoreOptions & {
   sessions: SessionRecordStore;
   artifacts: PrivateReviewArtifactStore;
-  settingsStore?: KeyedRecordStore<SettingsSession>;
 };
 
 export { SessionStoreError } from "./sessionErrors.js";
@@ -190,7 +178,6 @@ export class LocalSessionStore implements SessionStore {
   private readonly sessions: SessionRecordStore;
   private readonly privateReviewArtifacts: PrivateReviewArtifactStore;
   private readonly ownerId: string;
-  private readonly settings: SettingsSessionManager;
   private readonly ttlMs: number;
   private readonly clock: () => Date;
   private readonly eventLog: EventLogSink;
@@ -208,11 +195,6 @@ export class LocalSessionStore implements SessionStore {
     this.privateReviewArtifacts = options.artifacts;
     this.ttlMs = options.ttlMs ?? DEFAULT_SESSION_TTL_MS;
     this.ownerId = options.ownerId ?? randomUUID();
-    this.settings = new SettingsSessionManager({
-      ttlMs: this.ttlMs,
-      appendEventLog: (record) => this.appendEventLog(record),
-      ...(options.settingsStore ? { recordStore: options.settingsStore } : {})
-    });
     this.eventLog = options.eventLog ?? new NullEventLogSink();
     this.activityStore = options.activityStore;
     this.transactionMaterialStore = options.transactionMaterialStore;
@@ -500,18 +482,6 @@ export class LocalSessionStore implements SessionStore {
     return session;
   }
 
-  async createSettingsSession(now = new Date()): Promise<CreatedSettingsSession> {
-    return this.settings.create(now);
-  }
-
-  async getSettingsSession(id: string, now = new Date()): Promise<SettingsSession | undefined> {
-    return this.settings.get(id, now);
-  }
-
-  async validateSettingsToken(id: string, token: string, now = new Date()): Promise<boolean> {
-    return this.settings.validateToken(id, token, now);
-  }
-
   async prepareReviewedTransaction(id: string, planId: string, account: string, now = this.clock()): Promise<ValidatedReviewMaterial> {
     const candidate = await this.inspectReview(id, now);
     if (!candidate) throw new SessionStoreError("session_not_found", "Review session is unavailable.");
@@ -534,7 +504,6 @@ export class LocalSessionStore implements SessionStore {
       this.deleteReviewSessionTransactionMaterials(id);
     }
     this.sessions.clear();
-    this.settings.clear();
     await this.appendEventLog({
       type: "local_sessions.invalidated",
       sessionId: "all",

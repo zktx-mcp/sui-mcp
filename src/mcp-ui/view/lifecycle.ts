@@ -2,7 +2,9 @@ import { App } from "@modelcontextprotocol/ext-apps";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { button } from "../../../review-app/src/ui/ui.js";
 import { automaticWorkflowActionSchema, workflowActionSchema, workflowViewSchema, reviewWalletChoices } from "../../core/session/workflowView.js";
-import { CARD_METADATA_KEY, CARD_DISPLAY_METADATA_KEY, WALLET_DISPLAY_METADATA_KEY, CARD_RESOURCE_PREFIX, CARD_TOOLS,
+import { settingsViewSchema, type SettingsDraft } from "../../core/session/settingsOperation.js";
+import { settingsUploadMessageBudget } from "../../core/session/settingsFileProtocol.js";
+import { CARD_METADATA_KEY, CARD_DISPLAY_METADATA_KEY, WALLET_DISPLAY_METADATA_KEY, SETTINGS_FILE_METADATA_KEY, settingsFileDisplaySchema, type SettingsFileDisplay, CARD_RESOURCE_PREFIX, CARD_TOOLS,
   cardReferenceSchema, cardSnapshotSchema, cardReceiptDisplaySchema, cardWalletDisplaySchema, cardInputRequiredSchema,
   type CardKind, type CardReference, type CardSnapshot, type CardReceiptDisplay, type CardWalletDisplay } from "../contracts.js";
 import "../../../review-app/public/ui.css";
@@ -19,7 +21,21 @@ export type CardContent = {
   displayRecovery?: () => CardDisplayRecovery | undefined;
   visibleConfirmation?: () => CardConfirmation | undefined;
 };
-export type CardViewContext = { automaticPaused: boolean; onDisplayChange?: () => void };
+export type SettingsViewTransport = {
+  act(input: Record<string, unknown>, fileTransfer?: boolean): Promise<CardSnapshot>;
+  readCurrent(): Promise<CardSnapshot>;
+  uploadChunkLimit(operationId: string, fileId: string): number;
+  setFileTransferActive(active: boolean): void;
+  readFile(input: { operationId: string; fileId: string; offset: number }): Promise<SettingsFileDisplay>;
+  canDownload(): boolean;
+  download(filename: string, base64: string): Promise<{ isError?: boolean | undefined }>;
+};
+type NonImportSettingsDraft = SettingsDraft & { kind: Exclude<SettingsDraft["kind"], "import_local_data"> };
+export type SettingsCommandProgress =
+  | { kind: "preparation_response"; cardId: string; operationId: string; draft: NonImportSettingsDraft }
+  | { kind: "backup_check_response"; cardId: string; operationId: string; fileId: string; action: "settings_prepare" | "settings_seal_upload" };
+export type CardViewContext = { automaticPaused: boolean; onDisplayChange?: () => void; settings?: SettingsViewTransport | undefined;
+  settingsCommandProgress?: SettingsCommandProgress | undefined };
 export type CardGuidanceContext = {
   confirmed: boolean; readOnly: boolean; recoveryNeeded: boolean;
   approvalUnresolved: boolean; automaticPaused: boolean;
@@ -42,6 +58,28 @@ export type CardRenderer = {
 };
 function object(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+function isNonImportSettingsDraft(draft: SettingsDraft): draft is NonImportSettingsDraft {
+  return draft.kind !== "import_local_data";
+}
+// View-only communication facts; backend preparation and permission stay separate.
+function settingsCommandProgress(basis: CardSnapshot, current: CardSnapshot, input: Record<string, unknown>): SettingsCommandProgress | undefined {
+  if (basis.kind !== "settings" || current.kind !== "settings" || basis.cardId !== current.cardId || current.state !== "ready") return undefined;
+  const before = settingsViewSchema.safeParse(basis.data), after = settingsViewSchema.safeParse(current.data);
+  if (!before.success || !after.success) return undefined;
+  const prior = before.data, next = after.data;
+  const draft = next.draft;
+  if (!draft || !prior.draft || prior.operationId !== next.operationId || input.operationId !== next.operationId ||
+      JSON.stringify(prior.draft) !== JSON.stringify(draft)) return undefined;
+  if (isNonImportSettingsDraft(draft)) {
+    return input.action === "settings_prepare" ? { kind: "preparation_response", cardId: current.cardId,
+      operationId: next.operationId, draft } : undefined;
+  }
+  const fileId = next.file?.fileId;
+  if (!fileId || !prior.file?.fileId || prior.file.fileId !== fileId ||
+      input.action !== "settings_prepare" && input.action !== "settings_seal_upload" ||
+      input.action === "settings_seal_upload" && input.fileId !== fileId) return undefined;
+  return { kind: "backup_check_response", cardId: current.cardId, operationId: next.operationId, fileId, action: input.action };
 }
 function unwrap(result: unknown, host: string | undefined): Record<string, unknown> {
   const record = object(result);
@@ -94,6 +132,7 @@ function responseParts(result: Record<string, unknown>) {
   const error = object(object(payload?.error)?.details);
   const value = inputRequired?.success ? undefined : payload?.ok === true ? object(payload.data)?.card ?? payload.data : error?.snapshot;
   const snapshot = value === undefined ? undefined : cardSnapshotSchema.parse(value);
+  if (snapshot?.kind === "settings") settingsViewSchema.parse(snapshot.data);
   const privateValue = object(result._meta)?.[CARD_DISPLAY_METADATA_KEY];
   const display = privateValue === undefined ? undefined : cardReceiptDisplaySchema.parse(privateValue);
   if (display && !matchingDisplay(snapshot, display)) {
@@ -121,6 +160,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   const app = new App({ name: "sui-mcp-card", version: __SUI_MCP_VERSION__ }, {}, { autoResize: true, strict: true });
   const lifetime = new AbortController();
   const business = kind === "connect" || kind === "review";
+  const settings = kind === "settings", interactive = business || settings;
+  let settingsFileTransfer = false;
 
   type Confirmation = { status: "unconfirmed" | "confirmed" } |
     { status: "needed"; afterRead: number; automatic: boolean } |
@@ -130,7 +171,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   type ReadFlight = { id: number; promise: Promise<ReadOutcome> };
   type CommandFlight = { input: Record<string, unknown>; basis: CardSnapshot; phase: "confirming" | "sending" };
   type Disposition = "active" | "observed" | "past";
-  type FailedCommand = { input: Record<string, unknown>; basis: CardSnapshot; message: string; delivery: "unknown" | "rejected";
+  type FailedCommand = { input: Record<string, unknown>; basis: CardSnapshot; message: string; delivery: "unknown" | "rejected"; data?: unknown;
     disposition: Disposition; retryRequired: boolean };
 
   let reference: CardReference | undefined, cardId: string | undefined;
@@ -222,6 +263,9 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     // this card's operation projection. Absence alone is not a terminal fact.
     const target = data.data.connections.find((item) => item.connectionId === input.connectionId);
     if (!target) return false;
+    if (input.action === "disconnect") return data.data.walletAvailability.status === "available" && !target.pendingAction &&
+      !data.data.manageableConnectionIds.includes(input.connectionId) &&
+      ["disconnected", "failed", "rejected", "stopped", "expired"].includes(target.status);
     return ["disconnected", "failed", "rejected", "stopped", "expired"].includes(target.status) ||
       input.action === "use_account" && target.status === "connected" && !target.accounts.includes(input.account);
   }
@@ -277,20 +321,28 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     const displayPending = displayedView?.pending?.() === true;
     const partialDisplayFailure = displayedView?.displayRecovery?.();
     const available = current && !ended && !displayError && !displayPending && !reviewPeriodElapsed && !!reference;
-    const inputEnabled = available && !commandFlight && (!business || !(reading && (activeFailure || retryRequired || paused)));
+    const inputEnabled = available && !commandFlight && !settingsFileTransfer && (!interactive || !(reading && (activeFailure || retryRequired || paused)));
     const automatic = automaticWorkflowActionSchema.safeParse(data?.automaticAction);
-    const observation = !!snapshot && (business ? data?.observe === true : snapshot.state === "running");
+    const observation = !!snapshot && (interactive ? data?.observe === true : snapshot.state === "running");
     const read = !!cardId && connected && !ended && !reading && visible &&
       (readRequested === "explicit" || confirmation.status !== "read_failed" &&
         (readRequested === "background" || confirmation.status === "needed" && confirmation.automatic));
     const auto = visible && available && !openingError && !reading && !readRequested && !commandFlight &&
       !retryRequired && !approvalUnresolved && !paused && business && automatic.success && permitted.includes(automatic.data.action)
       ? automatic.data : undefined;
+    const restore = object(data?.restoreCheck);
+    const settingsInputBlocked = settings && available && snapshot?.state === "ready" &&
+      !commandFlight && !settingsFileTransfer && !data?.result && data?.observe !== true &&
+      (restore?.status === "cannot_restore" && ["operation_busy", "wallet_request_unsettled"].includes(String(restore.reason)) ||
+        !permitted.includes("settings_select") || data?.phase === "prepared" && !permitted.includes("settings_confirm") ||
+        data?.phase === "draft" && object(data.draft)?.kind !== undefined && object(data.draft)?.kind !== "import_local_data" && !permitted.includes("settings_prepare"));
     let recover: "read" | "retry" | undefined;
     if (!ended && cardId) {
       if (confirmation.status === "read_failed" || openingError || confirmation.status === "unconfirmed") recover = "read";
       else if (confirmation.status === "needed") { if (!confirmation.automatic) recover = "read"; }
       else if (displayError || partialDisplayFailure) recover = "read";
+      else if (settings && ["pending", "failed"].includes(String(data?.temporaryFileCleanup))) recover = "read";
+      else if (settingsInputBlocked) recover = "read";
       else if (!reference) { if (snapshot?.state !== "closed" || displayError) recover = "read"; }
       else if (object(data?.progress)?.status === "unavailable") recover = "read";
       else if (object(data?.walletAvailability)?.status === "initializing" && object(data?.walletAvailability)?.stage === "state_sync") recover = "read";
@@ -311,7 +363,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       confirmation.status !== "read_failed" && (displayPending || commandFlight?.input.action === "prepare_review" || review?.preparing === true ||
         automatic.success && automatic.data.action === "prepare_review" ||
         confirmation.status === "needed" && review?.status === "ready_for_wallet_review");
-    return { current, inputEnabled, permitted, disposition, read, auto, recover, paused, partialDisplayFailure,
+    return { current, inputEnabled, permitted, disposition, read, auto, recover, paused, partialDisplayFailure, settingsInputBlocked,
       reviewUpdatePending,
       reviewCommandDeliveryFailed: activeFailure && failedCommand?.input.action === "prepare_review",
       reviewHint: reviewPeriodElapsed ? undefined : reviewUpdatePending ? (displayPending || review?.preparing || commandFlight?.input.action === "prepare_review" ? "Updating review…" : "Checking status…") :
@@ -338,7 +390,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     if (lifetime.signal.aborted) return "";
     const recoveryNeeded = d.errors.some(Boolean) || d.recover !== undefined ||
       !!snapshot && !reference && snapshot.state !== "closed" || snapshot?.state === "closed" && snapshot.reason !== "completed";
-    const recoveryInstruction = d.errors.some(Boolean) || confirmation.status !== "confirmed" || d.recover === "retry";
+    const recoveryInstruction = d.errors.some(Boolean) || confirmation.status !== "confirmed" || d.recover === "retry" || d.settingsInputBlocked;
     if (recoveryNeeded && recoveryInstruction && confirmation.status !== "rejected") {
       if (reading || d.read) return "Checking status…";
       const label = recoveryLabel(d);
@@ -350,7 +402,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     }
     return renderer.guidance?.(snapshot, { confirmed: d.current, readOnly: !reference, recoveryNeeded,
       visibleConfirmation: displayedView?.visibleConfirmation?.(),
-      commandPending: business && commandFlight && d.current && !d.errors.some(Boolean) &&
+      commandPending: interactive && commandFlight && d.current && !d.errors.some(Boolean) &&
         (commandFlight.phase === "confirming" || snapshot?.state === "ready" && !object(snapshot.data)?.runtimeRecovery &&
           !object(snapshot.data)?.request && !object(object(snapshot.data)?.review)?.preparing)
         ? { phase: commandFlight.phase, action: String(commandFlight.input.action) } : undefined,
@@ -359,7 +411,12 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   }
   function canSubmit(d = decide()): boolean { return d.inputEnabled && snapshot?.state === "ready" && displayedInput; }
   function canAct(input?: Record<string, unknown>, d = decide()): boolean {
-    return business && d.inputEnabled && (input ? d.permitted.includes(input.action) : d.permitted.length > 0);
+    return interactive && d.inputEnabled && (input ? d.permitted.includes(input.action) : d.permitted.length > 0);
+  }
+  function canSendFileInput(input: Record<string, unknown>): boolean {
+    const d = decide();
+    return settings && settingsFileTransfer && d.current && !!reference && !commandFlight && !reading && !displayError &&
+      !lifetime.signal.aborted && ["settings_begin_upload", "settings_upload_chunk", "settings_seal_upload"].includes(String(input.action)) && d.permitted.includes(input.action);
   }
   function updateChrome(d: Decision): void {
     const workflow = object(snapshot?.data);
@@ -380,7 +437,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       status.textContent = confirmation.status === "rejected" ? "Card unavailable" :
         !d.current && snapshot.state === "ready" ? (primaryAction ? "" : !lifetime.signal.aborted && (reading || d.read) ? "Checking whether actions are available in this card…" : "Actions are unavailable until this card's status is checked.") :
         !reference && snapshot.state !== "closed" ? "View only." :
-        business ? (object(workflow?.progress)?.status === "unavailable" ? "Current progress is unavailable. The last recorded state is shown." :
+        interactive ? (object(workflow?.progress)?.status === "unavailable" ? "Current progress is unavailable. The last recorded state is shown." :
           !workflow?.request && snapshot.state === "closed" && ["expired", "server_restarted", "cancelled"].includes(snapshot.reason ?? "")
             ? "This card no longer accepts actions." : "") :
         snapshot.state === "running" ? "Reading the requested data…" : snapshot.reason === "completed" ? "" : snapshot.error ??
@@ -398,9 +455,9 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     notice.textContent = [d.note, currentGuidance(d)].filter(Boolean).join(" ");
     notice.hidden = !notice.textContent;
     if (displayedInput) for (const control of content.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>("input, button, select")) {
-      if (!business || control.tagName !== "BUTTON" || control.dataset.cardAction !== undefined) control.disabled = business ? !canAct(undefined, d) : !canSubmit(d);
+      if (!interactive || control.tagName !== "BUTTON" || control.dataset.cardAction !== undefined) control.disabled = interactive ? !canAct(undefined, d) : !canSubmit(d);
     }
-    if (business) for (const control of content.querySelectorAll<HTMLButtonElement>("[data-card-action]")) control.disabled = !canAct({ action: control.dataset.cardAction }, d);
+    if (interactive) for (const control of content.querySelectorAll<HTMLButtonElement>("[data-card-action]")) control.disabled = !canAct({ action: control.dataset.cardAction }, d);
     if (primaryAction && (d.reviewUpdatePending || primaryAction.dataset.cardAction === "request_signature" && d.reviewCommandDeliveryFailed || primaryAction.dataset.cardAction === undefined)) primaryAction.disabled = true;
     if (recovery) recovery.disabled = !!commandFlight || !!reading;
   }
@@ -411,13 +468,24 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   function render(retryFailed: boolean): void {
     if (!snapshot || lifetime.signal.aborted) return;
     // A creating response is a display snapshot, never input authority.
-    if (snapshot.state === "ready" && confirmation.status !== "confirmed") return;
-    if (snapshot.state === "running" && !business) { displayError = undefined; return; }
+    if (snapshot.state === "ready" && confirmation.status !== "confirmed") {
+      // Retire local response progress without creating input from an
+      // unconfirmed snapshot. Existing controls remain locked by the lifecycle.
+      if (settings && displayedView?.update) {
+        try { displayedView.update(snapshot, { automaticPaused: automation === "paused", settings: settingsTransport,
+          settingsCommandProgress: undefined, onDisplayChange: () => publish() }); }
+        catch { displayError = "This card could not be displayed. Its stored information is unchanged."; }
+      }
+      return;
+    }
+    if (snapshot.state === "running" && !interactive) { displayError = undefined; return; }
     // Workflow projections include referenced connection/account facts. Those
     // may change while this already-consumed card's own revision stays fixed.
     // Remaining milliseconds affect timers, not the displayed content identity.
-    const projection = business ? { ...object(snapshot.data), actionRemainingMs: undefined, nextStateReadAfterMs: undefined } : undefined;
-    const key = `${automation === "paused"}:${snapshot.revision}:${reference !== undefined}:${display !== undefined}:${walletDisplay !== undefined}:${JSON.stringify(projection)}`;
+    const projection = interactive ? { ...object(snapshot.data), actionRemainingMs: undefined, nextStateReadAfterMs: undefined } : undefined;
+    const settingsProgress = settings && commandFlight?.phase === "sending" && confirmation.status === "confirmed"
+      ? settingsCommandProgress(commandFlight.basis, snapshot, commandFlight.input) : undefined;
+    const key = `${automation === "paused"}:${JSON.stringify(settingsProgress)}:${snapshot.revision}:${reference !== undefined}:${display !== undefined}:${walletDisplay !== undefined}:${JSON.stringify(projection)}`;
     if (key === renderedKey || (key === attemptedKey && !retryFailed)) return;
     attemptedKey = key;
     const previousNodes = [...content.children];
@@ -427,7 +495,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     let nextInput = false;
     let inserted = false;
     try {
-      const context = { automaticPaused: automation === "paused", onDisplayChange: () => publish() };
+      const context: CardViewContext = { automaticPaused: automation === "paused", onDisplayChange: () => publish(),
+        ...(settings ? { settings: settingsTransport, settingsCommandProgress: settingsProgress } : {}) };
       if (displayedView?.update?.(snapshot, context)) {
         renderedKey = key; displayError = undefined; return;
       }
@@ -435,7 +504,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
         const controls = renderer.controls(snapshot, (input) => { void submit(input); }, display, walletDisplay, context);
         candidate = "node" in controls ? controls : { node: controls };
         nextInput = true;
-      } else if ((business || snapshot.reason === "completed") && snapshot.data !== undefined) {
+      } else if ((interactive || snapshot.reason === "completed") && snapshot.data !== undefined) {
         candidate = renderer.result(snapshot, display, reference ? (input) => { void submit(input); } : undefined, walletDisplay, context);
       }
       content.replaceChildren(...(candidate ? [candidate.node] : [])); inserted = true;
@@ -646,9 +715,10 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
         (input.action === "prepare_review" ? data.assetReadAccount?.status === "available" ? data.assetReadAccount.account : undefined : data.review?.account) === input.account &&
         reviewWalletChoices(data, String(input.account), input.action === "request_signature").some((item) => item.connectionId === input.connectionId);
     }
-    if (input.action === "disconnect" || input.action === "use_account") return data.connections.some((item) =>
-      item.connectionId === input.connectionId && item.status === "connected" && !item.pendingAction &&
-      (input.action !== "use_account" || item.connectionId === data.usableConnectionId && item.accounts.includes(String(input.account))));
+    if (input.action === "disconnect") return data.manageableConnectionIds.includes(String(input.connectionId)) &&
+      data.connections.some((item) => item.connectionId === input.connectionId && !item.pendingAction);
+    if (input.action === "use_account") return data.connections.some((item) => item.connectionId === input.connectionId &&
+      item.status === "connected" && !item.pendingAction && item.connectionId === data.usableConnectionId && item.accounts.includes(String(input.account)));
     return data.connection?.connectionId === object(prior?.connection)?.connectionId &&
       data.request?.attemptId === object(prior?.request)?.attemptId &&
       data.review?.reviewRevision === object(prior?.review)?.reviewRevision;
@@ -677,28 +747,68 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       retryRequired: flight.input.action === "connect" || flight.input.action === "prepare_review" };
     reconcileFailedCommand();
     if (["cancel", "disconnect", "stop_connection", "stop_waiting", "use_account"].includes(String(flight.input.action))) automation = "paused";
-    if (business || delivery === "unknown") requireConfirmation();
+    if (interactive || delivery === "unknown") requireConfirmation();
   }
-  async function sendCommand(input: Record<string, unknown>, origin: "user" | "automatic" = "user"): Promise<void> {
-    if (!snapshot || !reference || (business ? !canAct(input) : !canSubmit())) return;
+  async function sendCommand(input: Record<string, unknown>, origin: "user" | "automatic" | "file" = "user"): Promise<void> {
+    if (!snapshot || !reference || (origin === "file" ? !canSendFileInput(input) : interactive ? !canAct(input) : !canSubmit())) return;
     const flight: CommandFlight = { input, basis: snapshot, phase: "sending" };
     commandFlight = flight; automation = "continue";
     if (origin === "user" || failedCommand?.disposition !== "past") failedCommand = undefined;
     selectionNotice = undefined;
     publish();
     try {
-      const result = responseParts(await call(business ? CARD_TOOLS.act : CARD_TOOLS.submit, { ...reference, revision: flight.basis.revision, input }));
+      const result = responseParts(await call(interactive ? CARD_TOOLS.act : CARD_TOOLS.submit, { ...reference, revision: flight.basis.revision, input }));
       if (lifetime.signal.aborted || confirmation.status === "rejected") return;
       if (!result.snapshot) throw new Error(result.error ?? "The request could not be confirmed.");
       if (result.error) recordCommandFailure(flight, result.error, "rejected");
       acceptSnapshot(result.snapshot, result.display, "action", result.wallet);
     } catch (error) {
-      if (!lifetime.signal.aborted && confirmation.status !== "rejected") recordCommandFailure(flight, error instanceof Error ? error.message : "The request could not be confirmed.", "unknown");
+      if (!lifetime.signal.aborted && confirmation.status !== "rejected") {
+        recordCommandFailure(flight, error instanceof Error ? error.message : "The request could not be confirmed.", "unknown");
+        if (failedCommand) failedCommand.data = object(error)?.data;
+      }
     } finally {
       if (commandFlight === flight) commandFlight = undefined;
       publish();
     }
   }
+  const settingsTransport: SettingsViewTransport = {
+    uploadChunkLimit(operationId, fileId) {
+      if (!reference) return 0;
+      return settingsUploadMessageBudget({ jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, method: "tools/call",
+        params: { name: CARD_TOOLS.act, arguments: { ...reference, revision: Number.MAX_SAFE_INTEGER,
+          input: { action: "settings_upload_chunk", operationId, fileId, offset: Number.MAX_SAFE_INTEGER, chunkBase64: "" } } } }) ?? 0;
+    },
+    async readCurrent() {
+      const result = await requestRead(true);
+      if (result?.kind !== "accepted") throw new Error("The current Settings selection could not be checked. Use Check status before continuing.");
+      return result.snapshot;
+    },
+    async act(input, fileTransfer = false) {
+      if (fileTransfer ? !canSendFileInput(input) : !canAct(input)) throw new Error("This Settings action is unavailable until its current status has been checked.");
+      await sendCommand(input, fileTransfer ? "file" : "user");
+      if (lifetime.signal.aborted) throw new Error("This card closed before the request finished. Reopen the same conversation to check its status.");
+      if (failedCommand?.input === input) {
+        const error = new Error(failedCommand.message) as Error & { data?: unknown };
+        error.data = failedCommand.data;
+        throw error;
+      }
+      if (!snapshot) throw new Error("The current Settings status could not be checked.");
+      return snapshot;
+    },
+    setFileTransferActive(active) { settingsFileTransfer = active; publish(); },
+    async readFile(input) {
+      if (!reference || !cardId || !decide().current || lifetime.signal.aborted) throw new Error("Backup read permission is unavailable.");
+      const response = await call(CARD_TOOLS.readSettingsFile, { ...reference, ...input });
+      const value = settingsFileDisplaySchema.parse(object(response._meta)?.[SETTINGS_FILE_METADATA_KEY]);
+      if (value.cardId !== cardId || value.operationId !== input.operationId || value.fileId !== input.fileId || value.offset !== input.offset) throw new Error("The backup response does not match this card's selected file.");
+      return value;
+    },
+    canDownload: () => app.getHostCapabilities()?.downloadFile !== undefined,
+    download: (filename, base64) => app.downloadFile({ contents: [{ type: "resource", resource: {
+      uri: `file:///${encodeURIComponent(filename)}`, mimeType: "application/json", blob: base64
+    } }] }, { signal: lifetime.signal })
+  };
   async function initialize(): Promise<void> {
     if (!connected || creating === undefined || initialized) return;
     initialized = true;

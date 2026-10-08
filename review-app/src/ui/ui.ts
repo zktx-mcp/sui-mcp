@@ -1,4 +1,4 @@
-// Shared atoms for internal cards and the remaining Settings page.
+// Shared atoms for internal cards.
 import { shortHex, formatUtc } from "../format.js";
 
 export function element<K extends keyof HTMLElementTagNameMap>(

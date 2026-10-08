@@ -135,7 +135,6 @@ async function main(): Promise<void> {
       validateAdapterLifecycle: validateSupportedAdapterLifecycle,
       sessions: activityStore.createSessionRecordStore(),
       artifacts: activityStore.createPrivateReviewArtifactStore(),
-      settingsStore: activityStore.createSettingsRecordStore()
     });
     const reviewDependencies = createRuntimeReviewDependencies({ client: suiClient, chainIdentifier,
       expectedChainIdentifier: config.expectedChainIdentifier, materialStore: transactionMaterialStore, readService });

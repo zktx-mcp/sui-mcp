@@ -14,7 +14,7 @@ it("accepts only the current connection model and valid mainnet account identity
 it("requires published account eligibility to name its recorded usable target", () => {
   const view = { kind: "connect", mode: "connect", allowedActions: [], actionRemainingMs: 0, observe: false,
     walletAvailability: { status: "available", walletRunId: "00000000-0000-4000-8000-000000000001" }, progress: { status: "idle" },
-    boundary: CONNECT_BOUNDARY, connections: [connection], activeAccount: connection.accounts[0], usableConnectionId: connection.connectionId,
+    boundary: CONNECT_BOUNDARY, connections: [connection], manageableConnectionIds: [connection.connectionId], activeAccount: connection.accounts[0], usableConnectionId: connection.connectionId,
     assetReadAccount: { status: "available", account: connection.accounts[0] } };
   expect(workflowViewSchema.safeParse(view).success).toBe(true);
   for (const delta of [{ usableConnectionId: "unknown" }, { usableConnectionId: undefined },
@@ -22,6 +22,8 @@ it("requires published account eligibility to name its recorded usable target", 
     { connectionConflict: { reason: "multiple_connections", connectionIds: [connection.connectionId, "other"] } }]) {
     expect(workflowViewSchema.safeParse({ ...view, ...delta }).success).toBe(false);
   }
+  for (const delta of [{ manageableConnectionIds: ["unknown"] }, { manageableConnectionIds: [connection.connectionId, connection.connectionId] },
+    { connectionReconciliationRequired: true }]) expect(workflowViewSchema.safeParse({ ...view, ...delta }).success).toBe(false);
   expect(workflowViewSchema.safeParse({ ...view, usableConnectionId: undefined, assetReadAccount: undefined }).success).toBe(true);
 });
 

@@ -18,6 +18,7 @@ export function executionStatusCategorySchema() { return z.enum(EXECUTION_STATUS
 export const timeoutInputSchema = z.number().int().min(1).max(MAX_WAIT_TIMEOUT_MS).default(DEFAULT_WAIT_TIMEOUT_MS).optional();
 export function waitExecutionInputSchema() { return { reviewSessionId: z.string().min(1), timeoutMs: timeoutInputSchema }; }
 export const reviewStatusResponseShape = {
+  connectionReconciliationRequired: z.literal(true).optional(),
   connectionConflict: connectionConflictSchema.optional(), walletAvailability: walletAvailabilitySchema, walletObservation: walletObservationSchema.optional(), progress: workflowProgressSchema,
   reviewSessionId: z.string(), status: internalSessionStatusSchema, reviewRevision: z.number().int().nonnegative(),
   account: z.string().optional(), plans: z.array(actionPlanSchema), reviewState: reviewStateOutputSchema.optional(),

@@ -2,7 +2,7 @@ import type { UserAnswerUse } from "../core/evidence/userAnswerUse.js";
 import { EXTERNAL_PROPOSAL_SETTLEMENT_TOKEN_SELECTION_UNSUPPORTED_CLAIM_ID } from "../core/proposal/types.js";
 import { TOOL_NAMES } from "./toolNames.js";
 
-export function interactionStatusUserAnswerUse(hasWalletObservation = false, hasConnectionConflict = false): UserAnswerUse {
+export function interactionStatusUserAnswerUse(hasWalletObservation = false, hasConnectionConflict = false, reconciliationRequired = false): UserAnswerUse {
   return {
     canAnswer: [
       "stored_active_account_read_context",
@@ -10,6 +10,7 @@ export function interactionStatusUserAnswerUse(hasWalletObservation = false, has
       "connection_qualified_default_asset_account",
       "pending_local_wallet_connection_interactions",
       ...(hasConnectionConflict ? ["multiple_saved_connections_require_user_targeted_disconnection"] : []),
+      ...(reconciliationRequired ? ["unrecorded_service_connection_requires_wallet_removal_and_confirmed_absence"] : []),
       "pending_local_review_interactions",
       "wallet_operation_availability_separate_from_stored_transaction_facts"
     ],
@@ -26,9 +27,11 @@ export function interactionStatusUserAnswerUse(hasWalletObservation = false, has
       "complete_wallet_history",
       "profit_or_pnl"
     ],
-    preconditionFields: ["walletAvailability", "assetReadAccount", ...(hasConnectionConflict ? ["connectionConflict"] : [])],
+    preconditionFields: ["walletAvailability", "assetReadAccount", ...(hasConnectionConflict ? ["connectionConflict"] : []),
+      ...(reconciliationRequired ? ["connectionReconciliationRequired"] : [])],
     answerFields: ["activeAccount", "connections", "assetReadAccount", "pendingWalletConnections", "pendingReviewSessions", "walletAvailability",
       ...(hasConnectionConflict ? ["connectionConflict"] : []),
+      "manageableConnectionIds", ...(reconciliationRequired ? ["connectionReconciliationRequired"] : []),
       ...(hasWalletObservation ? ["walletObservation"] : [])],
     diagnosticOnlyFields: [
       "pendingWalletConnections.truncated",
@@ -44,7 +47,7 @@ export function interactionStatusUserAnswerUse(hasWalletObservation = false, has
 }
 
 export function executionResultUserAnswerUse(
-  fields: { hasExecutionResult?: boolean; hasWaitOutcome?: boolean; hasRequest?: boolean; hasConnectionConflict?: boolean } = {}
+  fields: { hasExecutionResult?: boolean; hasWaitOutcome?: boolean; hasRequest?: boolean; hasConnectionConflict?: boolean; reconciliationRequired?: boolean } = {}
 ): UserAnswerUse {
   const hasExecutionResult = fields.hasExecutionResult ?? false;
   const hasWaitOutcome = fields.hasWaitOutcome ?? false;
@@ -72,7 +75,8 @@ export function executionResultUserAnswerUse(
       "profit_or_pnl"
     ],
     answerFields: [
-      "walletAvailability", "progress", ...(fields.hasConnectionConflict ? ["connectionConflict"] : []), ...(hasWaitOutcome ? ["waitOutcome"] : []),
+      "walletAvailability", "progress", ...(fields.hasConnectionConflict ? ["connectionConflict"] : []),
+      ...(fields.reconciliationRequired ? ["connectionReconciliationRequired"] : []), ...(hasWaitOutcome ? ["waitOutcome"] : []),
       "reviewSessionId",
       "status",
       "pollingStatus",
@@ -103,7 +107,8 @@ export function reviewStatusUserAnswerUse(
   hasAdapterLifecycle = false,
   hasHumanReadableReview = false,
   hasSimulation = false,
-  hasConnectionConflict = false
+  hasConnectionConflict = false,
+  reconciliationRequired = false
 ): UserAnswerUse {
   return {
     canAnswer: [
@@ -128,7 +133,8 @@ export function reviewStatusUserAnswerUse(
       "profit_or_pnl"
     ],
     answerFields: [
-      "walletAvailability", "progress", ...(hasConnectionConflict ? ["connectionConflict"] : []), "reviewSessionId",
+      "walletAvailability", "progress", ...(hasConnectionConflict ? ["connectionConflict"] : []),
+      ...(reconciliationRequired ? ["connectionReconciliationRequired"] : []), "reviewSessionId",
       "status",
       "pollingStatus",
       "statusCategory",

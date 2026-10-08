@@ -17,6 +17,6 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "review-app/src/**/*.ts", "vitest.config.ts", "vite.config.ts"],
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "review-app/src/**/*.ts", "vitest.config.ts"],
   "exclude": ["dist", "node_modules"]
 }

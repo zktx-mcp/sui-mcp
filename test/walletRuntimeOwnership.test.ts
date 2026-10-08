@@ -31,7 +31,7 @@ it("refuses incompatible private SDK storage before modifying it", () => {
   const directory = mkdtempSync(join(tmpdir(), "say-sdk-format-"));
   const storage = openWalletConnectStorage(directory); storage.closeBeforeSdkUse();
   const path = join(directory, "walletconnect/sessions.sqlite"), db = new Database(path);
-  db.pragma("user_version=999"); db.close(); const before = readFileSync(path);
+  db.exec("ALTER TABLE sdk_sessions ADD COLUMN unrecognized TEXT"); db.close(); const before = readFileSync(path);
   try { expect(() => openWalletConnectStorage(directory)).toThrow("format is unsupported"); expect(readFileSync(path)).toEqual(before); }
   finally { rmSync(directory, { recursive: true, force: true }); }
 });

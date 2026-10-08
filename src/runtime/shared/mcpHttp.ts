@@ -5,7 +5,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isJSONRPCRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { MAX_JSON_BODY_BYTES, sendJson } from "../../review-server/http.js";
+import { MAX_JSON_BODY_BYTES, sendJson } from "./http.js";
+import { settingsUploadMessageBudget } from "../../core/session/settingsFileProtocol.js";
 
 export function createInternalMcpHandler(createServer: () => McpServer) {
   const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>();
@@ -44,7 +45,10 @@ export function createInternalMcpHandler(createServer: () => McpServer) {
           if (isJSONRPCRequest(message) && message.method === "tools/call" &&
               Object.values(CARD_TOOLS).some((name) => name === message.params?.name) &&
               Buffer.byteLength(JSON.stringify(message)) > MAX_JSON_BODY_BYTES) {
-            void transport.send({ jsonrpc: "2.0", id: message.id, error: { code: -32600, message: "Card request exceeds the JSON body limit." } });
+            const budget = settingsUploadMessageBudget(message);
+            void transport.send({ jsonrpc: "2.0", id: message.id, error: { code: -32600,
+              message: budget === undefined ? "Card request exceeds the JSON body limit." : "settings_payload_too_large",
+              ...(budget === undefined ? {} : { data: { code: "settings_payload_too_large", maximumMessageSize: MAX_JSON_BODY_BYTES, rawChunkLimit: budget } }) } });
             return;
           }
           connection.onmessage?.(message, extra);

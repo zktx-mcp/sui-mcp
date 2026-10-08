@@ -1,3 +1,4 @@
+import { SERVER_VERSION } from "../mcp/serverInfo.js";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { WalletTransport, WalletUnavailableReason } from "../core/session/walletConnection.js";
@@ -18,7 +19,7 @@ export function runWalletSdkChild(createTransport: (input: WalletInit) => Promis
     if (!process.connected || !process.send) { exit(); return; }
     process.send(walletEventSchema.parse(message), (error) => { if (error) exit(); });
   };
-  const envelope = () => ({ protocolVersion: 1 as const, runId: init!.runId });
+  const envelope = () => ({ packageVersion: SERVER_VERSION, runId: init!.runId });
   const exit = () => { if (!exiting) { exiting = true; void ownership; process.exit(0); } };
   const fail = (reason: WalletUnavailableReason) => {
     ready = false;

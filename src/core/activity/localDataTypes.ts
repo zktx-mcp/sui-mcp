@@ -1,4 +1,3 @@
-import { DB_USER_VERSION } from "./schemaVersion.js";
 export const LOCAL_DATA_EXPORT_FORMAT = "sui-mcp.local-data" as const;
 export const LOCAL_DATA_NETWORK = "mainnet" as const;
 
@@ -16,7 +15,6 @@ export type LocalDataCounts = {
 };
 
 export type LocalDataEnvelope = {
-  schemaVersion: typeof DB_USER_VERSION;
   format: typeof LOCAL_DATA_EXPORT_FORMAT;
   network: typeof LOCAL_DATA_NETWORK;
   exportedAt: string;
@@ -172,6 +170,8 @@ export type LocalDataImportPreview = {
   incomingCounts: LocalDataCounts;
   willReplace: true;
   activeAccountChange: "unchanged" | "set" | "cleared";
+  currentReadAddress: string | null;
+  incomingReadAddress: string | null;
   restartRequiredAfterImport: boolean;
 };
 

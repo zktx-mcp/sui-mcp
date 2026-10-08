@@ -65,7 +65,7 @@ export const SERVER_INSTRUCTIONS = [
 
 export const IMPLEMENTED_TOOLS = [
   TOOL_NAMES.uiOpenAccount, TOOL_NAMES.uiOpenReceipt, TOOL_NAMES.uiOpenChart,
-  TOOL_NAMES.uiReadCard, TOOL_NAMES.uiSubmitCard, TOOL_NAMES.uiActCard,
+  TOOL_NAMES.uiReadCard, TOOL_NAMES.uiSubmitCard, TOOL_NAMES.uiActCard, TOOL_NAMES.uiReadSettingsFile,
   TOOL_NAMES.readGetServerStatus,
   TOOL_NAMES.readListSupportedProtocols,
   TOOL_NAMES.readListDeepbookPools,
@@ -97,7 +97,6 @@ export const IMPLEMENTED_TOOLS = [
   TOOL_NAMES.actionPrepareSuiActionReview,
   TOOL_NAMES.actionPrepareExternalProposalReview,
   TOOL_NAMES.accountGetActiveAccount,
-  TOOL_NAMES.accountClearActiveAccount,
   TOOL_NAMES.sessionCreateWalletConnection,
   TOOL_NAMES.sessionGetWalletConnection,
   TOOL_NAMES.sessionWaitWalletConnection,
@@ -155,5 +154,5 @@ export const SERVER_LIMITATIONS = [
   `DeepBook orderbook, mid-price, and quote outputs are ${DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.pinnedSdkSnapshots} at fetchedAt; treat them as stale if the user delays.`,
   `DeepBook USDC price history and price-at-time reads use ${DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.officialIndexerCandleData} for the requested official interval. They are external candle evidence only, not live quotes, historical mid prices, global market prices, fiat USD values, USDC/USD peg guarantees, route recommendations, transaction-building inputs, signing readiness, P&L, cost basis, user-account transaction history, or user-account balance history. Sui MCP does not independently recompute those candle values from chain history for the response.`,
   `ui.open_chart displays ${DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.officialIndexerUsdcDenominatedCandles} in an internal read-only card. ui.open_account displays a public-address asset snapshot; ui.open_receipt displays the executed transaction graph when bound UI metadata is available, followed by on-chain facts and a Details slide. Card inputs end after backend admission, expiry or invalidation; chat navigation and frame recreation do not end valid unsubmitted input. Read the same DB state after a lost reply rather than resubmitting. Saved results do not authorize a new query or transaction. These cards are not live feeds, trading interfaces, route recommendations, fiat USD value, P&L, tax, cost basis, signing data, or signing readiness.`,
-  "Settings mutations happen through local settings pages on the review server. MCP settings tools create settings sessions or read current settings only."
+  "Settings uses an internal card. MCP settings tools create the card or read current settings; only the user's scoped card confirmation applies local changes or restarts the connection service. Backup bytes stay in app-only file transfer. No external Settings URL exists."
 ] as const;

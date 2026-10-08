@@ -155,7 +155,7 @@ When Chart pool choices cannot be prepared, the backend creates a `closed`/`fail
 
 Receipt model results retain input kinds/indices/object references and identify input values and PTB as UI-only details. Receipt and completed Review show the executed transaction graph above their result summary when bound private metadata is available. Technical records are in one Details slide. Missing metadata leaves the saved result available without inventing a graph. The typed `sui-mcp/receipt-display` metadata binds display data to the same card ID, transaction digest and revision. It carries individual on-chain Pure input values and the graph derived from those inputs; never a serialized transaction, signature or wallet credential. Public saved resources contain only the model projection. A missing UI detail payload means unavailable display data, not that a transaction had no inputs.
 
-Backend expiry ends unsubmitted input. A server restart invalidates unfinished cards; stored completed results remain readable. Reset/import removes cards and their permissions with the data change. Completed input does not reopen, while still-valid unsubmitted input is unaffected by chat navigation. A lost submit response is resolved by reading the same card, without another source request.
+Backend expiry ends unsubmitted input. A server restart invalidates unfinished cards; stored completed results remain readable. Reset/import atomically removes other cards/permissions with the data change and preserves the applying Settings card/result as read-only. Completed input does not reopen, while still-valid unsubmitted input is unaffected by chat navigation. A lost submit response is resolved by reading the same card, without another source request.
 
 When a Host replays a historical card without its private input permission, the
 View reads `suimcp://cards/{cardId}` to restore the same card's current saved
@@ -1071,7 +1071,8 @@ Each disconnection uses the same scoped UI permission, current run and revision,
 atomic admission and saved result as an ordinary single-connection disconnect.
 No first/newest/default wallet is silently selected. When one valid connection
 remains and no connection operation is pending, normal account use can resume;
-with none, pairing is available. A failed disconnect does not prove remote removal.
+with no recorded or SDK-present connection and no pending operation, pairing is
+available. A failed disconnect does not prove remote removal.
 A failed or stopped product connection is not restored merely because its SDK
 session remains saved.
 
@@ -1092,6 +1093,19 @@ qualifies. It does not authorize a signature. `assetReadAccount` uses the same
 the stored default's source connection ID to match this connection and its
 address to remain approved. Matching the address in a different connection is
 insufficient. A source-less stored selection requires explicit Use address.
+
+`manageableConnectionIds` identifies exact recorded targets for a new scoped
+Disconnect, separately from account use. It includes nonpending connected records
+(including expired ones) and known terminal records whose current SDK session
+remains present. `connectionReconciliationRequired: true` identifies a present SDK
+session without a journal target after normal registration/cleanup ends. It
+blocks pairing, account use, preparation and signing while preserving SDK
+availability and saved outcomes. Remove the retained connection in the wallet
+app, then confirm absence through a complete current service observation.
+Settings/Troubleshooting can explicitly restart the service to inspect it again;
+restart alone does not remove or approve that connection. No private topic or synthetic target ID
+is exposed. Both fields also appear in interaction status; review status includes
+the reconciliation flag when current eligibility is needed.
 
 These fields are emitted together for current wallet eligibility. Independent
 historical or completed-result reads may omit them; omission does not establish
@@ -1116,7 +1130,10 @@ errors still fail the read without deleting the stored execution result.
 
 Connect does not accept `restart_wallet_service`; that input returns
 `invalid_card_input` without consuming the card or changing the SDK run.
-There is no model-facing or Settings replacement command. Operational app
+Ordinary MCP tools cannot replace the connection service. A user may prepare
+and confirm its restart in the internal Settings card's Troubleshooting controls.
+This restores service availability, not an interrupted wallet approval or
+disconnect result. Operational app
 restart is described in [MCP Setup](MCP_SETUP.md#wallet-connection-boundary).
 
 A historical `runtimeRecovery` result retains its prior/next run IDs,
@@ -1209,38 +1226,188 @@ facts actually exist.
 | Tool | Status | Purpose |
 | --- | --- | --- |
 | `account.get_active_account` | Implemented | Reads the active wallet-account read context. |
-| `account.clear_active_account` | Implemented | Clears the active wallet-account read context. |
+
+The user clears the default read address through a confirmed Settings card action. Ordinary MCP calls do not clear it.
 
 ## Settings Tools
 
 | Tool | Status | Purpose |
 | --- | --- | --- |
-| `settings.create_local_settings_session` | Implemented | Creates a same-machine local settings page session. |
-| `settings.get_local_settings` | Implemented | Reads local Sui MCP settings, including effective Sui gRPC and GraphQL endpoint sources. |
+| `settings.create_local_settings_session` | Implemented | Opens one internal Settings card with an unsubmitted draft. |
+| `settings.get_local_settings` | Implemented | Reads stored/effective Sui gRPC and GraphQL endpoints, sources and pending restart information. |
 
-Settings MCP tools are session-gateway/read tools, not direct mutators.
+The gateway name is preserved. Its result is a `kind: "settings"` card snapshot
+and a public saved-result link. Card permission is only in `sui-mcp/card` UI
+metadata. There is no `settingsUrl`, `openTarget`, external page, HTTP mutation
+API or compatibility alias. A client without internal cards receives
+`ui_unavailable`; ordinary model calls never apply a Settings change.
 
-The settings page can change local settings after settings-token validation:
+Settings groups Address for viewing assets, Local records, Troubleshooting and Advanced
+settings. Final operations are `clear_read_address`, `set_endpoint`,
+`restore_endpoint` (gRPC or GraphQL), `export_local_data`, `import_local_data`,
+`reset_local_data` and `restart_wallet_service`. User preparation and confirmation
+use app-only `ui.act_card` with card permission, revision, operation identity
+and the exact preparation identity. Choosing or previewing does not apply data,
+contact a wallet or restart the SDK. The same confirmation returns the same
+admitted result; MCP JSON-RPC request IDs do not authorize another operation.
 
-- stored Sui gRPC or GraphQL endpoint;
-- default endpoint restoration;
-- active account read context clearing;
-- logical local data reset;
-- local data export;
-- replace-only local data import.
+The card uses plain-language display labels without changing wire fields or
+enums. Wallet-service `available`, `initializing`, `recovering` and `unavailable`
+display as Ready, Starting, Restarting and Unavailable; Ready describes the
+service, not a connected or approved wallet. Endpoint sources display as App
+launch settings, Saved in Sui MCP and Built-in default. Internal connection and
+transaction-request IDs remain in Details; wallet identity and restart impact
+remain beside the confirmation. Known validation errors explain the cause and
+next action without requiring knowledge of upload chunks or backend admission.
 
-These actions do not sign, execute, create custody, or produce signing material.
+Completing an import upload automatically checks its integrity, current-format
+contents and local replacement conditions. `data.restoreCheck.status` is
+`no_file`, `receiving`, `checking`, `check_required`, `can_restore` or
+`cannot_restore`. Receiving describes an unsealed transfer; a complete sealed
+file needing a new local check is `check_required`, not a validation failure.
+A blocked check carries
+its `reason` and user-readable `message`; it does not end the operation or
+misclassify a storage/service failure as an invalid file. `can_restore` describes
+the current preparation, not authority, completed replacement or guaranteed
+success. The exact UI permission, preparation identity and final admission are
+still required. Imported endpoint verification runs after final confirmation,
+before any data replacement. Reads never start a new check or application.
 
-Endpoint changes apply after MCP server restart.
+Known invalid backup contents or a definite imported URL/mainnet rejection remain
+bound to the selected file ID, hash, length and operation epoch. `settings_back` or a
+local-data revision change discards current confirmation without clearing that
+file rejection. `settings_prepare` cannot erase it or make the same file ready;
+the user must explicitly change the file selection. A new selection can use the
+same original bytes and receives a new file identity. Timeout or unreachable
+endpoint failures permit an explicit local recheck and a new final confirmation;
+that recheck does not call imported endpoints. The server derives recheck actions
+from the same decision used by the handler; the View does not choose its own
+failure-recovery policy.
 
-Custom providers can affect read data quality, so use trusted mainnet providers.
+`file.sealed` records complete, integrity-checked transfer; it does not by itself
+establish a supported backup or permission to restore it. `settings_back` and user-data
+changes invalidate preparation while preserving a reusable complete file.
+The explicit `settings_prepare` action rechecks such a file; normal file
+selection requires no separate Preview action. A failed check preserves its
+current file/operation identity and correction path. Owner replacement ends old
+input; a new card must receive a new explicit file selection.
+
+A completed export provides `data.backupLocation.directory` and
+`data.backupLocation.filename` from its recorded native path. These describe the
+created local file, independently of the Host's optional download capability.
+Download acknowledgment is not proof of a save location or delivery.
+
+Current `data.facts` uses the same connection selection and qualification rules
+as interaction status, through a fact reader that does not settle another
+request's deadlines or callback writes. General counts describe stored records;
+reset/import preparation and confirmation independently settle deadlines and
+check the current deletion impact. Creating a Settings card or checking its own
+permission, expiry, result or cleanup retains that operation's required writes.
+`connectionReconciliationRequired: true` is separate from SDK availability and
+requires a published available run with confirmed unrecorded presence:
+remove the unrecorded connection in the wallet app, then confirm absence.
+Settings overview and Troubleshooting show that action; a service restart only
+re-inspects retained sessions and does not approve or remove them.
+An initializing/state_sync memory snapshot does not establish that diagnosis.
+The ordinary interaction response exposes its removal-and-confirmed-absence
+meaning in `userAnswerUse.canAnswer` only when the diagnostic flag is present;
+the corresponding precondition and answer fields reference the same flag.
+Neither service availability nor an absent flag establishes account authority
+or proves that no SDK session exists.
+
+`data.phase` is `draft`, `uploading`, `sealed`, `prepared`, `executing`,
+`stopping`, `starting` or `terminal`. `allowedActions` is backend authority;
+`observe` permits reading the existing operation only. Known file-I/O and final-slot
+conditions affect the offered actions; final admission rechecks them atomically.
+Local section navigation and Resume do not call `settings_back` or change stored
+preparation. Check status reads the same card when a change is temporarily
+unavailable and never retries the earlier action. Public fields include
+`operationId`, `draft`, preparation identity/impact, file ID/name/length/hash,
+`priorRunId`, `nextRunId`, supersession links and a recorded result. Results use
+`completed`, `failed`, `interrupted` or `superseded`. Completion describes that
+local operation, not a transaction's chain outcome. Optional
+`temporaryFileCleanup` separately reports `pending`, `failed` or `complete`;
+reading/checking it never repeats data replacement, backup creation or SDK
+replacement. Public fields contain no raw file, transaction bytes, signatures,
+SDK credentials or card permission.
+
+A user-data writer invalidates its affected prepared confirmation atomically.
+A still-valid sealed import file remains available for a new backup check after
+`settings_back` or invalidation; an old revision/preparation cannot apply it. Explicitly
+choosing a different file invalidates the old upload. Upload, preparation and
+input permission have separate lifetimes. Known validation rejection returns
+safe input-error text and the actual current snapshot. Wrong permission returns
+no snapshot or domain explanation; storage/I/O failures are not input errors
+or success.
+
+Backup uploads accept at most 16 MiB before Base64/JSON wrapping. Chunk offsets,
+reservations, canonical Base64, full length and SHA-256 are verified. The entire
+internal MCP JSON-RPC message remains within 65,536 UTF-8 bytes; oversized upload
+rejection can report a smaller raw chunk limit before any write. The backup check validates
+strict current backup shape/references without endpoint contact. Confirmation
+verifies imported endpoints report Sui mainnet and rechecks current data and
+unsettled wallet/transaction work before atomic replacement.
+The prepared import includes `currentReadAddress` and `incomingReadAddress`
+(`null` when unset), the corresponding change and current/incoming record counts.
+Both preparation and final admission settle request deadlines before capturing
+or comparing that decision basis. A newly unknown outcome requires a new backup check.
+Reset/import revoke other live permissions and preserve only their own read-only card/result.
+Their confirmation warns that replacement can remove unconfirmed transaction
+records even when the checked count is zero; actual nonzero deletion counts stay
+visible. Outstanding wallet/transaction responses and an unfinished initial
+result-checking window block replacement, including after the user stops
+automatic result checks. Stopping those checks does not shorten that window.
+They cannot cancel a transaction on Sui or disconnect a remote wallet session.
+The private connection-service journal is preserved; it is not imported from
+the public backup and cannot restore old permissions or signing authority.
+Reset clears the default address. A restored default requires its exact current
+connection ID and approved address. Outstanding connection SDK callbacks block
+replacement along with unsettled transaction work.
+
+Endpoint preparation records the gRPC/GraphQL kind, current stored/effective
+value and source, and exact proposed stored value. Only final confirmation checks
+mainnet and stores that target. Its result captures `effectiveValueAtSave` and
+`effectiveSourceAtSave`, rather than claiming to describe a later server run.
+An environment override continues to take precedence after restart while it
+remains set; storing an endpoint does not modify that environment.
+
+Export creates one full local backup at a backend-generated path using durable,
+exclusive publication. A response/storage failure never creates another file.
+`ui.read_settings_file` is app-only and binds card/permission, operation, file,
+offset and verified hash/length. Its ordinary content gives range metadata;
+Base64 bytes appear only in `sui-mcp/settings-file` UI metadata. Host delivery is
+explicit and uses the same complete artifact. An acknowledged download request
+is not proof of a save location. `isError` does not distinguish cancellation,
+denial or failure; an unknown reply is unconfirmed, not successful delivery.
+Reset and temporary-file cleanup never truncate or delete a published backup.
+Its recorded path is not a guarantee that the file still exists or is unchanged:
+each delivery re-reads and verifies it before contacting the Host. Verification
+failure sends nothing; an acknowledged, failed or unknown Host reply describes
+only delivery of the already verified bytes, not current file persistence.
+
+Troubleshooting recovery confirms a precise SDK run and affected unsubmitted
+requests. Admission revokes their submission authority before stopping the old
+child. The result waits for the owned child's exit, new run reservation,
+startup and complete observation. A new explicit Settings confirmation can
+supersede a startup still pending; it cannot replace stopping or erase a known
+failure. Already admitted submissions keep observing the same digest. Restart
+does not confirm an interrupted disconnect or sign/submit a new transaction.
+The confirmation identifies wallet connection records with their recorded status
+and addresses. Historical disconnected/failed records do not prove a current
+connection or approval. The complete recorded impact remains bound to admission;
+the display does not filter it into a new wallet-eligibility rule.
+
+Endpoint changes require fully quitting/reopening every participating app to
+apply parent configuration. Restart connection service only replaces the SDK
+child. Installation environment overrides continue to take precedence. Custom
+providers affect read data quality; use trusted Sui mainnet providers.
 
 ## Resources
 
 Sui MCP serves the URI prefixes `suimcp://` and `ui://sui-mcp/`.
 The
 `sui-mcp/card`, `sui-mcp/receipt-display` and
-`sui-mcp/wallet-display` metadata keys bind stored cards to their
+`sui-mcp/wallet-display` and `sui-mcp/settings-file` metadata keys bind stored cards to their
 permissions and display facts. Clients must use the returned URI/key values.
 
 

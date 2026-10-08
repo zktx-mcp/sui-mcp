@@ -369,7 +369,6 @@ async function connectFreshClient(options: {
     activityStore,
     ...(options.workflow ? { workflow: options.workflow } : {}),
     localSettings: new InMemoryLocalSettingsService(repository),
-    reviewBaseUrl: "http://127.0.0.1:4173",
     logger,
     readService: createFreshClientReadService(),
     transactionActivityService: new TransactionActivityService({

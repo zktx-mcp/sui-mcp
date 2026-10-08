@@ -14,11 +14,10 @@ const persistentKeys = new Set([
 ]);
 const storageSchema = "CREATE TABLE sdk_sessions (key TEXT PRIMARY KEY, value BLOB NOT NULL)";
 function storageFormat(db: Database.Database): "empty" | "current" {
-  const version = db.pragma("user_version", { simple: true });
   const schema = db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")
     .all() as { type: string; name: string; sql: string }[];
-  if (version === 0 && schema.length === 0) return "empty";
-  if (version === 1 && schema.length === 1 && schema[0]?.type === "table" &&
+  if (schema.length === 0) return "empty";
+  if (schema.length === 1 && schema[0]?.type === "table" &&
       schema[0].name === "sdk_sessions" && schema[0].sql === storageSchema) return "current";
   throw new Error("WalletConnect storage format is unsupported.");
 }
@@ -51,7 +50,6 @@ export function openWalletConnectStorage(dataDirectory: string): {
     if (storageFormat(db) === "empty") {
       db.transaction(() => {
         db.exec(storageSchema);
-        db.pragma("user_version = 1");
       })();
     }
     // There is exactly one SDK owner. FULL protects the session material that

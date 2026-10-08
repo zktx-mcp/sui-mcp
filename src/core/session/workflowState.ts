@@ -2,7 +2,7 @@ import type { ReviewSession } from "../action/types.js";
 import type { z } from "zod";
 import type { reviewStateOutputSchema } from "../action/schemas.js";
 import type { CardRecord, ReceiptDisplay } from "./cardSession.js";
-import { walletConnectionSelection, type WalletAvailability, type ConnectionView, type ConnectionConflict, type AssetReadAccount } from "./walletConnection.js";
+import { walletConnectionSelection, type WalletAvailability, type ConnectionView, type ConnectionConflict, type AssetReadAccount, type WalletConnectionPresence } from "./walletConnection.js";
 import { isInitialChainObservation, type TransactionRequest } from "./transactionRequest.js";
 import type { RequestAuthority } from "./sqliteWalletWorkflowStore.js";
 import type { ReviewEvaluationCandidate } from "./reviewValidity.js";
@@ -24,13 +24,26 @@ export function reviewPreparationAccount(boundAccount: string | undefined, activ
     message: "The selected account has changed since this request was made." };
   return { allowed: true, account: activeAccount };
 }
-export type WorkflowEligibilityFacts = {
-  evaluatedAt: string; ownerId: string; record?: CardRecord | undefined;
-  walletAvailability: Pick<WalletAvailability, "status">; activeAccount?: string | undefined;
+// Collected from one SQLite read snapshot. This is not a maintenance request
+// or authority to apply an operation; only public projections leave the core.
+export type ConnectionFacts = {
+  evaluatedAt: string; activeAccount?: string | undefined;
   activeAccountConnectionId?: string | undefined;
+  connections: ConnectionView[];
+  connectionPresence: WalletConnectionPresence;
+  walletObservation?: WalletObservation | undefined;
+};
+export type ConnectionContext = {
+  connections: ConnectionView[]; walletAvailability: WalletAvailability;
+  walletObservation?: WalletObservation | undefined; connectionConflict?: ConnectionConflict | undefined;
+  assetReadAccount: AssetReadAccount; manageableConnectionIds: string[];
+  connectionReconciliationRequired?: true | undefined;
+};
+export type WorkflowEligibilityFacts = ConnectionFacts & {
+  ownerId: string; record?: CardRecord | undefined;
+  walletAvailability: Pick<WalletAvailability, "status">;
   walletDependent?: boolean | undefined;
   connection?: ConnectionView | undefined;
-  connections: ConnectionView[];
   session?: ReviewSession | undefined; request?: TransactionRequest | undefined;
   authority?: RequestAuthority | undefined; busyForAccount: boolean;
 };
@@ -46,21 +59,37 @@ export type WorkflowFacts = WorkflowEligibilityFacts & {
 export type EvaluatedWorkflowState = WorkflowFacts & {
   allowedActions: WorkflowAction[]; actionRemainingMs: number; inputRemainingMs: number;
   usableConnectionId?: string | undefined; assetReadAccount?: AssetReadAccount | undefined;
+  manageableConnectionIds: string[]; connectionReconciliationRequired?: true | undefined;
   nextStateReadAfterMs?: number | undefined; events: EventLogRecord[];
   preparationIssue?: string | undefined;
 };
 export type WorkflowEvaluationInput = {
-  expectedCard?: CardRecord | undefined; reviewSessionId?: string | undefined;
-  readTarget?: ReviewReadTarget | undefined;
-  candidate?: ReviewEvaluationCandidate | undefined; walletAvailability: WalletAvailability;
+  expectedCard?: CardRecord | undefined; walletAvailability: WalletAvailability;
   walletObservation?: WalletObservation | undefined;
   uiObservation?: boolean | undefined;
-};
+} & ({ purpose: "current_wallet" } | { purpose: "review"; reviewSessionId: string;
+  readTarget: ReviewReadTarget; candidate: ReviewEvaluationCandidate });
 // Bound before asynchronous inspection and checked again in the DB transaction.
 // A live input needs current wallet eligibility even when an older attempt exists.
 export type ReviewReadTarget = {
   reviewSessionId: string; attemptId?: string | undefined; walletDependent: boolean;
 };
+
+export function workflowConnectionEligibility(facts: ConnectionFacts & {
+  walletAvailability: Pick<WalletAvailability, "status">; walletDependent?: boolean | undefined;
+}) {
+  const selection = walletConnectionSelection(facts.connections, Date.parse(facts.evaluatedAt), facts.connectionPresence,
+    facts.activeAccount ? { address: facts.activeAccount, walletId: facts.activeAccountConnectionId } : undefined);
+  const available = facts.walletAvailability.status === "available", dependent = facts.walletDependent !== false;
+  const usableConnectionId = available && dependent ? selection.connection?.connectionId : undefined;
+  const assetReadAccount: AssetReadAccount | undefined = !dependent ? undefined
+    : usableConnectionId ? selection.assetReadAccount : { status: "address_required" };
+  return { selection, usableConnectionId, assetReadAccount, connectionConflict: selection.conflict,
+    manageableConnectionIds: available ? selection.manageableConnectionIds : [],
+    // A pending memory snapshot is not a published SDK observation. Startup
+    // and state-sync failures retain their own result and neutral diagnosis.
+    connectionReconciliationRequired: available && dependent ? selection.connectionReconciliationRequired : undefined };
+}
 
 // Shared domain eligibility. The DB supplies current facts at its decision
 // boundary. Returned choices are advisory; admission still binds concrete input.
@@ -74,19 +103,15 @@ export function workflowEligibility(facts: WorkflowEligibilityFacts) {
     ? Math.min(cardRemaining, Math.max(0, Date.parse(session.expiresAt) - at)) : cardRemaining;
   const inputAvailable = remaining > 0 && record?.state.state === "ready" && record.acceptedInput === undefined;
   const allowedActions: WorkflowAction[] = [];
-  const selection = walletConnectionSelection(facts.connections, at, facts.activeAccount
-    ? { address: facts.activeAccount, walletId: facts.activeAccountConnectionId } : undefined);
-  const usableConnectionId = walletAvailability.status === "available" && facts.walletDependent !== false
-    ? selection.connection?.connectionId : undefined;
-  const assetReadAccount: AssetReadAccount | undefined = facts.walletDependent === false ? undefined
-    : usableConnectionId ? selection.assetReadAccount : { status: "address_required" };
+  const { selection, ...connectionEligibility } = workflowConnectionEligibility(facts);
+  const { assetReadAccount } = connectionEligibility;
   let preparationIssue: string | undefined;
   if (record?.scope === "connect") {
     if (inputAvailable) {
       allowedActions.push("cancel");
       if (walletAvailability.status === "available") {
         if (["connect", "manage"].includes(String(record.state.input.intent)) && selection.pairingAllowed) allowedActions.push("connect");
-        if (facts.connections.some((item) => item.status === "connected" && !item.pendingAction)) allowedActions.push("disconnect");
+        if (selection.manageableConnectionIds.length) allowedActions.push("disconnect");
         if (selection.connection) allowedActions.push("use_account");
       }
     }
@@ -112,7 +137,7 @@ export function workflowEligibility(facts: WorkflowEligibilityFacts) {
     session.status === "ready_for_wallet_review" && (!request || request.reviewRevision !== session.reviewRevision)
       ? session.reviewState?.humanReadableReview?.freshness.expiresAt : undefined;
   const nextRead = expiry && session ? Math.min(remaining, Date.parse(session.expiresAt) - at, Date.parse(expiry) - at) : undefined;
-  return { allowedActions, preparationIssue, usableConnectionId, assetReadAccount, connectionConflict: selection.conflict,
+  return { allowedActions, preparationIssue, ...connectionEligibility,
     actionRemainingMs: remaining, inputRemainingMs: inputAvailable ? remaining : 0,
     ...(nextRead !== undefined && nextRead > 0 ? { nextStateReadAfterMs: nextRead } : {}) };
 }

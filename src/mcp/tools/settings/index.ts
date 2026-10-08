@@ -2,11 +2,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SETTINGS_APPLIES_AFTER_RESTART } from "../../../core/preferences/preferencesStore.js";
 import { registerSuiMcpTool } from "../../registerTool.js";
-import { errorToolResult, okToolResult } from "../../result.js";
+import { okToolResult } from "../../result.js";
 import { noParamsInputSchema, successOutputSchema } from "../../schemas.js";
 import type { McpServerDeps } from "../../server.js";
 import { localSettingsToolError, sessionStoreToolError } from "../../toolErrors.js";
 import { TOOL_NAMES } from "../../toolNames.js";
+import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
+import { cardMetadata, createWorkflowCard } from "../../../mcp-ui/tools.js";
+import { cardSnapshotSchema } from "../../../mcp-ui/contracts.js";
 
 const endpointSettingSchema = z.object({
   storedValue: z.string(),
@@ -16,42 +19,15 @@ const endpointSettingSchema = z.object({
   appliesAfter: z.literal(SETTINGS_APPLIES_AFTER_RESTART).optional()
 });
 
-export function registerSettingsTools(server: McpServer, deps: McpServerDeps): void {
-  server.registerTool(
-    TOOL_NAMES.settingsCreateLocalSettingsSession,
-    {
-      title: "Create local settings session",
-      description: "Create a local settings page session.",
-      inputSchema: noParamsInputSchema,
-      outputSchema: successOutputSchema({
-        settingsSessionId: z.string(),
-        settingsUrl: z.string(),
-        status: z.literal("created"),
-        openTarget: z.literal("system_browser"),
-        accessScope: z.literal("same_machine_loopback"),
-        expiresAt: z.string(),
-        lastActivityAt: z.string()
-      }),
-      annotations: { readOnlyHint: false, openWorldHint: false }
-    },
+export function registerSettingsTools(server: McpServer, deps: Pick<McpServerDeps, "cards" | "localSettings" | "logger">): void {
+  registerAppTool(server, TOOL_NAMES.settingsCreateLocalSettingsSession,
+    { title: "Settings", description: "Open a local settings card.", inputSchema: noParamsInputSchema,
+      outputSchema: successOutputSchema(cardSnapshotSchema.shape), _meta: cardMetadata("settings"),
+      annotations: { readOnlyHint: false, openWorldHint: false } },
     async () => {
-      try {
-        if (!deps.reviewBaseUrl) return errorToolResult({ kind: "ui_unavailable", details: { reason: "Settings UI is unavailable in this runtime." } });
-        const created = await deps.sessions.createSettingsSession();
-        return okToolResult({
-          settingsSessionId: created.session.id,
-          settingsUrl: `${deps.reviewBaseUrl}/settings/${created.session.id}#${created.token}`,
-          status: "created",
-          openTarget: "system_browser",
-          accessScope: "same_machine_loopback",
-          expiresAt: created.session.expiresAt,
-          lastActivityAt: created.session.lastActivityAt
-        });
-      } catch (error) {
-        return sessionStoreToolError(error, deps.logger);
-      }
-    }
-  );
+      try { return await createWorkflowCard(server, deps, "settings", {}); }
+      catch (error) { return sessionStoreToolError(error, deps.logger); }
+    });
 
   registerSuiMcpTool(
     server,

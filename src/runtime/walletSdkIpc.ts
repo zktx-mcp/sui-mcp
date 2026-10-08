@@ -1,9 +1,10 @@
+import { SERVER_VERSION } from "../mcp/serverInfo.js";
 import { z } from "zod";
 import { suiAddressStringSchema } from "../core/suiAddress.js";
 import { walletRunIdSchema, walletStartStageSchema, walletSnapshotSchema, walletSessionObservationSchema, walletSessionSchema } from "../core/session/walletRuntime.js";
 import { walletUnavailableReasonSchema } from "../core/session/walletConnection.js";
 
-const envelope = z.object({ protocolVersion: z.literal(1), runId: walletRunIdSchema });
+const envelope = z.object({ packageVersion: z.literal(SERVER_VERSION), runId: walletRunIdSchema });
 const request = envelope.extend({ requestId: z.number().int().positive(), operationId: z.string().min(1) });
 export const walletCommandSchema = z.union([
   envelope.extend({ type: z.literal("init"), dataDirectory: z.string().min(1), projectId: z.string().regex(/^[0-9a-f]{32}$/i),

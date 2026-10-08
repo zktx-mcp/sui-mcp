@@ -6,6 +6,7 @@ import { CardStore } from "../core/session/cardSessionStore.js";
 import { accountInputSchema, receiptInputSchema, chartInputSchema } from "../core/read/readCardInputs.js";
 import type { Logger } from "../runtime/logger.js";
 import type { WalletWorkflow } from "../core/session/walletWorkflow.js";
+import type { SettingsWorkflow } from "../core/session/settingsWorkflow.js";
 
 export function createReadCardStore(options: {
   records: CardRecordStore;
@@ -17,9 +18,10 @@ export function createReadCardStore(options: {
   now?: (() => Date) | undefined;
   logger?: Logger | undefined;
   workflow?: WalletWorkflow | undefined;
+  settings?: SettingsWorkflow | undefined;
 }): CardStore {
   return new CardStore({
-    records: options.records, ownerId: options.ownerId, assertCurrent: options.assertCurrent, now: options.now, logger: options.logger, workflow: options.workflow,
+    records: options.records, ownerId: options.ownerId, assertCurrent: options.assertCurrent, now: options.now, logger: options.logger, workflow: options.workflow, settings: options.settings,
     prepare: async (kind) => {
       if (kind !== "chart") return { status: "ready" };
       const choices = await options.chart.getPools();

@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { EXTERNAL_ACTIVITY_SCAN_MAX_LIMIT } from "./activityStore.js";
-import { DB_USER_VERSION } from "./schemaVersion.js";
 import { ActivityStoreError, type SqliteDatabase } from "./sqliteActivityStoreTypes.js";
+import { SETTINGS_RESET_PREPARATION_SQL } from "../session/settingsPreparationSql.js";
 import {
   LIVE_REVIEW_SESSION_INSERT_TRIGGER,
   LIVE_REVIEW_SESSION_UPDATE_TRIGGER,
@@ -138,6 +138,7 @@ const CURRENT_SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS live_wallet_connections (
       id TEXT PRIMARY KEY,
       owner_id TEXT NOT NULL,
+      run_id TEXT,
       status TEXT NOT NULL,
       revision INTEGER NOT NULL CHECK (revision >= 0),
       topic TEXT UNIQUE,
@@ -147,6 +148,7 @@ const CURRENT_SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS live_request_authority (
       attempt_id TEXT PRIMARY KEY REFERENCES review_requests(attempt_id) ON DELETE RESTRICT,
       owner_id TEXT NOT NULL,
+      run_id TEXT,
       connection_id TEXT NOT NULL REFERENCES live_wallet_connections(id) ON DELETE RESTRICT,
       connection_revision INTEGER NOT NULL,
       can_submit INTEGER NOT NULL CHECK (can_submit IN (0,1)),
@@ -226,6 +228,7 @@ const CURRENT_SCHEMA_SQL = `
       owner_id TEXT NOT NULL,
       review_revision INTEGER NOT NULL DEFAULT 0,
       preparation_id TEXT,
+      preparation_run_id TEXT,
       preparation_error TEXT,
       wallet_connection_id TEXT,
       wallet_connection_revision INTEGER,
@@ -245,16 +248,11 @@ const CURRENT_SCHEMA_SQL = `
       artifacts_json TEXT NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS live_settings_sessions (
-      id TEXT PRIMARY KEY,
-      session_json TEXT NOT NULL
-    );
-
     CREATE TABLE IF NOT EXISTS live_read_cards (
       id TEXT PRIMARY KEY,
       owner_id TEXT NOT NULL,
       token_hash TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK (kind IN ('account', 'receipt', 'chart', 'connect', 'review')),
+      kind TEXT NOT NULL CHECK (kind IN ('account', 'receipt', 'chart', 'connect', 'review', 'settings')),
       state TEXT NOT NULL CHECK (state IN ('ready', 'running', 'closed')),
       reason TEXT CHECK (reason IN ('completed', 'expired', 'failed', 'server_restarted', 'cancelled')),
       error TEXT,
@@ -262,7 +260,7 @@ const CURRENT_SCHEMA_SQL = `
       created_at TEXT NOT NULL,
       expires_at TEXT NOT NULL,
       input_json TEXT NOT NULL,
-      scope TEXT NOT NULL DEFAULT 'read' CHECK (scope IN ('read', 'connect', 'review', 'review_manage')),
+      scope TEXT NOT NULL DEFAULT 'read' CHECK (scope IN ('read', 'connect', 'review', 'review_manage', 'settings')),
       operation_id TEXT,
       accepted_input_json TEXT,
       result_json TEXT,
@@ -272,6 +270,59 @@ const CURRENT_SCHEMA_SQL = `
       CHECK (receipt_display_json IS NULL OR (kind = 'receipt' AND reason = 'completed'))
     );
     CREATE INDEX IF NOT EXISTS idx_live_read_cards_owner_state ON live_read_cards(owner_id, state);
+    CREATE TABLE IF NOT EXISTS settings_control (
+      id INTEGER PRIMARY KEY CHECK (id=1),
+      data_epoch INTEGER NOT NULL DEFAULT 0 CHECK (data_epoch BETWEEN 0 AND 9007199254740991),
+      user_data_revision INTEGER NOT NULL DEFAULT 0 CHECK (user_data_revision BETWEEN 0 AND 9007199254740991),
+      active_operation_id TEXT,
+      file_io_id TEXT,
+      wallet_input_blocked INTEGER NOT NULL DEFAULT 0 CHECK (wallet_input_blocked IN (0,1)),
+      wallet_block_operation_id TEXT
+    );
+    INSERT INTO settings_control (id) VALUES (1);
+    CREATE TABLE IF NOT EXISTS settings_operations (
+      operation_id TEXT PRIMARY KEY,
+      card_id TEXT NOT NULL UNIQUE REFERENCES live_read_cards(id) ON DELETE CASCADE,
+      owner_id TEXT NOT NULL,
+      data_epoch INTEGER NOT NULL CHECK (data_epoch BETWEEN 0 AND 9007199254740991),
+      kind TEXT,
+      phase TEXT NOT NULL CHECK (phase IN ('draft','uploading','sealed','prepared','executing','stopping','starting','terminal')),
+      draft_json TEXT,
+      preparation_id TEXT,
+      fingerprint TEXT,
+      prepared_user_data_revision INTEGER,
+      preparation_json TEXT,
+      file_id TEXT,
+      accepted_digest TEXT,
+      admitted_at TEXT,
+      result_json TEXT,
+      prior_run_id TEXT,
+      next_run_id TEXT,
+      supersedes_operation_id TEXT,
+      superseded_by_operation_id TEXT,
+      checkpoint TEXT,
+      CHECK ((phase='terminal' AND result_json IS NOT NULL) OR (phase!='terminal' AND result_json IS NULL))
+    );
+    CREATE TRIGGER IF NOT EXISTS settings_immutable_result
+    BEFORE UPDATE ON settings_operations WHEN OLD.result_json IS NOT NULL AND NEW.result_json IS NOT OLD.result_json
+    BEGIN SELECT RAISE(ABORT, 'settings terminal result is immutable'); END;
+    CREATE TABLE IF NOT EXISTS settings_files (
+      file_id TEXT PRIMARY KEY,
+      operation_id TEXT NOT NULL,
+      cleanup_operation_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('upload','export')),
+      relative_path TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      total_size INTEGER NOT NULL CHECK (total_size BETWEEN 0 AND 9007199254740991),
+      received_size INTEGER NOT NULL CHECK (received_size BETWEEN 0 AND total_size),
+      sha256 TEXT NOT NULL,
+      sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0,1)),
+      invalidated INTEGER NOT NULL DEFAULT 0 CHECK (invalidated IN (0,1)),
+      cleanup TEXT NOT NULL DEFAULT 'pending' CHECK (cleanup IN ('pending','complete','failed')),
+      reservation_json TEXT
+    );
+    ${settingsRevisionTriggers()}
+
     CREATE TRIGGER IF NOT EXISTS live_read_cards_insert_revision
     BEFORE INSERT ON live_read_cards WHEN NEW.revision != 0
     BEGIN SELECT RAISE(ABORT, 'card insert requires revision zero'); END;
@@ -331,10 +382,9 @@ function expectedSchemaSignature(): string {
 }
 
 export function assertCurrentDatabaseFormat(db: SqliteDatabase): "empty" | "current" {
-  const version = db.pragma("user_version", { simple: true }) as number;
   const signature = schemaSignature(db);
-  if (version === 0 && signature === "[]") return "empty";
-  if (version === DB_USER_VERSION && signature === expectedSchemaSignature()) return "current";
+  if (signature === "[]" && !db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()) return "empty";
+  if (signature === expectedSchemaSignature()) return "current";
   throw new ActivityStoreError(
     "Local database format does not match this runtime. Use a new empty SUI_MCP_DATA_DIR; existing data is not converted or deleted."
   );
@@ -344,7 +394,6 @@ export function initializeDatabase(db: SqliteDatabase): void {
   if (assertCurrentDatabaseFormat(db) === "current") return;
   db.transaction(() => {
     db.exec(CURRENT_SCHEMA_SQL);
-    db.pragma(`user_version = ${DB_USER_VERSION}`);
   })();
 }
 
@@ -374,4 +423,28 @@ function externalActivityScansTableSql(): string {
       OR incomplete_reason IN ('limit_reached', 'ordering_unverified', 'cursor_invalid', 'provider_error')
     )
   )`;
+}
+
+// Exported user data has one durable revision, including writers outside Settings.
+// A prepared confirmation is invalidated once, in the writer's own transaction.
+function settingsRevisionTriggers(): string {
+  const userTables = ["accounts", "active_account_context", "review_sessions", "review_state_snapshots",
+    "review_status_transitions", "review_executions", "review_requests", "external_activity_scans",
+    "external_activity_transactions", "local_settings"];
+  const walletTables = ["live_wallet_connections", "live_review_sessions", "live_request_authority"];
+  const invalidate = (condition: string) => `
+    UPDATE live_read_cards SET revision=revision+1
+      WHERE id IN (SELECT card_id FROM settings_operations WHERE phase='prepared' AND (${condition}));
+    ${SETTINGS_RESET_PREPARATION_SQL}
+      WHERE phase='prepared' AND (${condition});`;
+  return [...new Set([...userTables, ...walletTables])].flatMap((table) =>
+    ["INSERT", "UPDATE", "DELETE"].map((event) => `
+      CREATE TRIGGER settings_revision_${table}_${event.toLowerCase()} AFTER ${event} ON ${table}
+      BEGIN
+        ${userTables.includes(table) ? "UPDATE settings_control SET user_data_revision=user_data_revision+1 WHERE id=1;" : ""}
+        ${invalidate([...(userTables.includes(table) ? ["kind IN ('import_local_data','reset_local_data')"] : []),
+          ...(walletTables.includes(table) || table === "review_requests" ? ["kind='restart_wallet_service'"] : []),
+          ...(table === "local_settings" ? ["kind IN ('set_endpoint','restore_endpoint')"] : []),
+          ...(table === "active_account_context" ? ["kind='clear_read_address'"] : [])].join(" OR ") || "0")}
+      END;`)).join("\n");
 }

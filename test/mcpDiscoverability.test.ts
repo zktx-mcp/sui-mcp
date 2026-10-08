@@ -35,7 +35,9 @@ import { PreferencesStoreError, type LocalSettingsService } from "../src/core/pr
 import { SuiEndpointError } from "../src/core/suiEndpoint.js";
 import { InMemorySessionStore } from "../src/core/session/sessionStore.js";
 import { MCP_RESOURCES } from "../src/mcp/resources.js";
-import { createMcpServer } from "../src/mcp/server.js";
+import { createMcpServer, type McpServerDeps } from "../src/mcp/server.js";
+import { settingsWorkflowFixture } from "./fixtures/settingsWorkflow.js";
+import { CARD_METADATA_KEY, CARD_RESOURCE_URIS, CARD_TOOLS, cardSnapshotSchema } from "../src/mcp-ui/contracts.js";
 import {
   toolAvailability,
   EVIDENCE_POLICY,
@@ -135,6 +137,7 @@ async function connectTestClient(
     readService?: SuiReadService;
     transactionActivitySource?: SuiTransactionActivitySource;
     sessionTtlMs?: number;
+    cards?: McpServerDeps["cards"];
   } = {}
 ) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -153,7 +156,7 @@ async function connectTestClient(
     activityStore,
     ...(options.workflow ? { workflow: options.workflow } : {}),
     localSettings,
-    reviewBaseUrl: "http://127.0.0.1:4173",
+    ...(options.cards ? { cards: options.cards } : {}),
     logger: testLogger,
     readService: options.readService ?? createTestReadService(),
     transactionActivityService: new TransactionActivityService({
@@ -472,7 +475,8 @@ describe("MCP discoverability", () => {
         "ui://sui-mcp/chart.html",
         "ui://sui-mcp/connect.html",
         "ui://sui-mcp/receipt.html",
-        "ui://sui-mcp/review.html"
+        "ui://sui-mcp/review.html",
+        "ui://sui-mcp/settings.html"
       ]);
 
       for (const expectedResource of MCP_RESOURCES) {
@@ -733,7 +737,9 @@ describe("MCP discoverability", () => {
   });
 
   it("exposes local settings tools through MCP", async () => {
-    const { client, server } = await connectTestClient();
+    const f = await settingsWorkflowFixture();
+    const { client, server } = await connectTestClient({ activityStore: f.wallet.activity, localSettings: f.localSettings,
+      cards: { store: f.cards }, workflow: f.wallet.workflow });
     try {
       const tools = await client.listTools();
       const settingsTools = tools.tools.filter((tool) => tool.name.startsWith("settings."));
@@ -745,26 +751,19 @@ describe("MCP discoverability", () => {
         expect(tool.description).not.toMatch(/must|should|always/i);
       }
 
-      const created = await client.callTool({ name: TOOL_NAMES.settingsCreateLocalSettingsSession });
-      const createdPayload = textPayload(created) as {
-        ok: boolean;
-        data: {
-          settingsSessionId: string;
-          settingsUrl: string;
-          openTarget: string;
-          accessScope: string;
-        };
-      };
-      expect(createdPayload).toMatchObject({
-        ok: true,
-        data: {
-          openTarget: "system_browser",
-          accessScope: "same_machine_loopback"
-        }
-      });
-      expect(createdPayload.data.settingsUrl).toContain(`/settings/${createdPayload.data.settingsSessionId}#`);
+      expect(tools.tools.find((tool) => tool.name === TOOL_NAMES.settingsCreateLocalSettingsSession)?._meta).toMatchObject({ ui: { resourceUri: CARD_RESOURCE_URIS.settings } });
+      const created = await f.wallet.run(() => client.callTool({ name: TOOL_NAMES.settingsCreateLocalSettingsSession }));
+      const createdPayload = textPayload(created) as { ok: boolean; data: unknown };
+      expect(createdPayload.ok).toBe(true);
+      expect(cardSnapshotSchema.parse(createdPayload.data)).toMatchObject({ kind: "settings", state: "ready", input: {}, data: { phase: "draft" } });
+      expect(JSON.stringify(createdPayload)).not.toMatch(/settingsUrl|openTarget|settingsSessionId|permission/);
+      expect(created._meta?.[CARD_METADATA_KEY]).toHaveProperty("permission");
+      for (const name of [CARD_TOOLS.act, CARD_TOOLS.readSettingsFile]) {
+        expect(tools.tools.find((tool) => tool.name === name)?._meta).toMatchObject({ ui: { visibility: ["app"] } });
+      }
+      expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.connect).not.toHaveBeenCalled();
 
-      const current = await client.callTool({ name: TOOL_NAMES.settingsGetLocalSettings });
+      const current = await f.wallet.run(() => client.callTool({ name: TOOL_NAMES.settingsGetLocalSettings }));
       expect(textPayload(current)).toMatchObject({
         ok: true,
         data: {
@@ -777,6 +776,7 @@ describe("MCP discoverability", () => {
       });
     } finally {
       await server.close();
+      f.close();
     }
   });
 
@@ -3053,11 +3053,10 @@ describe("MCP discoverability", () => {
         }
       });
 
-      const cleared = await client.callTool({ name: TOOL_NAMES.accountClearActiveAccount });
-      expect(JSON.parse((cleared.content as Array<{ text?: string }>)[0]?.text ?? "")).toMatchObject({
-        ok: true,
-        data: { status: "cleared" }
-      });
+      const rejected = await client.callTool({ name: "account.clear_active_account" });
+      expect(rejected.isError).toBe(true);
+      expect(await activityStore.getActiveAccount()).toMatchObject({ address: walletAccount });
+
     } finally {
       await server.close();
     }
@@ -3076,7 +3075,6 @@ describe("MCP discoverability", () => {
       sessions,
       activityStore,
       localSettings: new InMemoryLocalSettingsService(),
-      reviewBaseUrl: "http://127.0.0.1:4173",
       logger,
       readService: new SuiReadService({
         network: "mainnet",
@@ -3201,7 +3199,6 @@ describe("MCP discoverability", () => {
       }),
       activityStore,
       localSettings: new InMemoryLocalSettingsService(),
-      reviewBaseUrl: "http://127.0.0.1:4173",
       logger,
       readService: createTestReadService(),
       transactionActivityService: new TransactionActivityService({
@@ -3242,14 +3239,9 @@ describe("MCP discoverability", () => {
         error: { kind: "internal_error", details: { message: "Activity store call failed" } }
       });
 
-      const clearResult = await replacementClient.callTool({
-        name: TOOL_NAMES.accountClearActiveAccount,
-        arguments: {}
-      });
-      expect(textPayload(clearResult)).toMatchObject({
-        ok: false,
-        error: { kind: "internal_error", details: { message: "Activity store call failed" } }
-      });
+      const clearResult = await replacementClient.callTool({ name: "account.clear_active_account", arguments: {} });
+      expect(clearResult.isError).toBe(true);
+      expect(clearActiveAccount).not.toHaveBeenCalled();
       expect(logger.error).toHaveBeenCalledWith("activity store call failed", {
         error: "local database unavailable"
       });
@@ -3287,7 +3279,6 @@ describe("MCP discoverability", () => {
       sessions,
       activityStore,
       localSettings: new InMemoryLocalSettingsService(),
-      reviewBaseUrl: "http://127.0.0.1:4173",
       logger,
       readService: createTestReadService(),
       transactionActivityService: new TransactionActivityService({

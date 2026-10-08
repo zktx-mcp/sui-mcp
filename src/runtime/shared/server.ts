@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
-import { HttpError, sendJson } from "../../review-server/http.js";
+import { HttpError, sendJson } from "./http.js";
 import { createServerIdentity, IDENTITY_CHALLENGE_HEADER, IDENTITY_PATH, INTERNAL_MCP_PATH,
   singleHeader, validControlAuthorization, validInternalRequest, type ControlIdentity } from "./control.js";
 

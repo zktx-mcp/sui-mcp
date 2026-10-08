@@ -286,7 +286,7 @@ describe("disconnect request routing", () => {
     expect(flow).toContain("Back only returns to the connection view");
     expect(flow).toContain("does not submit Cancel review or disconnect");
     expect(flow).toContain("The card starts no pairing");
-    expect(flow).toContain("Do not substitute `account.clear_active_account`");
+    expect(flow).toContain("Do not substitute the Settings action to clear the default read address");
     expect(flow).toContain("If disconnection is already pending");
     expect(behavior).toContain("For a connect request, if the requested wallet is already connected");
   });

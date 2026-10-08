@@ -204,8 +204,8 @@ it("excludes a connection input that expires between list selection and its DB e
   const f = await walletWorkflowFixture(); fixtures.push(f);
   const card = await f.createConnection();
   f.advance(Date.parse(card.snapshot.expiresAt) - f.now().getTime() - 1);
-  const evaluate = f.records.evaluate.bind(f.records);
-  vi.spyOn(f.records, "evaluate").mockImplementationOnce((input) => {
+  const evaluate = f.records.reconcileAndEvaluate.bind(f.records);
+  vi.spyOn(f.records, "reconcileAndEvaluate").mockImplementationOnce((input) => {
     f.advance(1); return evaluate(input);
   });
   expect(f.run(() => f.workflow.pendingConnections())).toEqual([]);

@@ -1,3 +1,4 @@
+import { SERVER_VERSION } from "../src/mcp/serverInfo.js";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { afterEach, expect, it } from "vitest";
@@ -20,7 +21,7 @@ class Peer extends EventEmitter {
   finish() { if (this.signalCode) return; this.connected = false; this.signalCode = "SIGKILL"; this.emit("exit", null, "SIGKILL"); }
   receive(event: WalletEvent) { this.emit("message", event); }
   snapshot(runId: string, sequence: number, version: number, ready = false, account = sdkFixtureAccount) {
-    this.receive({ protocolVersion: 1, runId, type: "snapshot", ready, snapshot: { runId, sequence,
+    this.receive({ packageVersion: SERVER_VERSION, runId, type: "snapshot", ready, snapshot: { runId, sequence,
       observedAt: "2030-01-01T00:00:00.000Z", sessions: [{ topic: sdkFixtureTopic, status: "present", version, session: {
         topic: sdkFixtureTopic, accounts: [account], methods: ["sui_signTransaction"], chain: "sui:mainnet", expiresAt: "2099-01-01T00:00:00.000Z"
       } }] } });
@@ -55,7 +56,7 @@ it("keeps pending replies until actual exit, ignores the fenced run, and starts 
   expect(request).toMatchObject({ type: "disconnect", requestId: 1, operationId: "disconnect-one", runId: run.runId });
   f.runtime.fence(run.runId);
   const replacing = f.runtime.replace(run.runId, () => expect(peer.signalCode).toBe("SIGKILL"));
-  peer.receive({ protocolVersion: 1, runId: run.runId, type: "disconnected", requestId: 1, operationId: "disconnect-one" });
+  peer.receive({ packageVersion: SERVER_VERSION, runId: run.runId, type: "disconnected", requestId: 1, operationId: "disconnect-one" });
   await Promise.resolve(); expect(ended).toBe(false); expect(f.peers).toHaveLength(1);
   peer.finish(); await rejection; await replacing;
   expect(f.peers).toHaveLength(2); expect(peer.kills).toBe(1);
@@ -68,7 +69,7 @@ it("does not use a check response superseded by a newer session observation", as
   const pending = run.checkSession(sdkFixtureTopic, "final-check");
   const refused = expect(pending).rejects.toThrow("changed during confirmation");
   peer.snapshot(run.runId, 2, 2, false, `0x${"d".repeat(64)}`);
-  peer.receive({ protocolVersion: 1, runId: run.runId, type: "checked", requestId: 1, operationId: "final-check", sequence: 1,
+  peer.receive({ packageVersion: SERVER_VERSION, runId: run.runId, type: "checked", requestId: 1, operationId: "final-check", sequence: 1,
     observation: { topic: sdkFixtureTopic, version: 1, status: "present", session: { topic: sdkFixtureTopic, accounts: [sdkFixtureAccount],
       methods: ["sui_signTransaction"], chain: "sui:mainnet", expiresAt: "2099-01-01T00:00:00.000Z" } } });
   await refused;

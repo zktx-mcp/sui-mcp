@@ -15,8 +15,9 @@ evidence. Users inspect independently built or verified transaction material
 and approve each transaction in their own wallet. The current backend builds
 account-bound DeepBook swap material, verifies its digest, ownership,
 quote/policy provenance, human-readable facts, simulation and PTB visualization,
-and exposes internal Connect and Review cards alongside Account, Receipt and
-Chart cards. Settings still uses a local token page.
+and exposes internal Connect and Review cards alongside Account, Receipt,
+Chart and Settings cards. Settings owns scoped local data/configuration actions
+and explicit connection-service recovery; ordinary MCP calls do not apply them.
 
 WalletConnect is the only connection and signing transport. An explicit,
 permission-checked card action is admitted atomically in SQLite before the
@@ -31,11 +32,10 @@ Implemented surfaces and deliberately sequenced work remain distinct:
 
 - Current surfaces: read-only evidence and external proposal review, internal
   Connect/Review cards for the supported swap adapter, backend WalletConnect
-  signing and receipt observation, and a local Settings page. Ordinary MCP tools
+  signing and receipt observation, and internal Settings/file/data controls. Ordinary MCP tools
   create cards or read evidence; they do not authorize signing or execution.
-- Sequenced next: internal Settings card and complete removal of its external
-  page, final package release checks, further analysis views and protocol
-  adapters. External proposal execution requires a separate implementation
+- Sequenced next: final package and actual Host handoff checks, further analysis
+  views and protocol adapters. External proposal execution requires a separate implementation
   decision and independent material verification; proposals remain non-signable.
 
 The evidence layer answers what verified Sui facts support about a user's

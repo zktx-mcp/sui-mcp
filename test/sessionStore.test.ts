@@ -36,12 +36,9 @@ import {
 import {
   SqlitePrivateReviewArtifactStore,
   SqliteSessionRecordStore,
-  createSqliteSettingsRecordStore
 } from "../src/core/session/sqliteSessionStore.js";
 import type { SessionRecordStore } from "../src/core/session/sessionRecordStore.js";
 import type { PrivateReviewArtifactStore } from "../src/core/session/privateReviewArtifacts.js";
-import type { KeyedRecordStore } from "../src/core/session/keyedRecordStore.js";
-import type { SettingsSession } from "../src/core/session/settingsSession.js";
 import { InMemoryActivityStore } from "./fixtures/inMemoryActivityStore.js";
 import { deepbookDisplayQuote } from "./fixtures/deepbookQuote.js";
 import { createTestSwapHumanReadableReviewEvidence } from "./fixtures/humanReadableReview.js";
@@ -72,7 +69,6 @@ const activities = new WeakMap<LocalSessionStore, InMemorySessionStoreOptions["a
 type SessionRecordStores = {
   sessions: SessionRecordStore;
   artifacts: PrivateReviewArtifactStore;
-  settingsStore: KeyedRecordStore<SettingsSession>;
 };
 
 // Run the full session-store contract against both backends. The orchestration is
@@ -89,7 +85,6 @@ const SESSION_STORE_BACKENDS: Array<[string, () => SessionRecordStores | undefin
       return {
         sessions: new SqliteSessionRecordStore(db),
         artifacts: new SqlitePrivateReviewArtifactStore(db),
-        settingsStore: createSqliteSettingsRecordStore(db)
       };
     }
   ]
@@ -309,7 +304,6 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
           ...base,
           sessions: recordStores.sessions,
           artifacts: recordStores.artifacts,
-          settingsStore: recordStores.settingsStore
         })
       : new InMemorySessionStore(base);
     activities.set(store, base.activityStore);

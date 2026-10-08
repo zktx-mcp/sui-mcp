@@ -1,3 +1,4 @@
+import { SERVER_VERSION } from "../mcp/serverInfo.js";
 import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -22,7 +23,7 @@ export class WalletSdkProcess implements WalletRuntime {
   private started = false;
   private closed = false;
   private replacement: { run: Run } | undefined;
-  constructor(private readonly options: Omit<WalletInit, "type" | "runId" | "protocolVersion" | "metadata"> & {
+  constructor(private readonly options: Omit<WalletInit, "type" | "runId" | "packageVersion" | "metadata"> & {
     metadata?: WalletInit["metadata"];
     spawn?: () => ChildProcess;
   }) {}
@@ -75,7 +76,7 @@ export class WalletSdkProcess implements WalletRuntime {
         if (child.pid === undefined) this.exited(run);
       });
       child.once("disconnect", () => { if (!run.fenced && !run.didExit) this.lose(run, this.failureReason()); });
-      this.send(run, { protocolVersion: 1, runId: run.id, type: "init", dataDirectory: this.options.dataDirectory,
+      this.send(run, { packageVersion: SERVER_VERSION, runId: run.id, type: "init", dataDirectory: this.options.dataDirectory,
         projectId: this.options.projectId, metadata: this.options.metadata });
     } catch { this.lose(run, "initialization_failed"); if (!run.child) this.exited(run); }
   }
@@ -236,7 +237,7 @@ export class WalletSdkProcess implements WalletRuntime {
       const requestId = ++run.serial;
       return new Promise<Reply>((resolve, reject) => {
         run.pending.set(requestId, { operationId, type: input.type, resolve, reject, ...approval });
-        try { this.send(run, { ...input, protocolVersion: 1, runId: run.id, requestId, operationId }); }
+        try { this.send(run, { ...input, packageVersion: SERVER_VERSION, runId: run.id, requestId, operationId }); }
         catch (error) { run.pending.delete(requestId); reject(error); }
       });
     };

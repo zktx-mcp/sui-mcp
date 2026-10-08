@@ -1,7 +1,7 @@
 # Frontend Policy
 
-Account, Receipt, Chart, Connect and Review use internal MCP Apps cards.
-Settings remains a local session-token page. Cards display backend-validated
+Account, Receipt, Chart, Connect, Review and Settings use internal MCP Apps cards.
+There is no external Settings page. Cards display backend-validated
 facts and forward explicit user selections through scoped app-only tools. They
 never hold transaction bytes/signatures or call a wallet, Sui RPC, Indexer or
 local HTTP endpoint directly. Direct NFT image loading is the display exception.
@@ -307,20 +307,50 @@ same View and opened Details during unchanged state reads; disposed callbacks
 cannot alter its replacement. Normal display changes do not postpone required
 backend state reads.
 
-For a stopped/unresponsive connection service, explain the actual operational
-path: fully quit all apps using Sui MCP, then reopen them. Closing a peer
-or window alone may not stop the shared owner. Do not promise that restart
-removes remote sessions or confirms an interrupted disconnect. Normal QR or
-initialization is not diagnosed as failure by a timer. An uncertain command
-first offers the same-request status check; the model cannot act for the user.
-Historical service-recovery cards retain their own recorded result and no new
-input. Their service outcome never implies connection approval, remote removal
-or a transaction outcome.
+Connection-service recovery belongs to Settings/Troubleshooting and requires
+explicit user preparation/confirmation of the affected SDK run and requests.
+Connect/Review explain that path when recovery is relevant; they do not host
+service-restart controls. Normal QR approval or initialization is not a failure
+diagnosis. An uncertain command first offers its same-request status check.
+If the parent/Settings is unavailable or a parent endpoint/installation change
+must apply, explain full exit/reopen of all participating apps. Child restart
+never implies remote disconnection, connection approval or chain outcome.
+
+Settings separates ordinary Read address, Local records and Troubleshooting
+from Advanced endpoint controls. Show operation impact and errors in the body;
+technical values use the existing Details disclosure. Each card owns one
+operation and its stored result. Preview, Back, chat navigation and state reads
+do not apply settings, create another file or restart the SDK. A valid sealed
+upload remains available for a new Preview after preparation invalidation;
+explicit file change uses the backend selection action. Validation rejection
+retains the actual current card and a usable correction/selection path.
+
+Results distinguish data application, temporary backup cleanup and optional
+Host download. Incomplete cleanup offers Check status for the same operation.
+Cleanup includes settlement of that operation's ended I/O reservation. A stored
+result remains readable while that settlement is retried; it does not authorize
+releasing another operation's running I/O.
+Download is explicit, reads/verifies the same complete file, and is never
+repeated by a recreated frame. Capability absence, pending, acknowledged,
+not_completed and unconfirmed are distinct; acknowledgment is not proof of a
+save location and isError does not classify cancellation/denial/failure.
 
 Local-data counts describe the backend state at the time they are read. A later
 replacement warning must not use a stale count, especially zero, as an assurance
 that no unconfirmed transaction records will be deleted. Warn that replacement
 can remove those records and cannot cancel a transaction on Sui.
+The private connection-service journal remains; Reset does not claim that the
+SDK is empty or grant a new pairing. Connect controls use backend
+`manageableConnectionIds`, separately from `usableConnectionId`. Unrecorded SDK
+presence uses conditional Settings recovery guidance after registration ends,
+without a synthetic target or global recovery controls in Connect.
+
+Endpoint confirmations name Sui node (gRPC) or Activity data (GraphQL), show the
+stored value before the change and the exact value to store. Their result labels
+the effective value and source at save time. Explain an active environment
+override in the body: restart alone will not apply the stored value while that
+override remains. Do not substitute a current configuration read for the saved
+result or copy default URLs into the View.
 
 ## Internal Read Cards
 
@@ -338,7 +368,7 @@ Receipt input values and their PTB graph use a typed UI-only metadata channel bo
 
 Internal cards provide no clipboard actions, copy buttons, or clipboard fallback controls. Preserve readable facts and ordinary text selection; where a PTB graph is shown, preserve its name/address controls and pan/zoom. NFT images retain no-referrer behavior and a failed-image placeholder. Theme follows the host. Card view cleanup ends timers, subscriptions and rendering observers without cancelling an already admitted server operation.
 
-All five cards, including Review management, adapt to the embedded frame width.
+All six cards, including Review management, adapt to the embedded frame width.
 Forms wrap, narrow fact rows stack their label above the value, and long addresses,
 amounts, names and records remain readable without widening the document. QR,
 chart and PTB drawing areas stay within the card; resizing changes presentation
@@ -446,9 +476,9 @@ Frontend labels stay in English. Localization must preserve protocol names, toke
 
 ## Shared UI And Design Principles
 
-The card views and remaining Settings page share one design-token set and one set of atomic UI
+The card views share one design-token set and one set of atomic UI
 components: vanilla TypeScript DOM helpers in `review-app/src/ui` plus the shared
-stylesheet `review-app/public/ui.css`, served at `/review-assets/ui.css`. There is
+stylesheet `review-app/public/ui.css`, bundled into each self-contained card HTML. There is
 no React, Vue, Svelte, or client router. Views compose the shared atoms and keep
 only their own layout, container, third-party-sizing, and composition CSS. The
 shared atoms are addressed by `ui-` prefixed classes that only the shared
@@ -462,7 +492,7 @@ The shared UI follows these durable principles:
    clearly-signaled async lock. Status and errors are conveyed as text, not color
    alone.
 2. One consistent system: cards share one lifecycle, one component set, and the
-   same element positions. Cards and token pages have no cross-page navigation.
+   same element positions. Cards have no cross-page navigation.
 3. Cards show the current step and next permitted action without permanently
    listing every earlier step. A completed transaction leads with its observed
    result; stored request state is not a second outcome. Settings preview and
@@ -479,28 +509,22 @@ The shared UI follows these durable principles:
    enough detail to diagnose afterward.
 7. Restraint: each page shows only the information it needs, with generous spacing.
 8. Information depth by importance: each page ranks its information and renders the
-   user task first and most prominent. Internal cards are one document: plain sections, rows and whitespace replace nested cards. Supplementary facts use one closed Details slide with plain sections inside, never nested disclosures. Do not repeat summary values or status in another panel. Review and Receipt place the correct transaction graph above their concise decision/result. Important errors and costs remain visible. Settings retains its page layout.
+   user task first and most prominent. Internal cards are one document: plain sections, rows and whitespace replace nested cards. Supplementary facts use one closed Details slide with plain sections inside, never nested disclosures. Do not repeat summary values or status in another panel. Review and Receipt place the correct transaction graph above their concise decision/result. Important errors and costs remain visible. Settings uses the same plain sections/rows and one Details disclosure.
 
-Theme: cards follow the host; the remaining Settings page has a theme toggle. A shared theme helper stores
-only the theme value (`light` or `dark`) under one fixed storage key; it never
-reads or writes a token, session id, wallet account, or any other state. The
-theme is the `data-theme` attribute on the document root and is applied through
-CSS variables with no inline styles, so it works under the strictest page CSP.
-
-Icons are SVG files or inline SVG, never an icon font or a CDN. The favicon
-(`favicon.svg`) and the theme-specific brand marks (`brand-light.svg`,
-`brand-dark.svg`) are served from `/review-assets/`; the header shows the brand
-mark for the active theme.
+All cards follow Host light/dark theme through the document's `data-theme`
+attribute and shared CSS tokens. They do not persist a separate theme choice.
+Use inline SVG icons or bundled assets, never an icon font/CDN or retired
+`/review-assets/` route.
 
 ## Navigation
 
-Read cards open from purpose-specific MCP tools. They contain their own result and error states and do not link to removed Account, Receipt, Chart, home or HTML not-found pages. Cards and the Settings page have no cross-page navigation or linked brand exit.
+Read cards open from purpose-specific MCP tools. They contain their own result and error states and do not link to removed Account, Receipt, Chart, home or HTML not-found pages. Cards have no cross-page navigation or linked brand exit.
 
 ## Security
 
 Tokens must not be accepted in query strings. Wallet addresses must not be written to local event logs in plaintext. Private keys, signatures, transaction bytes, and arbitrary Move calls must not appear in frontend state.
 
-Cards bundle script/style locally with the declared Host CSP and no external execution chunks. The Settings page uses local assets and Host/Origin/session-token checks. App-only tools require scoped UI permission, target and revision checks.
+Cards bundle script/style locally with the declared Host CSP and no external execution chunks. There is no external page/asset or HTTP mutation fallback. Shared private HTTP transport retains Host/Origin and transport authentication checks. App-only tools require scoped UI permission, target and revision checks.
 
 Wallet and review screens must be keyboard reachable and screen-reader labeled. Status and error changes must be exposed as text, not color alone.
 

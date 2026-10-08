@@ -1,5 +1,4 @@
 import { hasUnsettledWalletWork } from "../session/sqliteWalletWorkflowStore.js";
-import { DB_USER_VERSION } from "./schemaVersion.js";
 import type Database from "better-sqlite3";
 import type { AdapterLifecycleValidator } from "../action/adapterLifecycleValidation.js";
 import { SuiEndpointError, parseGraphqlUrl, parseGrpcUrl } from "../suiEndpoint.js";
@@ -27,6 +26,7 @@ import {
 } from "./localDataTypes.js";
 import {
   activeAccountChange,
+  activeAccountAddress,
   countsForPayload,
   invalidBackup,
   maxNumber,
@@ -50,20 +50,21 @@ export class SqliteLocalDataService implements LocalDataService {
   private now(): Date { return this.options.now?.() ?? new Date(); }
 
   async getDataCounts(): Promise<LocalDataCounts> {
-    return this.currentDataCounts();
+    return this.currentDataCountsSync();
   }
 
-  private currentDataCounts(): LocalDataCounts {
+  currentDataCountsSync(now = this.now()): LocalDataCounts {
     return this.db.transaction(() => {
-      this.options.advanceRequestDeadlines(this.now());
+      this.options.advanceRequestDeadlines(now);
       return this.getDataCountsSync();
     }).immediate();
   }
 
-  async exportLocalData(now = new Date()): Promise<LocalDataEnvelope> {
+  async exportLocalData(now = new Date()): Promise<LocalDataEnvelope> { return this.exportLocalDataSync(now); }
+
+  exportLocalDataSync(now = this.now()): LocalDataEnvelope {
     return this.db.transaction(() => {
       const envelope = {
-        schemaVersion: DB_USER_VERSION,
         format: LOCAL_DATA_EXPORT_FORMAT,
         network: LOCAL_DATA_NETWORK,
         exportedAt: now.toISOString(),
@@ -86,37 +87,57 @@ export class SqliteLocalDataService implements LocalDataService {
     })();
   }
 
-  async previewImportLocalData(input: unknown): Promise<LocalDataImportPreview> {
+  async previewImportLocalData(input: unknown): Promise<LocalDataImportPreview> { return this.previewImportLocalDataSync(input); }
+
+  previewImportLocalDataSync(input: unknown, now = this.now()): LocalDataImportPreview {
     const envelope = parseLocalDataEnvelope(input, {
       validateAdapterLifecycle: this.validateAdapterLifecycle
     });
-    return {
-      status: "valid",
-      format: envelope.format,
-      network: envelope.network,
-      exportedAt: envelope.exportedAt,
-      currentCounts: this.currentDataCounts(),
-      incomingCounts: countsForPayload(envelope.data),
-      willReplace: true,
-      activeAccountChange: activeAccountChange(
-        this.selectAll<AccountExportRow>("accounts"),
-        this.selectAll<ActiveAccountContextExportRow>("active_account_context"),
-        envelope.data.accounts,
-        envelope.data.activeAccountContext
-      ),
-      restartRequiredAfterImport: true,
-    };
+    return this.db.transaction((): LocalDataImportPreview => {
+      this.options.advanceRequestDeadlines(now);
+      const currentAccounts = this.selectAll<AccountExportRow>("accounts");
+      const currentContext = this.selectAll<ActiveAccountContextExportRow>("active_account_context");
+      return {
+        status: "valid",
+        format: envelope.format,
+        network: envelope.network,
+        exportedAt: envelope.exportedAt,
+        currentCounts: this.getDataCountsSync(),
+        incomingCounts: countsForPayload(envelope.data),
+        willReplace: true,
+        activeAccountChange: activeAccountChange(
+          currentAccounts,
+          currentContext,
+          envelope.data.accounts,
+          envelope.data.activeAccountContext
+        ),
+        currentReadAddress: activeAccountAddress(currentAccounts, currentContext),
+        incomingReadAddress: activeAccountAddress(envelope.data.accounts, envelope.data.activeAccountContext),
+        restartRequiredAfterImport: true,
+      };
+    }).immediate();
   }
 
   async importLocalDataReplace(input: unknown, _now = new Date()): Promise<LocalDataMutationResult> {
     const envelope = await this.parseAndVerifyImportEnvelope(input);
-    this.db.transaction(() => {
-      // Endpoint verification may have outlived the original request window.
-      // Evaluate the current owner state inside the actual replacement transaction.
-      const now = this.now();
-      this.options.advanceRequestDeadlines(now);
-      if (hasUnsettledWalletWork(this.db, now)) throw new LocalDataError("input_invalid", "A wallet request is still unsettled.", { reason: "wallet_request_unsettled" });
-      this.resetLocalDataTables();
+    const result = this.db.transaction(() => this.applyValidatedReplacement(envelope, this.now()))();
+    this.notifyDataReplaced();
+    return result;
+  }
+
+  async resetLocalData(now = this.now()): Promise<LocalDataMutationResult> {
+    const result = this.db.transaction(() => this.applyValidatedReplacement(undefined, now))();
+    this.notifyDataReplaced();
+    return result;
+  }
+
+  // The caller commits this primitive with the admitted Settings card/result.
+  // It contains no async gap or post-commit reconstruction of its own authority.
+  applyValidatedReplacement(envelope: LocalDataEnvelope | undefined, now: Date, preserveCardId?: string): LocalDataMutationResult {
+    this.options.advanceRequestDeadlines(now);
+    this.assertReplacementAllowed(now);
+    this.resetLocalDataTables(preserveCardId);
+    if (envelope) {
       this.insertAccounts(envelope.data.accounts);
       this.insertActiveAccountContext(envelope.data.activeAccountContext);
       this.insertReviewSessions(envelope.data.reviewSessions);
@@ -128,40 +149,34 @@ export class SqliteLocalDataService implements LocalDataService {
       this.insertExternalActivityTransactions(envelope.data.externalActivityTransactions);
       this.insertLocalSettings(envelope.data.localSettings);
       this.syncSqliteSequences(envelope.data);
-    })();
-    this.options.onDataReplaced?.();
-    return {
-      status: "imported",
-      dataCounts: this.getDataCountsSync(),
-      sessionsInvalidated: true
-    };
+    } else this.insertDefaultSuiGrpcUrl(now);
+    this.db.prepare("UPDATE settings_control SET data_epoch=data_epoch+1 WHERE id=1").run();
+    if (preserveCardId) this.db.prepare(`UPDATE settings_operations SET data_epoch=(SELECT data_epoch FROM settings_control WHERE id=1)
+      WHERE card_id=?`).run(preserveCardId);
+    return { status: envelope ? "imported" : "reset", dataCounts: this.getDataCountsSync(), sessionsInvalidated: true };
   }
 
-  async resetLocalData(now = this.now()): Promise<LocalDataMutationResult> {
-    this.db.transaction(() => {
-      this.options.advanceRequestDeadlines(now);
-      if (hasUnsettledWalletWork(this.db, now)) throw new LocalDataError("input_invalid", "A wallet request is still unsettled.", { reason: "wallet_request_unsettled" });
-      this.resetLocalDataTables();
-      this.insertDefaultSuiGrpcUrl(now);
-    })();
-    this.options.onDataReplaced?.();
-    return {
-      status: "reset",
-      dataCounts: this.getDataCountsSync(),
-      sessionsInvalidated: true
-    };
-  }
+  notifyDataReplaced(): void { this.options.onDataReplaced?.(); }
 
-  private resetLocalDataTables(): void {
+  private resetLocalDataTables(preserveCardId?: string): void {
+    this.db.prepare("UPDATE settings_files SET invalidated=1 WHERE role='upload'").run();
+    if (preserveCardId) {
+      // Deleted cards cannot report or retry their cleanup. Transfer cleanup
+      // responsibility while preserving file identities and public backup paths.
+      // Uploads remain invalidated and never replace the selected input.
+      const operation = this.db.prepare("SELECT operation_id FROM settings_operations WHERE card_id=?").get(preserveCardId) as { operation_id: string } | undefined;
+      if (!operation) throw new LocalDataError("internal_error", "The replacement result identity is unavailable.");
+      this.db.prepare(`UPDATE settings_files SET cleanup_operation_id=? WHERE cleanup!='complete'
+        AND (role='export' OR invalidated=1)`).run(operation.operation_id);
+      this.db.prepare("DELETE FROM live_read_cards WHERE id!=?").run(preserveCardId);
+    }
+    else this.db.prepare("DELETE FROM live_read_cards").run();
     for (const table of [
-      "live_read_cards",
       "live_execution_details",
       "live_request_authority",
-      "live_wallet_connections",
       "live_transaction_materials",
       "live_private_review_artifacts",
       "live_review_sessions",
-      "live_settings_sessions",
       "external_activity_transactions",
       "external_activity_scans",
       "review_state_snapshots",
@@ -188,7 +203,7 @@ export class SqliteLocalDataService implements LocalDataService {
     statement.run("suiGraphqlUrl", JSON.stringify(parseGraphqlUrl(this.options.suiGraphqlUrl)), now.toISOString());
   }
 
-  private getDataCountsSync(): LocalDataCounts {
+  getDataCountsSync(): LocalDataCounts {
     return {
       accounts: this.count("accounts"),
       reviewSessions: this.count("review_sessions"),
@@ -415,7 +430,12 @@ export class SqliteLocalDataService implements LocalDataService {
     }
   }
 
-  private async parseAndVerifyImportEnvelope(input: unknown): Promise<LocalDataEnvelope> {
+  // Preparation and final replacement use the same rule without starting wallet I/O.
+  assertReplacementAllowed(now = this.now()): void {
+    if (hasUnsettledWalletWork(this.db, now)) throw new LocalDataError("input_invalid", "A wallet request is still unsettled.", { reason: "wallet_request_unsettled" });
+  }
+
+  async parseAndVerifyImportEnvelope(input: unknown): Promise<LocalDataEnvelope> {
     const envelope = parseLocalDataEnvelope(input, {
       validateAdapterLifecycle: this.validateAdapterLifecycle
     });

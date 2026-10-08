@@ -10,7 +10,7 @@ import { walletWorkflowFixture } from "./fixtures/walletWorkflow.js";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
 import { externalProposalSchema } from "../src/core/proposal/schemas.js";
-import { MAX_JSON_BODY_BYTES } from "../src/review-server/http.js";
+import { MAX_JSON_BODY_BYTES } from "../src/runtime/shared/http.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 import { startSharedStdio } from "../src/runtime/shared/stdio.js";

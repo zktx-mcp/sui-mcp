@@ -1,4 +1,4 @@
-import { CONNECTION_CONFLICT_MESSAGE } from "../../core/session/walletConnection.js";
+import { CONNECTION_CONFLICT_MESSAGE, CONNECTION_RECONCILIATION_MESSAGE } from "../../core/session/walletConnection.js";
 import { workflowViewSchema, reviewWalletChoices, type WorkflowView } from "../../core/session/workflowView.js";
 import { section, element, row, accordion, button, mono, monoShort, timeValue } from "../../../review-app/src/ui/ui.js";
 import { rawToDisplay, signedRawToDisplay, suiAmount } from "../../../review-app/src/format.js";
@@ -417,7 +417,9 @@ export const reviewRenderer = {
       ? "Ask in chat to check the status of this same transaction request." : undefined;
     if (!review || review.plan.reviewModel) return undefined;
     if (data.walletAvailability.status === "unavailable") return t.common.walletStatusRecovery;
+    if (data.connectionReconciliationRequired) return CONNECTION_RECONCILIATION_MESSAGE;
     if (data.connectionConflict) return "Ask in chat to open wallet connection controls, then disconnect the connections you no longer need.";
+    if (!data.usableConnectionId && data.manageableConnectionIds.length) return "A recorded wallet connection cannot be used for this review. Ask in chat to open wallet connection controls and disconnect the retained connection before connecting again.";
     if (context.readOnly) return "Ask in chat for a new transaction review.";
     if (review.error && data.mode === "review" && snapshot?.state === "ready" &&
         !data.allowedActions.includes("prepare_review") && !review.preparing) {

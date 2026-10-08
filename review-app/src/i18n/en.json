@@ -1,8 +1,4 @@
 {
-  "brand": "Sui MCP",
-  "shell": {
-    "toggleTheme": "Toggle theme"
-  },
   "account": {
     "name": "Name",
     "address": "Account address",
@@ -65,7 +61,7 @@
     "library": "TradingView Lightweight Charts"
   },
   "common": {
-    "walletStatusRecovery": "To restart the connection service, fully quit all apps using Sui MCP, then reopen them. This does not confirm removal of a connection in your wallet app.",
+    "walletStatusRecovery": "Ask in chat to open Settings, then use Troubleshooting to restart the connection service. This does not confirm removal of a connection in your wallet app.",
     "mainnet": "Sui mainnet",
     "retrievedAt": "Data retrieved"
   }

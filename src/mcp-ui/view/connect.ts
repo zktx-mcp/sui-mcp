@@ -1,5 +1,5 @@
 import QRCode from "qrcode";
-import { CONNECTION_CONFLICT_MESSAGE } from "../../core/session/walletConnection.js";
+import { CONNECTION_CONFLICT_MESSAGE, CONNECTION_RECONCILIATION_MESSAGE } from "../../core/session/walletConnection.js";
 import { t } from "../../../review-app/src/i18n/i18n.js";
 import { workflowViewSchema, type WorkflowView } from "../../core/session/workflowView.js";
 import type { CardSnapshot, CardWalletDisplay } from "../contracts.js";
@@ -28,13 +28,14 @@ function connectionView(snapshot: CardSnapshot, act?: (input: Record<string, unk
     context?.onDisplayChange?.();
   };
   const connected = data.connections.filter((connection) => connection.status === "connected");
+  const manageable = data.connections.filter((connection) => data.manageableConnectionIds.includes(connection.connectionId));
   // An admitted operation describes its own target. The unsubmitted overview
   // describes current connections; a result must not display another wallet
   // under the original operation's status.
   const displayedConnections = data.connection
-    ? data.connection.accounts.length ? [data.connection] : [] : connected;
+    ? data.connection.accounts.length ? [data.connection] : [] : data.connections.filter((connection) =>
+      connection.status === "connected" || data.manageableConnectionIds.includes(connection.connectionId));
   const distinguishTargets = displayedConnections.length > 1 || !!data.connectionConflict;
-  const available = connected.filter((connection) => connection.pendingAction === undefined);
   const usable = data.connections.find((connection) => connection.connectionId === data.usableConnectionId);
   const pending = data.connections.some((connection) => connection.status === "awaiting_approval" || connection.pendingAction === "disconnect");
   const waitingElsewhere = !data.connection && data.connections.some((connection) => connection.status === "awaiting_approval");
@@ -59,7 +60,7 @@ function connectionView(snapshot: CardSnapshot, act?: (input: Record<string, unk
   }
   const status = row(data.walletAvailability.status !== "available" ? "Last recorded status" : "Status",
     data.connectionAction === "disconnect" && data.connection?.status === "failed" ? "Disconnection could not be confirmed" :
-    (data.connection ? data.connection.pendingAction === "disconnect" : pending && connected.some((item) => item.pendingAction === "disconnect")) ? "Disconnecting wallet…" : data.connection ? connectionLabels[data.connection.status] : data.connectionConflict ? "Multiple wallet connections need attention" : waitingElsewhere ? "Connection approval is pending in another card" : usable ? "Wallet connected" : data.walletAvailability.status !== "available" ? connected.length ? "Wallet connected" : "Connection not confirmed" : connected.length ? "No usable wallet connection" : "No wallet connected");
+    (data.connection ? data.connection.pendingAction === "disconnect" : pending && connected.some((item) => item.pendingAction === "disconnect")) ? "Disconnecting wallet…" : data.connection ? connectionLabels[data.connection.status] : data.connectionConflict ? "Multiple wallet connections need attention" : waitingElsewhere ? "Connection approval is pending in another card" : data.connectionReconciliationRequired ? "Wallet connection needs attention" : usable ? "Wallet connected" : data.walletAvailability.status !== "available" ? connected.length ? "Wallet connected" : "Connection not confirmed" : displayedConnections.length ? "No usable wallet connection" : "No wallet connected");
   status.setAttribute("role", "status"); facts.append(status);
   if (data.walletAvailability.status !== "available") {
     facts.append(element("p", "ui-note", data.walletAvailability.message));
@@ -104,11 +105,15 @@ function connectionView(snapshot: CardSnapshot, act?: (input: Record<string, unk
     if (data.walletAvailability.status === "unavailable") item.append(row("Last updated", timeValue(connection.updatedAt)));
     details.body.append(row("Connection expires", timeValue(connection.expiresAt)));
     item.append(row("Wallet", connection.walletName ?? "Connected wallet"));
+    if (!data.connection && connection.status !== "connected") {
+      item.append(row("Recorded status", connectionLabels[connection.status]));
+      if (connection.reason) item.append(element("p", "ui-note", connection.reason));
+    }
     if (!data.connection && !data.connectionConflict && data.walletAvailability.status === "available" && !pending && connection.connectionId !== data.usableConnectionId) {
       item.append(element("p", "ui-note", "Recorded connection. It is not available for account use."));
     }
     for (const account of connection.accounts) item.append(row("Approved address", monoShort(account)));
-    if (act && connection.status === "connected" && !connection.pendingAction && data.allowedActions.includes("disconnect")) {
+    if (act && data.manageableConnectionIds.includes(connection.connectionId) && data.allowedActions.includes("disconnect")) {
       const controls = element("div", "card-actions");
       const open = button("Disconnect", () => undefined, "secondary"); open.dataset.cardAction = "disconnect"; open.disabled = !act;
       open.addEventListener("click", () => {
@@ -124,7 +129,7 @@ function connectionView(snapshot: CardSnapshot, act?: (input: Record<string, unk
         showPanel({ action: "disconnect", node: confirmation });
       });
       controls.append(open); item.append(controls);
-      if (snapshot.input.intent === "disconnect" && available.length === 1) queueMicrotask(() => { if (!disposed) open.click(); });
+      if (snapshot.input.intent === "disconnect" && manageable.length === 1) queueMicrotask(() => { if (!disposed) open.click(); });
     }
     facts.append(item);
   }
@@ -187,8 +192,9 @@ export const connectRenderer = {
           ? "To manage the remaining connection, ask in chat to open wallet connection controls." : undefined;
     }
     if (data.walletAvailability.status === "unavailable") return t.common.walletStatusRecovery;
+    if (data.connectionReconciliationRequired) return CONNECTION_RECONCILIATION_MESSAGE;
     if (data.connection?.pendingAction === "disconnect" || !data.connection && data.connections.some((item) => item.pendingAction === "disconnect")) return "If this disconnection is not responding, " +
-      "fully quit all apps using Sui MCP, then reopen them. Check any retained connection in your wallet app.";
+      "ask in chat to open Settings, then use Troubleshooting to restart the connection service. Check any retained connection in your wallet app.";
     if (data.connectionConflict) return context.readOnly || !data.allowedActions.includes("disconnect")
       ? "Ask in chat to open wallet connection controls, then disconnect the connections you no longer need." : undefined;
     if (!data.connection && data.connections.some((connection) => connection.status === "awaiting_approval")) {
@@ -197,7 +203,7 @@ export const connectRenderer = {
     if (data.connection?.status === "awaiting_approval") {
       return context.readOnly ? "You can ask in chat to check this connection request." : undefined;
     }
-    if (data.connections.some((connection) => connection.status === "connected" || connection.pendingAction)) {
+    if (data.manageableConnectionIds.length || data.connections.some((connection) => connection.status === "connected" || connection.pendingAction)) {
       return context.recoveryNeeded && context.readOnly ? "Ask in chat to check your wallet connection." : undefined;
     }
     if (data.automaticAction && !context.automaticPaused) return undefined;

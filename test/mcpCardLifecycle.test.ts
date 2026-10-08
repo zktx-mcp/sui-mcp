@@ -33,14 +33,23 @@ import { registerWalletConnectionTools } from "../src/mcp/tools/session/walletCo
 import type { McpServerDeps } from "../src/mcp/server.js";
 import { walletWorkflowFixture, deferred } from "./fixtures/walletWorkflow.js";
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
-import { CARD_METADATA_KEY, CARD_RESOURCE_PREFIX, CARD_TOOLS, cardReferenceSchema, cardSubmissionSchema, type CardKind, type CardSnapshot } from "../src/mcp-ui/contracts.js";
+import { CARD_METADATA_KEY, CARD_RESOURCE_PREFIX, CARD_TOOLS, SETTINGS_FILE_METADATA_KEY, cardReferenceSchema, cardSubmissionSchema, type CardKind, type CardSnapshot } from "../src/mcp-ui/contracts.js";
 import { startCard, type CardContent, type CardRenderer } from "../src/mcp-ui/view/lifecycle.js";
 import QRCode from "qrcode";
+import { createHash } from "node:crypto";
+import { settingsRenderer } from "../src/mcp-ui/view/settings.js";
+import { settingsWorkflowFixture } from "./fixtures/settingsWorkflow.js";
+import type { SettingsDraft, SettingsView } from "../src/core/session/settingsOperation.js";
+import type { App } from "@modelcontextprotocol/ext-apps";
+import { readFile, writeFile, unlink } from "node:fs/promises";
+import { join } from "node:path";
 
 type Host = {
   connect: () => Promise<void>;
   getHostVersion: () => { name: string };
   getHostContext: () => { theme: string };
+  getHostCapabilities: App["getHostCapabilities"];
+  downloadFile: ReturnType<typeof vi.fn<App["downloadFile"]>>;
   callServerTool: ReturnType<typeof vi.fn<(request: { name: string; arguments: Record<string, unknown> }) => Promise<CallToolResult>>>;
   readServerResource: ReturnType<typeof vi.fn>;
   ontoolresult?: (result: CallToolResult) => void;
@@ -116,6 +125,7 @@ function result(snapshot: CardSnapshot, permission = false): CallToolResult {
 }
 function host(handler: (request: { name: string; arguments: Record<string, unknown> }) => Promise<CallToolResult>, connect = Promise.resolve()): Host {
   const app: Host = { connect: () => connect, getHostVersion: () => ({ name: "Claude" }), getHostContext: () => ({ theme: "light" }),
+    getHostCapabilities: () => ({}), downloadFile: vi.fn(async () => { throw new Error("No advertised download capability"); }),
     callServerTool: vi.fn(handler), readServerResource: vi.fn() };
   transport.pending.push(app); instances.push(app); return app;
 }
@@ -636,7 +646,7 @@ it.each([
 ] as const)("renders %s without presenting an unobserved chain outcome", (requestStatus, label) => {
   const account = `0x${"a".repeat(64)}`, at = "2030-01-01T00:00:00.000Z";
   const data: WorkflowView = {
-    kind: "review", mode: "review_manage", allowedActions: ["read_result"], actionRemainingMs: 0, observe: false,
+    kind: "review", mode: "review_manage", allowedActions: ["read_result"], actionRemainingMs: 0, observe: false, manageableConnectionIds: [],
     progress: { status: "idle" }, walletAvailability: { status: "available", walletRunId: "00000000-0000-4000-8000-000000000001" }, connections: [], boundary: REVIEW_BOUNDARY,
     review: { reviewSessionId: "review", reviewRevision: 1, status: "ready_for_wallet_review", account, preparing: false,
       plan: { id: "plan", actionKind: "swap", adapterId: "deepbook-swap", adapterData: {}, protocol: "DeepBookV3", title: "Review swap", summary: "Stored proposal", createdAt: at,
@@ -858,6 +868,7 @@ it("offers no wallet selector or signature for multiple, zero or unavailable con
     rendered.dispose();
     for (const unavailable of [false, true]) {
       data.connections = unavailable ? [connection] : [];
+      data.manageableConnectionIds = [];
       delete data.connectionConflict;
       if (unavailable) data.walletAvailability = { status: "unavailable", reason: "restoration_failed", message: "Wallet state cannot be checked." };
       const blocked = reviewRenderer.result({ ...snapshot, data }, undefined, act);
@@ -893,7 +904,7 @@ const proposalBase = {
 function proposalCardFixture(input: unknown) {
   const plan = externalProposalToActionPlan(externalProposalSchema.parse(input), proposalEvaluationTime);
   const data: WorkflowView = {
-    kind: "review", mode: "review", allowedActions: ["cancel"], actionRemainingMs: 1000, observe: false,
+    kind: "review", mode: "review", allowedActions: ["cancel"], actionRemainingMs: 1000, observe: false, manageableConnectionIds: [],
     progress: { status: "idle" }, walletAvailability: { status: "available", walletRunId: "00000000-0000-4000-8000-000000000001" }, connections: [], boundary: REVIEW_BOUNDARY,
     review: { reviewSessionId: "external-review", plan, reviewRevision: 0, status: "proposed", preparing: false }
   };
@@ -1036,6 +1047,7 @@ it("owns missing wallet guidance per permitted action without blocking the other
     for (const scenario of scenarios) {
       const data = workflowViewSchema.parse(structuredClone(card.snapshot.data));
       data.connections = scenario.connections; data.activeAccount = scenario.activeAccount;
+      data.manageableConnectionIds = scenario.unavailable ? [] : scenario.connections.map((item) => item.connectionId);
       // Publish coherent backend facts, not a changed row list with the old
       // default still marked usable. An unqualified stored address no longer
       // establishes a preparation target; a bound signature remains separate.
@@ -1175,7 +1187,7 @@ async function savedWorkflowMcp(f: Awaited<ReturnType<typeof walletWorkflowFixtu
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport); await client.connect(clientTransport);
   return { server, deps, client,
-    create: (kind: "connect" | "review", input: Record<string, unknown>) => f.run(() => createWorkflowCard(server, deps, kind, input, kind === "review" ? { reviewSessionId: input.reviewSessionId } : undefined)),
+    create: (kind: "connect" | "review" | "settings", input: Record<string, unknown>) => f.run(() => createWorkflowCard(server, deps, kind, input, kind === "review" ? { reviewSessionId: input.reviewSessionId } : undefined)),
     call: (request: { name: string; arguments: Record<string, unknown> }) => f.run(async () => CallToolResultSchema.parse(await client.callTool(request))),
     readResource: (input: { uri: string }) => f.run(() => client.readResource(input)),
     close: async () => { await client.close(); await server.close(); }
@@ -3004,7 +3016,7 @@ it.each(["ended", "unavailable"] as const)("uses confirmed connection facts for 
       expect(root.textContent).not.toContain("Ask in chat to check your wallet connection.");
       expect(recoveryButton("Retry connection")).toBeUndefined();
     } else {
-      await vi.waitFor(() => expect(visibleGuidance()).toBe("To restart the connection service, fully quit all apps using Sui MCP, then reopen them. This does not confirm removal of a connection in your wallet app."));
+      await vi.waitFor(() => expect(visibleGuidance()).toMatch(/Settings.*Troubleshooting.*restart the connection service/));
       expect(workflowViewSchema.parse((await f.read(card)).snapshot.data)).toMatchObject({ walletAvailability: { status: "unavailable" }, connections: [], allowedActions: ["cancel"] });
       expect(root.textContent).toContain("Connection not confirmed");
       expect(root.textContent).not.toContain("Ask in chat to connect");
@@ -3497,7 +3509,7 @@ it("resolves a visible connection conflict with one exact Disconnect and returns
     expect(selected).not.toBe(-1);
     root.querySelectorAll("button").find((item) => item.textContent === "Confirm disconnect")!.click();
     await vi.waitFor(() => expect(f.transport.disconnect).toHaveBeenCalledExactlyOnceWith(selected === 0 ? "a" : "b"));
-    await vi.waitFor(() => expect(visibleGuidance()).toContain("fully quit all apps"));
+    await vi.waitFor(() => expect(visibleGuidance()).toMatch(/Settings.*Troubleshooting.*restart the connection service/));
     expect(root.textContent).toContain("Disconnecting wallet…");
     expect(factValues(root, "Connection")).toEqual([targetId]);
     held.resolve(); await vi.advanceTimersByTimeAsync(card.snapshot.pollAfterMs);
@@ -3591,10 +3603,1314 @@ it("renders the backend's single usable choice while an expired connected record
     card = await f.run(() => f.cards.create("connect", { intent: "manage" }));
     const expired = connectRenderer.controls(card.snapshot, vi.fn(), undefined);
     expect(expired.node.textContent).toContain("No usable wallet connection");
-    expect((expired.node as unknown as Element).querySelectorAll("button").some((item) => item.textContent === "Connect wallet")).toBe(true);
+    // The SDK still reports this session as present; expiry alone does not
+    // prove remote absence or authorize another pairing.
+    expect((expired.node as unknown as Element).querySelectorAll("button").some((item) => item.textContent === "Connect wallet")).toBe(false);
     expect(factValues(expired.node as unknown as Element, "Connection").sort()).toEqual([connection.connectionId, historical.connectionId].sort());
     (expired.node as unknown as Element).querySelectorAll("button").find((item) => item.textContent === "Disconnect")!.click();
     expect(factValues(expired.node as unknown as Element, "Connection")).toHaveLength(1);
     expired.dispose(); expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
   } finally { f.close(); }
+});
+
+// Only the DOM file-selection primitive is synthetic. File, hashing, upload,
+// MCP, CardStore, SQLite and the renderer/lifecycle below are the product path.
+function selectSettingsBackup(bytes: Uint8Array): void {
+  const picker = root.querySelectorAll("input").find((node) => node.dataset.cardAction === "settings_begin_upload");
+  expect(picker?.disabled).toBe(false);
+  Object.assign(picker!, { files: [new File([Uint8Array.from(bytes)], "backup.json", { type: "application/json" })] });
+  picker!.dispatchEvent(new Event("change"));
+}
+
+it.each(["file_io", "wallet", "restart"] as const)("keeps prepared Restore navigation and current recovery coherent while blocked by %s", async (blocker) => {
+  const f = await settingsWorkflowFixture(), w = f.wallet;
+  const connected = blocker === "wallet" ? await w.approve() : undefined;
+  const mcp = await savedWorkflowMcp({ ...w, cards: f.cards }), visibility = visibleFrame();
+  const entered = deferred<void>(), release = deferred<void>();
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  let app: Host | undefined, other: Awaited<ReturnType<typeof f.create>> | undefined;
+  try {
+    const raw = Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData())));
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const id = (initial.data as SettingsView).operationId;
+    app = host(mcp.call); startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").find((node) => node.dataset.cardAction === "settings_begin_upload")?.disabled).toBe(false));
+    selectSettingsBackup(raw); await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    const prepared = w.run(() => f.records.get(id))!, card = w.run(() => w.cardRecords.get(initial.cardId))!;
+    expect(prepared.phase).toBe("prepared");
+    if (blocker === "file_io") {
+      const publish = f.files.publishExport.bind(f.files);
+      vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+      other = await f.prepare({ kind: "export_local_data" }); expect((await f.confirm(other)).error).toBeUndefined();
+    } else if (blocker === "wallet") {
+      const disconnect = w.transport.disconnect.bind(w.transport);
+      vi.spyOn(w.transport, "disconnect").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return disconnect(...args); });
+      const manage = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+      expect((await w.act(manage, { action: "disconnect", connectionId: connected!.connection.connectionId })).error).toBeUndefined();
+    } else {
+      const replace = w.runtime.replace.bind(w.runtime);
+      vi.spyOn(w.runtime, "replace").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return replace(...args); });
+      other = await f.prepare({ kind: "restart_wallet_service" }); expect((await f.confirm(other)).error).toBeUndefined();
+    }
+    await entered.promise;
+    // The blocker must not invalidate preparation first and hide the branch.
+    const ref = created._meta![CARD_METADATA_KEY] as { cardId: string; permission: string };
+    const blocked = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
+    expect(blocked.data.data).toMatchObject({ phase: "prepared", preparationId: prepared.preparationId,
+      file: { fileId: prepared.fileId }, restoreCheck: { status: "cannot_restore", reason: blocker === "wallet" ? "wallet_request_unsettled" : "operation_busy" } });
+    expect(w.run(() => f.records.get(id))).toEqual(prepared);
+    expect(w.run(() => w.cardRecords.get(initial.cardId))).toEqual(card);
+    expect(w.run(() => f.records.control().data_epoch)).toBe(prepared.dataEpoch);
+    if (blocker !== "file_io") expect(w.run(() => f.records.control().file_io_id)).toBeNull();
+    visibility("hidden"); visibility("visible");
+    await vi.waitFor(() => expect(root.textContent).toContain("Cannot restore"));
+    expect(root.querySelector(".settings-location")!.textContent).toBe("Settings / Local records / Restore");
+    expect(control("Back to Restore")).toBeUndefined();
+    expect(control("Check status")?.disabled).toBe(false);
+    const before = app.callServerTool.mock.calls.length;
+    control("Back to Local records")!.click();
+    expect(root.querySelector(".settings-location")!.textContent).toBe("Settings / Local records");
+    expect(app.callServerTool).toHaveBeenCalledTimes(before);
+    expect(w.run(() => f.records.get(id))).toEqual(prepared);
+    release.resolve();
+    if (other) await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
+    else await vi.waitFor(() => expect(w.run(() => w.records.connection(connected!.connection.connectionId)!.sdkPending)).toBe(false));
+    control("Check status")!.click();
+    await vi.waitFor(() => expect(control("Check status")).toBeUndefined());
+    expect(root.querySelector(".settings-location")!.textContent).toBe("Settings / Local records");
+    expect(w.run(() => f.records.get(id))).toEqual(prepared);
+    control("Resume")!.click();
+    expect(root.textContent).toContain("Restore available");
+    expect(root.querySelector(".settings-location")!.textContent).toBe("Settings / Local records / Restore / Confirm");
+    expect(control("Back to Restore")!.dataset.cardAction).toBe("settings_back");
+    control("Back to Restore")!.click();
+    await vi.waitFor(() => expect(control("Check backup again")?.disabled).toBe(false));
+    expect(w.run(() => f.records.get(id))).toMatchObject({ phase: "sealed", fileId: prepared.fileId });
+    expect(w.run(() => f.records.get(id)?.preparationId)).toBeUndefined();
+    expect(w.run(() => w.cardRecords.get(initial.cardId)!.state.expiresAt)).toBe(card.state.expiresAt);
+    expect(app.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.act &&
+      (call.arguments.input as { action?: string })?.action === "settings_confirm")).toHaveLength(0);
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
+  } finally {
+    release.resolve();
+    if (other) await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
+    if (connected) await vi.waitFor(() => expect(w.run(() => w.records.connection(connected.connection.connectionId)!.sdkPending)).toBe(false));
+    await app?.onteardown?.(); await mcp.close(); f.close();
+  }
+});
+
+it("keeps a prepared backup's impact visible with a status-read exit while another card publishes a file", async () => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards }), visibility = visibleFrame();
+  const entered = deferred<void>(), release = deferred<void>();
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  let app: Host | undefined, other: Awaited<ReturnType<typeof f.create>> | undefined;
+  try {
+    const card = await f.prepare({ kind: "export_local_data" }), id = (card.snapshot.data as SettingsView).operationId;
+    app = host(mcp.call); startCard("settings", settingsRenderer);
+    app.ontoolresult!({ ...cardToolResult(card), _meta: { [CARD_METADATA_KEY]: { cardId: card.snapshot.cardId, permission: card.permission } } });
+    await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
+    const original = w.run(() => f.records.get(id)), publish = f.files.publishExport.bind(f.files);
+    vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+    other = await f.prepare({ kind: "export_local_data" }); await f.confirm(other); await entered.promise;
+    visibility("hidden"); visibility("visible");
+    await vi.waitFor(() => expect(control("Check status")?.disabled).toBe(false));
+    expect(root.textContent).toContain("Back up local records?");
+    expect(root.textContent).toContain("This change cannot be confirmed right now.");
+    expect(root.textContent).toContain("Use Check status to read this card again.");
+    expect(control("Create backup")).toBeUndefined(); expect(control("Back to Backup")).toBeUndefined();
+    expect(w.run(() => f.records.get(id))).toEqual(original);
+    release.resolve(); await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
+    control("Check status")!.click(); await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
+    expect(root.textContent).not.toContain("cannot be confirmed right now"); expect(control("Check status")).toBeUndefined();
+    expect(w.run(() => f.records.get(id))).toEqual(original);
+    expect(app.callServerTool.mock.calls.some(([call]) => call.name === CARD_TOOLS.act)).toBe(false);
+  } finally {
+    release.resolve(); if (other) await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
+    await app?.onteardown?.(); await mcp.close(); f.close();
+  }
+});
+
+it.each(["file_io", "restart"] as const)("offers a current read for a selected restart while another %s operation blocks preparation", async (blocker) => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards }), visibility = visibleFrame();
+  const entered = deferred<void>(), release = deferred<void>();
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  let app: Host | undefined, other: Awaited<ReturnType<typeof f.create>> | undefined;
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const id = (initial.data as SettingsView).operationId, ref = created._meta![CARD_METADATA_KEY] as { cardId: string; permission: string };
+    app = host(mcp.call); startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Troubleshooting")?.disabled).toBe(false)); control("Troubleshooting")!.click(); control("Restart connection service")!.click();
+    await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
+    const before = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
+    const original = w.run(() => f.records.get(id)); expect(original?.phase).toBe("draft");
+    if (blocker === "file_io") {
+      const publish = f.files.publishExport.bind(f.files);
+      vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+      other = await f.prepare({ kind: "export_local_data" });
+    } else {
+      const replace = w.runtime.replace.bind(w.runtime);
+      vi.spyOn(w.runtime, "replace").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return replace(...args); });
+      other = await f.prepare({ kind: "restart_wallet_service" });
+    }
+    expect((await f.confirm(other)).error).toBeUndefined(); await entered.promise;
+    const blocked = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
+    expect((blocked.data.data as SettingsView).allowedActions).not.toContain("settings_prepare");
+    if (blocker === "restart") {
+      expect(w.run(() => f.records.control().file_io_id)).toBeNull();
+      expect((blocked.data.data as SettingsView).allowedActions).toContain("settings_select");
+    }
+    expect((await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: before.data.revision,
+      input: { action: "settings_prepare", operationId: id } } })).isError).toBe(true);
+    expect(w.run(() => f.records.get(id))).toEqual(original);
+    visibility("hidden"); visibility("visible"); await vi.waitFor(() => expect(control("Check status")?.disabled).toBe(false));
+    expect(control("Continue")).toBeUndefined(); expect(control("Back to Troubleshooting")).toBeDefined();
+    release.resolve(); await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
+    control("Check status")!.click(); await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
+    expect(control("Check status")).toBeUndefined(); expect(w.run(() => f.records.get(id))).toEqual(original);
+    control("Continue")!.click(); await vi.waitFor(() => expect(control("Restart connection service")?.disabled).toBe(false));
+    expect(w.run(() => f.records.get(id)?.phase)).toBe("prepared");
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
+  } finally {
+    release.resolve(); if (other) await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
+    await app?.onteardown?.(); await mcp.close(); f.close();
+  }
+});
+
+it("restores a prepared Settings operation without action permission or a fictitious Back destination", async () => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
+  let app: Host | undefined;
+  try {
+    const card = await f.prepare({ kind: "export_local_data" }), original = w.run(() => f.records.get((card.snapshot.data as SettingsView).operationId));
+    const { _meta, ...publicResult } = cardToolResult(card);
+    app = host(mcp.call); app.readServerResource.mockImplementation(mcp.readResource);
+    startCard("settings", settingsRenderer); app.ontoolresult!(publicResult);
+    await vi.waitFor(() => expect(root.textContent).toContain("Back up local records?"));
+    expect(root.querySelectorAll("button").some((node) => node.textContent.startsWith("Back to"))).toBe(false);
+    expect(root.querySelectorAll("[data-card-action]")).toHaveLength(0);
+    expect(app.readServerResource).toHaveBeenCalledOnce(); expect(app.callServerTool).not.toHaveBeenCalled();
+    expect(w.run(() => f.records.get(original!.operationId))).toEqual(original);
+  } finally { await app?.onteardown?.(); await mcp.close(); f.close(); }
+});
+
+it.each(["size", "read"] as const)("scopes a local backup %s error to its input through navigation and a different operation result", async (failure) => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards }), visibility = visibleFrame();
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  let app: Host | undefined; const reading = deferred<void>(), readRelease = deferred<void>();
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const id = (initial.data as SettingsView).operationId;
+    app = host(mcp.call); startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").find((node) => node.dataset.cardAction === "settings_begin_upload")?.disabled).toBe(false));
+    const file = new File([failure === "size" ? new Uint8Array(16 * 1024 * 1024 + 1) : "{}"], "unreadable.json");
+    if (failure === "read") vi.spyOn(file, "arrayBuffer").mockRejectedValue(new Error("Selected file could not be read."));
+    const picker = root.querySelectorAll("input").find((node) => node.dataset.cardAction === "settings_begin_upload")!;
+    Object.assign(picker, { files: [file] }); picker.dispatchEvent(new Event("change"));
+    const message = failure === "size" ? "This backup exceeds the 16 MiB limit. Choose a smaller backup." : "Selected file could not be read.";
+    await vi.waitFor(() => expect(root.textContent).toContain(message));
+    visibility("hidden"); visibility("visible"); await vi.waitFor(() => expect(app!.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.read).length).toBeGreaterThan(1));
+    expect(root.textContent).toContain(message);
+    control("Back to Local records")!.click(); expect(root.textContent).not.toContain(message);
+    control("Resume")!.click(); expect(root.textContent).toContain(message);
+    const raw = Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData())));
+    const replacement = new File([raw], "readable.json"), readReplacement = replacement.arrayBuffer.bind(replacement);
+    vi.spyOn(replacement, "arrayBuffer").mockImplementation(async () => { reading.resolve(); await readRelease.promise; return readReplacement(); });
+    const replacementPicker = root.querySelectorAll("input").find((node) => node.dataset.cardAction === "settings_begin_upload")!;
+    Object.assign(replacementPicker, { files: [replacement] }); replacementPicker.dispatchEvent(new Event("change")); await reading.promise;
+    expect(root.textContent).not.toContain(message); expect(root.textContent).toContain("Reading the selected file");
+    readRelease.resolve(); await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    const uploadId = w.run(() => f.records.get(id)!.fileId)!;
+    control("Back to Restore")!.click(); await vi.waitFor(() => expect(control("Check backup again")?.disabled).toBe(false));
+    control("Back to Local records")!.click(); control("Back up local records")!.click();
+    await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false)); expect(root.textContent).not.toContain(message);
+    control("Continue")!.click(); await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
+    expect(root.textContent).not.toContain(message); control("Create backup")!.click();
+    await vi.waitFor(() => expect(w.run(() => f.records.get(id)?.result?.outcome)).toBe("completed"));
+    await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+    await vi.waitFor(() => expect(root.textContent).toContain("The local backup file was created."));
+    expect(root.textContent).not.toContain(message);
+    expect(w.run(() => f.records.get(id))).toMatchObject({ draft: { kind: "export_local_data" }, phase: "terminal" });
+    expect(w.run(() => f.records.control())).toMatchObject({ file_io_id: null, active_operation_id: null, data_epoch: 0 });
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string })?.action === "settings_begin_upload")).toHaveLength(1);
+    expect(w.run(() => f.records.file(uploadId))).toMatchObject({ invalidated: true, cleanup: "complete" });
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
+  } finally { readRelease.resolve(); await app?.onteardown?.(); await mcp.close(); f.close(); }
+});
+
+it.each([
+  { change: "new_file", pending: true }, { change: "new_file", pending: false },
+  { change: "new_selection", pending: false }, { change: "closed", pending: true }
+] as const)("retires a local file read when another frame selects $change with read pending=$pending", async ({ change, pending }) => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards }), visibility = visibleFrame();
+  const entered = deferred<void>(), release = deferred<void>(); let app: Host | undefined;
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const id = (initial.data as SettingsView).operationId, ref = created._meta![CARD_METADATA_KEY] as { cardId: string; permission: string };
+    app = host(mcp.call); startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").some((node) => node.dataset.cardAction === "settings_begin_upload")).toBe(true));
+    const file = new File(["{}"], "old.json");
+    vi.spyOn(file, "arrayBuffer").mockImplementation(async () => { entered.resolve(); await release.promise; throw new Error("Old file read failed."); });
+    const picker = root.querySelectorAll("input").find((node) => node.dataset.cardAction === "settings_begin_upload")!;
+    Object.assign(picker, { files: [file] }); picker.dispatchEvent(new Event("change")); await entered.promise;
+    expect(w.run(() => f.records.control().file_io_id)).toBeNull();
+    if (!pending) {
+      release.resolve(); await vi.advanceTimersByTimeAsync(0);
+      await vi.waitFor(() => expect(root.textContent).toContain("Old file read failed."));
+    }
+    const read = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
+    const selected = await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: read.data.revision,
+      input: change === "closed" ? { action: "settings_cancel" } : { action: "settings_select", draft: { kind: "import_local_data" } } } });
+    expect(selected.isError).not.toBe(true);
+    if (change === "new_file") {
+      const raw = Buffer.from("{}");
+      expect((await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: (selected.structuredContent as { data: CardSnapshot }).data.revision,
+        input: { action: "settings_begin_upload", operationId: id, name: "new.json", totalSize: raw.length, sha256: createHash("sha256").update(raw).digest("hex") } } })).isError).not.toBe(true);
+    }
+    visibility("hidden"); visibility("visible");
+    await vi.waitFor(() => expect(root.textContent).toContain(change === "closed" ? "Nothing was applied." : change === "new_file" ? "new.json" : "Choose a Sui MCP backup"));
+    release.resolve(); await vi.advanceTimersByTimeAsync(0);
+    expect(root.textContent).not.toContain("Reading the selected file");
+    await vi.waitFor(() => expect(root.textContent).not.toContain("Old file read failed."));
+    expect(app.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.act &&
+      ["settings_begin_upload", "settings_upload_chunk", "settings_seal_upload"].includes(String((call.arguments.input as { action?: string })?.action)))).toHaveLength(0);
+    if (change !== "closed") {
+      const latest = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
+      const result = await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: latest.data.revision, input: { action: "settings_cancel" } } });
+      expect(result.isError).not.toBe(true);
+    }
+    expect(w.run(() => f.records.control())).toMatchObject({ file_io_id: null, active_operation_id: null, data_epoch: 0 });
+  } finally { release.resolve(); await app?.onteardown?.(); await mcp.close(); f.close(); }
+});
+
+it("shows actual receiving and check-request progress in the uploading frame without injecting a checking snapshot", async () => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  const chunkEntered = deferred<void>(), chunkRelease = deferred<void>(), checkEntered = deferred<void>(), checkRelease = deferred<void>();
+  const retryEntered = deferred<void>(), retryRelease = deferred<void>();
+  let confirmedBytes = 0, operationId = "";
+  const physical = f.files.readUpload.bind(f.files);
+  vi.spyOn(f.files, "readUpload").mockImplementationOnce(async (...args) => { checkEntered.resolve(); await checkRelease.promise; return physical(...args); });
+  try {
+    // A complete current-format backup, naturally larger than one MCP chunk.
+    // These synthetic addresses are saved records, not wallet approvals.
+    for (let index = 1; index <= 700; index++) await w.run(() => w.activity.setActiveAccount(`0x${BigInt(index).toString(16).padStart(64, "0")}`, "wallet_connection", w.now()));
+    const raw = Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData())));
+    expect(raw.length).toBeGreaterThan(65536);
+    const app = host(async (request) => {
+      const input = request.arguments.input as { action?: string; offset?: number; chunkBase64?: string } | undefined;
+      if (input?.action === "settings_upload_chunk" && input.offset! > 0 && confirmedBytes === 0) {
+        confirmedBytes = input.offset!; chunkEntered.resolve(); await chunkRelease.promise;
+      }
+      return mcp.call(request);
+    });
+    const created = await mcp.create("settings", {}), snapshot = (created.structuredContent as { data: CardSnapshot }).data;
+    operationId = (snapshot.data as SettingsView).operationId;
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").some((node) => node.dataset.cardAction === "settings_begin_upload")).toBe(true));
+    selectSettingsBackup(raw); await chunkEntered.promise;
+    expect(confirmedBytes).toBeGreaterThan(0); expect(confirmedBytes).toBeLessThan(raw.length);
+    expect(root.textContent).toContain("Receiving backup…"); expect(root.textContent).not.toContain("Cannot restore");
+    expect(factValues(root, "File received")).toEqual([`${confirmedBytes.toLocaleString("en-US")} / ${raw.length.toLocaleString("en-US")} bytes`]);
+    const fileId = w.run(() => f.records.get(operationId)!.fileId)!;
+    expect(await readFile(join(w.directory, ".settings-staging", `${fileId}.upload`))).toEqual(raw.subarray(0, confirmedBytes));
+    chunkRelease.resolve(); await checkEntered.promise;
+    expect(root.textContent).toContain("Checking backup…"); expect(root.textContent).not.toContain("Cannot restore");
+    expect(root.querySelectorAll("p").some((node) => node.getAttribute("role") === "status" && node.textContent === "Checking backup…")).toBe(true);
+    expect(w.run(() => f.records.control())).toMatchObject({ data_epoch: 0, active_operation_id: null });
+    const checksBefore = app.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.read).length;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(app.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.read)).toHaveLength(checksBefore);
+    checkRelease.resolve(); await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    expect(root.textContent).toContain("including records with unconfirmed transaction results");
+    expect(control("Preview replacement")).toBeUndefined();
+    control("Back to Restore")!.click(); await vi.waitFor(() => expect(control("Check backup again")?.disabled).toBe(false));
+    expect(root.textContent).not.toContain("Cannot restore");
+    vi.spyOn(f.files, "readUpload").mockImplementationOnce(async (...args) => { retryEntered.resolve(); await retryRelease.promise; return physical(...args); });
+    control("Check backup again")!.click(); await retryEntered.promise;
+    expect(root.textContent).toContain("Checking backup…"); expect(root.textContent).not.toContain("Cannot restore");
+    retryRelease.resolve(); await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    expect(w.run(() => f.records.get(operationId)?.fileId)).toBe(fileId);
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled(); await app.onteardown!();
+  } finally { chunkRelease.resolve(); checkRelease.resolve(); retryRelease.resolve(); await mcp.close(); f.close(); }
+});
+
+it.each([
+  { kind: "set_endpoint", page: "Advanced settings", operation: "Change network address", select: "Select network address", final: "Save network address" },
+  { kind: "restore_endpoint", page: "Advanced settings", operation: "Use default network address", select: "Select default network address", final: "Use default network address" },
+  { kind: "clear_read_address", page: "Address for viewing assets", operation: "Clear default address", select: "Clear default address", final: "Clear default address" },
+  { kind: "export_local_data", page: "Local records", operation: "Backup", select: "Back up local records", final: "Create backup" },
+  { kind: "reset_local_data", page: "Local records", operation: "Reset", select: "Reset local data", final: "Reset local data" },
+  { kind: "restart_wallet_service", page: "Troubleshooting", operation: "Connection service restart", select: "Restart connection service", final: "Restart connection service" }
+] as const satisfies readonly { kind: Exclude<SettingsDraft["kind"], "import_local_data">; page: string; operation: string; select: string; final: string }[])("keeps $kind preparation waiting distinct from backup checks and application", async (choice) => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
+  const entered = deferred<void>(), release = deferred<void>(), replaced = vi.spyOn(w.runtime, "replace");
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  try {
+    if (choice.kind === "clear_read_address") await w.approve();
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const operationId = (initial.data as SettingsView).operationId;
+    const app = host(async (request) => {
+      const response = await mcp.call(request);
+      if ((request.arguments.input as { action?: string } | undefined)?.action === "settings_prepare") {
+        expect((response.structuredContent as { ok: boolean }).ok).toBe(true);
+        entered.resolve(); await release.promise;
+      }
+      return response;
+    });
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control(choice.page)?.disabled).toBe(false)); control(choice.page)!.click();
+    expect(control("Close Settings")).toBeUndefined(); expect(control("Cancel")).toBeUndefined();
+    if (choice.kind === "set_endpoint") root.querySelectorAll("input")[0]!.value = "https://mainnet.example:9443";
+    control(choice.select)!.click(); await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
+    const selected = w.run(() => f.records.get(operationId))!;
+    expect(selected.draft?.kind).toBe(choice.kind); expect(selected.fileId).toBeUndefined();
+    expect(root.querySelectorAll(".settings-choice")).toHaveLength(0); expect(root.querySelectorAll(".settings-endpoint")).toHaveLength(0);
+    expect(root.querySelectorAll("input")).toHaveLength(0);
+    expect(root.querySelectorAll("[data-card-action]").map((node) => node.dataset.cardAction).sort()).toEqual(["settings_prepare"]);
+    const selectionActions = root.querySelector(".settings-action-row")!;
+    expect(control("Continue")!.parent).toBe(selectionActions); expect(control("Cancel")).toBeUndefined(); expect(control("Close Settings")).toBeUndefined();
+    expect(selectionActions.children.map((node) => node.dataset.cardAction)).toEqual(["settings_prepare"]);
+    expect(root.querySelector(".settings-location")!.textContent).toBe(`Settings / ${choice.page} / ${choice.operation}`);
+    if (choice.kind === "set_endpoint" || choice.kind === "restore_endpoint") {
+      expect(factValues(root, "Network setting")).toEqual(["Sui node (gRPC)"]);
+      expect(root.textContent).not.toContain("https://graphql.mainnet.sui.io/graphql");
+    }
+    const counts = w.run(() => f.localData.getDataCountsSync());
+    root.querySelector("details")!.open = true;
+    const inputs = root.querySelectorAll("input");
+    if (inputs.length) inputs[0]!.value = "https://unsaved.example:9443";
+    const values = inputs.map((node) => node.value);
+    control("Continue")!.click(); await entered.promise;
+    expect(root.querySelector(".settings-page")!.className).not.toMatch(/settings-page--/);
+    expect(root.querySelector(".settings-location")!.textContent).toBe(`Settings / ${choice.page} / ${choice.operation}`);
+    expect(root.textContent).not.toContain("Checking backup"); expect(root.textContent).not.toContain("Applying change");
+    expect(root.querySelectorAll("p").filter((node) => node.getAttribute("role") === "status" && node.textContent === "Waiting for a response…")).toHaveLength(1);
+    expect(root.querySelector("details")!.open).toBe(true);
+    expect(root.querySelectorAll("input").map((node) => node.value)).toEqual(values);
+    expect(control("Continue")!.disabled).toBe(true);
+    expect(w.run(() => f.records.get(operationId)?.phase)).toBe("prepared");
+    expect(w.run(() => f.localData.getDataCountsSync())).toEqual(counts);
+    expect(w.run(() => f.records.control())).toMatchObject({ data_epoch: 0, active_operation_id: null });
+    const calls = () => app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_prepare");
+    expect(calls()).toHaveLength(1);
+    release.resolve(); await vi.waitFor(() => expect(control(choice.final)?.disabled).toBe(false));
+    expect(root.textContent).not.toContain("Waiting for a response…"); expect(root.textContent).not.toContain("Checking backup");
+    expect(root.querySelector(".settings-location")!.textContent).toBe(`Settings / ${choice.page} / ${choice.operation} / Confirm`);
+    expect(root.querySelectorAll(".settings-choice")).toHaveLength(0); expect(root.querySelectorAll(".settings-endpoint")).toHaveLength(0);
+    expect(root.querySelectorAll("[data-card-action]").map((node) => node.dataset.cardAction).sort()).toEqual(["settings_back", "settings_confirm"]);
+    const confirmationActions = root.querySelector(".settings-action-row")!;
+    expect(control(choice.final)!.parent).toBe(confirmationActions); expect(control("Cancel")).toBeUndefined(); expect(control("Close Settings")).toBeUndefined();
+    expect(confirmationActions.children.map((node) => node.dataset.cardAction)).toEqual(["settings_confirm"]);
+    expect(control(`Back to ${choice.operation}`)!.parent?.getAttribute("aria-label")).toBe("Settings navigation");
+    expect(root.querySelector("details")!.open).toBe(true); expect(calls()).toHaveLength(1);
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_confirm")).toHaveLength(0);
+    expect(replaced).not.toHaveBeenCalled(); expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
+    await app.onteardown!();
+  } finally { release.resolve(); await mcp.close(); f.close(); }
+});
+
+it.each(["lost_reply", "changed_selection"] as const)("settles preparation progress after %s without replaying or rebinding the command", async (mode) => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
+  const entered = deferred<void>(), release = deferred<void>(), readEntered = deferred<void>(), readRelease = deferred<void>();
+  let replyLost = false;
+  const visibilityEvents = new EventTarget();
+  document.addEventListener = visibilityEvents.addEventListener.bind(visibilityEvents);
+  document.removeEventListener = visibilityEvents.removeEventListener.bind(visibilityEvents);
+  Object.defineProperty(document, "visibilityState", { value: "visible", writable: true });
+  const visibility = (value: "hidden" | "visible") => {
+    Object.defineProperty(document, "visibilityState", { value, writable: true });
+    visibilityEvents.dispatchEvent(new Event("visibilitychange"));
+  };
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const ref = created._meta![CARD_METADATA_KEY] as { cardId: string; permission: string };
+    const operationId = (initial.data as SettingsView).operationId;
+    const app = host(async (request) => {
+      if (mode === "lost_reply" && replyLost && request.name === CARD_TOOLS.read) {
+        readEntered.resolve(); await readRelease.promise;
+      }
+      const response = await mcp.call(request);
+      if ((request.arguments.input as { action?: string } | undefined)?.action === "settings_prepare") {
+        expect((response.structuredContent as { ok: boolean }).ok).toBe(true);
+        entered.resolve(); await release.promise;
+        if (mode === "lost_reply") { replyLost = true; throw new Error("Synthetic loss of the prepared response"); }
+      }
+      return response;
+    });
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Advanced settings")?.disabled).toBe(false)); control("Advanced settings")!.click();
+    root.querySelectorAll("input")[0]!.value = "https://first.example:9443"; control("Select network address")!.click();
+    await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false)); control("Continue")!.click();
+    await entered.promise; expect(root.textContent).toContain("Waiting for a response…");
+    if (mode === "changed_selection") {
+      const read = await mcp.call({ name: CARD_TOOLS.read, arguments: ref });
+      const current = (read.structuredContent as { data: CardSnapshot }).data;
+      const changed = await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: current.revision,
+        input: { action: "settings_select", draft: { kind: "set_endpoint", endpoint: "grpc", value: "https://second.example:9443" } } } });
+      expect((changed.structuredContent as { ok: boolean }).ok).toBe(true);
+      // A replay is not a state update. The real visibility return reads the
+      // changed stored selection while the old prepare reply is still held.
+      app.ontoolresult!(changed); visibility("hidden"); visibility("visible");
+      await vi.waitFor(() => expect(root.textContent).toContain("https://second.example:9443"));
+      await vi.waitFor(() => expect(root.textContent).not.toContain("Waiting for a response…"));
+      expect(w.run(() => f.records.get(operationId)?.phase)).toBe("draft");
+    }
+    release.resolve();
+    if (mode === "lost_reply") {
+      await readEntered.promise;
+      expect(root.textContent).not.toContain("Waiting for a response…"); expect(root.textContent).toContain("Synthetic loss");
+      expect(control("Continue")!.disabled).toBe(true);
+      readRelease.resolve(); await vi.waitFor(() => expect(control("Save network address")?.disabled).toBe(false));
+    } else await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
+    expect(root.textContent).not.toContain("Checking backup"); expect(root.textContent).not.toContain("Waiting for a response…");
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_prepare")).toHaveLength(1);
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_confirm")).toHaveLength(0);
+    expect(w.run(() => f.records.control())).toMatchObject({ data_epoch: 0, active_operation_id: null });
+    expect(await w.run(() => f.preferences.getSuiGrpcUrl())).toMatchObject({ value: "https://fullnode.mainnet.sui.io:443" });
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled(); await app.onteardown!();
+  } finally { release.resolve(); readRelease.resolve(); await mcp.close(); f.close(); }
+});
+
+it("labels the recorded disconnected wallet in restart confirmation without presenting current approval", async () => {
+  const f = await settingsWorkflowFixture(), w = f.wallet;
+  try {
+    const { connection } = await w.approve();
+    const manage = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+    expect((await w.act(manage, { action: "disconnect", connectionId: connection.connectionId })).error).toBeUndefined();
+    await vi.waitFor(() => expect(w.run(() => w.records.connection(connection.connectionId)?.connection.status)).toBe("disconnected"));
+    await vi.waitFor(() => expect(w.run(() => w.records.connection(connection.connectionId)?.sdkPending)).toBe(false));
+    const runId = w.runtime.availability().walletRunId;
+    const restart = await f.prepare({ kind: "restart_wallet_service" });
+    const rendered = settingsRenderer.controls(restart.snapshot, vi.fn(), undefined, undefined, undefined);
+    expect(factValues(rendered.node as unknown as Element, "Wallet connection records")).toEqual(["1"]);
+    expect(factValues(rendered.node as unknown as Element, "Wallet approval requests to stop")).toEqual(["0"]);
+    expect(factValues(rendered.node as unknown as Element, "Other transaction requests")).toEqual(["0"]);
+    expect(factValues(rendered.node as unknown as Element, "Recorded status")).toEqual(["Disconnected"]);
+    expect(factValues(rendered.node as unknown as Element, "Recorded wallet address")).toEqual([w.account]);
+    expect(rendered.node.textContent).not.toContain("Affected wallet connections");
+    expect(rendered.node.textContent).not.toContain("Affected connections and requests");
+    const details = (rendered.node as unknown as Element).querySelector("details")!;
+    expect(details.textContent).toContain("Connection and transaction request records");
+    expect(factValues(details, "Service run ID")).toEqual([runId]);
+    expect(factValues(rendered.node as unknown as Element, "Service run ID")).toEqual([runId]);
+    expect(factValues(details, "Fixture Wallet connection ID")).toEqual([connection.connectionId]);
+    expect(factValues(rendered.node as unknown as Element, "Fixture Wallet connection ID")).toEqual([connection.connectionId]);
+    expect(factValues(details, "Transaction request ID")).toEqual([]);
+    const body = details.parent!.children.filter((item) => item !== details).map((item) => item.textContent).join("");
+    expect(body).not.toContain(runId); expect(body).not.toContain(connection.connectionId);
+    const before = w.run(() => w.records.connection(connection.connectionId));
+    details.open = true; details.open = false;
+    expect(w.run(() => w.records.connection(connection.connectionId))).toEqual(before);
+    expect(rendered.node.textContent).toContain("not confirmation that a wallet is connected now");
+    expect(w.run(() => w.workflow.currentConnectionContext().assetReadAccount)).toEqual({ status: "address_required" });
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled(); rendered.dispose?.();
+  } finally { f.close(); }
+});
+
+it("shows independently admitted stopped and waiting request records with distinct restart counts and Details-only identities", async () => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
+  const flights: Array<{ card: Awaited<ReturnType<typeof w.prepare>>["card"]; id: string; release: ReturnType<typeof deferred<void>> }> = [];
+  let app: Host | undefined;
+  try {
+    const { connection } = await w.approve(), runId = w.runtime.availability().walletRunId;
+    // Two recorded terminal requests and one pending approval discriminate the
+    // two non-empty count groups without submitting a transaction.
+    for (let index = 0; index < 3; index++) {
+      const ready = await w.prepare(connection.connectionId), entered = deferred<void>(), release = deferred<void>();
+      w.sign.mockImplementationOnce(async (input) => {
+        const signed = await w.accountKey.signTransaction(Buffer.from(input.transactionBytesBase64, "base64"));
+        entered.resolve(); await release.promise; return { transactionBytes: signed.bytes, signature: signed.signature };
+      });
+      expect((await w.act(ready.card, { action: "request_signature", account: w.account,
+        connectionId: connection.connectionId, reviewRevision: ready.session.reviewRevision })).error).toBeUndefined();
+      const request = w.run(() => w.records.currentRequest(ready.session.id))!;
+      flights.push({ card: ready.card, id: request.attemptId, release });
+      await entered.promise;
+      expect(request.requestStatus).toBe("awaiting_signature");
+      expect(w.run(() => w.records.authority(request.attemptId))).toMatchObject({ run_id: runId, can_submit: 1, sdk_pending: 1 });
+      if (index < 2) {
+        expect((await w.act(await w.read(ready.card), { action: "stop_waiting" })).error).toBeUndefined();
+        release.resolve();
+        await vi.waitFor(() => expect(w.run(() => w.records.authority(request.attemptId)?.sdk_pending)).toBe(0));
+        expect(w.run(() => w.records.request(request.attemptId)?.requestStatus)).toBe("stopped");
+        expect(w.run(() => w.records.authority(request.attemptId)?.can_submit)).toBe(0);
+      }
+    }
+    const restart = await f.prepare({ kind: "restart_wallet_service" });
+    app = host(mcp.call); startCard("settings", settingsRenderer);
+    app.ontoolresult!({ ...cardToolResult(restart), _meta: { [CARD_METADATA_KEY]: { cardId: restart.snapshot.cardId, permission: restart.permission } } });
+    await vi.waitFor(() => expect(root.querySelectorAll("button").find((node) => node.dataset.cardAction === "settings_confirm")?.disabled).toBe(false));
+    expect(factValues(root, "Wallet connection records")).toEqual(["1"]);
+    expect(factValues(root, "Wallet approval requests to stop")).toEqual(["1"]);
+    expect(factValues(root, "Other transaction requests")).toEqual(["2"]);
+    const details = root.querySelector("details")!, rows = details.querySelectorAll("div").filter((item) => item.className === "ui-row");
+    const expected = flights.map((flight, index) => ({ id: flight.id, status: index < 2 ? "stopped" : "awaiting_signature" }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const observed = rows.flatMap((row, index) => row.children[0]?.textContent === "Transaction request ID"
+      ? [{ id: row.children[1]!.textContent, status: rows[index + 1]!.children[1]!.textContent }] : []);
+    expect(observed).toEqual(expected);
+    expect(factValues(details, "Recorded request status")).toEqual(expected.map((item) => item.status));
+    expect(factValues(root, "Transaction request ID")).toEqual(expected.map((item) => item.id));
+    expect(factValues(details, "Transaction request ID")).toEqual(expected.map((item) => item.id));
+    expect(factValues(root, "Service run ID")).toEqual([runId]); expect(factValues(details, "Service run ID")).toEqual([runId]);
+    expect(factValues(root, "Fixture Wallet connection ID")).toEqual([connection.connectionId]);
+    expect(factValues(details, "Fixture Wallet connection ID")).toEqual([connection.connectionId]);
+    expect(root.querySelectorAll("details")).toHaveLength(1);
+    const body = details.parent!.children.filter((item) => item !== details).map((item) => item.textContent).join("");
+    for (const id of [runId, connection.connectionId, ...flights.map((flight) => flight.id)]) expect(body).not.toContain(id);
+    for (const request of expected) expect(w.run(() => w.records.request(request.id)?.requestStatus)).toBe(request.status);
+    expect(w.sign).toHaveBeenCalledTimes(3); expect(w.submit).not.toHaveBeenCalled(); expect(w.chainRead).not.toHaveBeenCalled();
+    expect((restart.snapshot.data as SettingsView).phase).toBe("prepared");
+    expect(w.run(() => f.records.control())).toMatchObject({ active_operation_id: null, data_epoch: 0 });
+  } finally {
+    for (const flight of flights) {
+      if (w.run(() => w.records.request(flight.id)?.requestStatus) === "awaiting_signature") {
+        expect((await w.act(await w.read(flight.card), { action: "stop_waiting" })).error).toBeUndefined();
+      }
+      flight.release.resolve();
+      await vi.waitFor(() => expect(w.run(() => w.records.authority(flight.id)?.sdk_pending)).toBe(0));
+      expect(w.run(() => w.records.request(flight.id)?.requestStatus)).toBe("stopped");
+    }
+    expect(w.submit).not.toHaveBeenCalled();
+    await app?.onteardown?.(); await mcp.close(); f.close();
+  }
+});
+
+it("shows the actual unconfirmed disconnection in restart confirmation while its original transport is pending", async () => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
+  const entered = deferred<void>(), release = deferred<void>(), finish = vi.mocked(w.transport.disconnect).getMockImplementation()!;
+  let app: Host | undefined, connectionId: string | undefined;
+  vi.mocked(w.transport.disconnect).mockImplementationOnce(async (topic) => { entered.resolve(); await release.promise; await finish(topic); });
+  try {
+    const { connection } = await w.approve(); connectionId = connection.connectionId;
+    const manage = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+    expect((await w.act(manage, { action: "disconnect", connectionId })).error).toBeUndefined(); await entered.promise;
+    expect(w.run(() => w.records.connection(connectionId!)?.sdkPending)).toBe(true);
+    expect(w.run(() => w.records.pendingDisconnect(connectionId!))).toBeDefined();
+    const runId = w.runtime.availability().walletRunId, restart = await f.prepare({ kind: "restart_wallet_service" });
+    app = host(mcp.call); startCard("settings", settingsRenderer);
+    app.ontoolresult!({ ...cardToolResult(restart), _meta: { [CARD_METADATA_KEY]: { cardId: restart.snapshot.cardId, permission: restart.permission } } });
+    await vi.waitFor(() => expect(root.querySelectorAll("button").find((node) => node.dataset.cardAction === "settings_confirm")?.disabled).toBe(false));
+    expect(root.textContent).toContain("This wallet's disconnection has not been confirmed.");
+    expect(factValues(root, "Wallet connection records")).toEqual(["1"]);
+    expect(factValues(root, "Wallet approval requests to stop")).toEqual(["0"]); expect(factValues(root, "Other transaction requests")).toEqual(["0"]);
+    const details = root.querySelector("details")!;
+    expect(factValues(root, "Service run ID")).toEqual([runId]); expect(factValues(details, "Service run ID")).toEqual([runId]);
+    expect(factValues(root, "Fixture Wallet connection ID")).toEqual([connectionId]);
+    expect(factValues(details, "Fixture Wallet connection ID")).toEqual([connectionId]);
+    const body = details.parent!.children.filter((item) => item !== details).map((item) => item.textContent).join("");
+    expect(body).not.toContain(runId); expect(body).not.toContain(connectionId);
+    expect(w.runtime.availability().walletRunId).toBe(runId);
+    expect(w.run(() => f.records.control())).toMatchObject({ active_operation_id: null, data_epoch: 0 });
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
+  } finally {
+    release.resolve();
+    if (connectionId && vi.mocked(w.transport.disconnect).mock.calls.length) {
+      await vi.waitFor(() => expect(w.run(() => w.records.connection(connectionId!)?.sdkPending)).toBe(false));
+      expect(w.run(() => w.records.connection(connectionId!)?.connection.status)).toBe("disconnected");
+    }
+    await app?.onteardown?.(); await mcp.close(); f.close();
+  }
+});
+
+it.each(["valid", "invalid_json"] as const)("keeps the actual %s backup verdict ahead of a pending seal reply without unlocking or replaying", async (mode) => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards }), visibility = visibleFrame();
+  const entered = deferred<void>(), release = deferred<void>(), applied = vi.spyOn(f.localData, "applyValidatedReplacement");
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  let app: Host | undefined, delivered = false;
+  try {
+    const raw = mode === "valid" ? Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData()))) : Buffer.from("{");
+    const expectedHash = createHash("sha256").update(raw).digest("hex");
+    const created = await mcp.create("settings", {}), snapshot = (created.structuredContent as { data: CardSnapshot }).data;
+    const operationId = (snapshot.data as SettingsView).operationId, ref = created._meta![CARD_METADATA_KEY] as { cardId: string; permission: string };
+    app = host(async (request) => {
+      const response = await mcp.call(request);
+      if ((request.arguments.input as { action?: string } | undefined)?.action === "settings_seal_upload") {
+        expect(response.isError).not.toBe(true); entered.resolve(); await release.promise; delivered = true;
+      }
+      return response;
+    });
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").some((node) => node.dataset.cardAction === "settings_begin_upload")).toBe(true));
+    selectSettingsBackup(raw); await entered.promise;
+    const operation = w.run(() => f.records.get(operationId))!, fileId = operation.fileId!;
+    expect(operation.phase).toBe(mode === "valid" ? "prepared" : "sealed");
+    expect(w.run(() => f.records.file(fileId))).toMatchObject({ sealed: true, sha256: expectedHash, receivedSize: raw.length, totalSize: raw.length });
+    expect(await readFile(join(w.directory, ".settings-staging", `${fileId}.upload`))).toEqual(raw);
+    const backend = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
+    expect((backend.data.data as SettingsView).restoreCheck).toMatchObject(mode === "valid" ? { status: "can_restore" } : { status: "cannot_restore", reason: "invalid_backup" });
+    expect(delivered).toBe(false); expect(root.textContent).toContain("Checking backup…");
+    visibility("hidden"); visibility("visible");
+    await vi.waitFor(() => expect(root.textContent).toContain(mode === "valid" ? "Restore available" : "Cannot restore"));
+    expect(root.textContent).not.toContain("Checking backup");
+    expect(root.querySelectorAll("p").filter((node) => node.getAttribute("role") === "status").map((node) => node.textContent)).not.toContain("Checking backup…");
+    expect(delivered).toBe(false);
+    const actions = root.querySelectorAll("[data-card-action]"); expect(actions.length).toBeGreaterThan(0);
+    expect(actions.every((node) => node.disabled)).toBe(true);
+    if (mode === "valid") {
+      expect(control("Restore local records")?.disabled).toBe(true);
+      expect(control("Change backup file")).toBeUndefined();
+      expect(actions.map((node) => node.dataset.cardAction).sort()).toEqual(["settings_back", "settings_confirm"]);
+    }
+    else { expect(control("Restore local records")).toBeUndefined(); expect(control("Change backup file")?.disabled).toBe(true); }
+    expect(applied).not.toHaveBeenCalled(); expect(w.run(() => f.records.control())).toMatchObject({ data_epoch: 0, active_operation_id: null });
+    release.resolve();
+    await vi.waitFor(() => expect(control(mode === "valid" ? "Restore local records" : "Change backup file")?.disabled).toBe(false));
+    expect(delivered).toBe(true); expect(root.textContent).not.toContain("Checking backup");
+    expect(w.run(() => f.records.get(operationId))).toMatchObject({ phase: mode === "valid" ? "prepared" : "sealed", fileId });
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_seal_upload")).toHaveLength(1);
+    expect(app.callServerTool.mock.calls.filter(([call]) => ["settings_prepare", "settings_confirm"].includes(String((call.arguments.input as { action?: string } | undefined)?.action)))).toHaveLength(0);
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled(); expect(applied).not.toHaveBeenCalled();
+  } finally {
+    release.resolve(); await app?.onteardown?.(); await mcp.close(); f.close();
+  }
+});
+
+it("keeps the currently selected upload after a different file replaces a backup whose recheck reply is pending", async () => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards }), visibility = visibleFrame();
+  const entered = deferred<void>(), release = deferred<void>(), applied = vi.spyOn(f.localData, "applyValidatedReplacement");
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  let app: Host | undefined, currentFileId: string | undefined, ref: { cardId: string; permission: string } | undefined, operationId = "";
+  try {
+    const raw = Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData()))), expectedHash = createHash("sha256").update(raw).digest("hex");
+    const created = await mcp.create("settings", {}), snapshot = (created.structuredContent as { data: CardSnapshot }).data;
+    operationId = (snapshot.data as SettingsView).operationId; ref = created._meta![CARD_METADATA_KEY] as { cardId: string; permission: string };
+    app = host(async (request) => {
+      const response = await mcp.call(request);
+      if ((request.arguments.input as { action?: string } | undefined)?.action === "settings_prepare") { entered.resolve(); await release.promise; }
+      return response;
+    });
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").some((node) => node.dataset.cardAction === "settings_begin_upload")).toBe(true));
+    selectSettingsBackup(raw); await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    const oldFileId = w.run(() => f.records.get(operationId)!.fileId)!;
+    control("Back to Restore")!.click(); await vi.waitFor(() => expect(control("Check backup again")?.disabled).toBe(false));
+    control("Check backup again")!.click(); await entered.promise;
+    expect(root.textContent).toContain("Checking backup…"); expect(w.run(() => f.records.control().file_io_id)).toBeNull();
+    // Another frame's scoped inputs use the same authenticated MCP path and
+    // fresh revisions; no projection or file row is injected into the View.
+    const fresh = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
+    const selected = await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: fresh.data.revision,
+      input: { action: "settings_select", draft: { kind: "import_local_data" } } } });
+    expect(selected.isError).not.toBe(true);
+    const selectedCard = (selected.structuredContent as { data: CardSnapshot }).data;
+    const begun = await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: selectedCard.revision,
+      input: { action: "settings_begin_upload", operationId, name: "other.json", totalSize: raw.length, sha256: expectedHash } } });
+    expect(begun.isError).not.toBe(true);
+    const current = ((begun.structuredContent as { data: CardSnapshot }).data.data as SettingsView);
+    currentFileId = current.file!.fileId; expect(currentFileId).not.toBe(oldFileId);
+    expect(current).toMatchObject({ operationId, draft: { kind: "import_local_data" }, phase: "uploading", restoreCheck: { status: "receiving" },
+      file: { displayName: "other.json", receivedSize: 0, totalSize: raw.length, sha256: expectedHash, sealed: false } });
+    expect(await readFile(join(w.directory, ".settings-staging", `${currentFileId}.upload`))).toEqual(Buffer.alloc(0));
+    expect(w.run(() => f.records.control())).toMatchObject({ file_io_id: null, data_epoch: 0, active_operation_id: null });
+    visibility("hidden"); visibility("visible"); await vi.waitFor(() => expect(factValues(root, "Selected file")).toEqual(["other.json"]));
+    expect(factValues(root, "File received")).toEqual([`0 / ${raw.length.toLocaleString("en-US")} bytes`]);
+    expect(root.textContent).not.toContain("Checking backup"); expect(root.textContent).not.toContain("Restore available");
+    const actions = root.querySelectorAll("[data-card-action]"); expect(actions.length).toBeGreaterThan(0); expect(actions.every((node) => node.disabled)).toBe(true);
+    release.resolve(); await vi.waitFor(() => expect(root.querySelectorAll("input").find((node) => node.dataset.cardAction === "settings_begin_upload")?.disabled).toBe(false));
+    expect(factValues(root, "Selected file")).toEqual(["other.json"]); expect(root.textContent).not.toContain("Checking backup");
+    expect(w.run(() => f.records.get(operationId))).toMatchObject({ fileId: currentFileId, phase: "uploading" });
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_prepare")).toHaveLength(1);
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_seal_upload")).toHaveLength(1);
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_begin_upload")).toHaveLength(1);
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_confirm")).toHaveLength(0);
+    expect(applied).not.toHaveBeenCalled(); expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
+  } finally {
+    release.resolve();
+    try {
+      if (currentFileId && ref) {
+        const fresh = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
+        const cancelled = await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: fresh.data.revision,
+          input: { action: "settings_cancel" } } });
+        expect(cancelled.isError).not.toBe(true);
+        await vi.waitFor(() => expect(w.run(() => f.records.file(currentFileId!)?.cleanup)).toBe("complete"));
+        expect(w.run(() => f.records.control().file_io_id)).toBeNull();
+      }
+    } finally {
+      try { await app?.onteardown?.(); await mcp.close(); }
+      finally { f.close(); }
+    }
+  }
+});
+
+it.each(["unsupported", "acknowledged", "not_completed", "unconfirmed", "changed", "missing", "permission", "operation", "file", "kind", "dispose_read", "dispose_host", "assembled_corruption", "valid_fragmented"] as const)(
+  "delivers the same backup through the actual Settings renderer, lifecycle and authenticated MCP path (%s)", async (mode) => {
+    const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+    const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+    const readEntered = deferred<void>(), readRelease = deferred<void>(), readEnded = deferred<void>();
+    const hostEntered = deferred<void>(), hostRelease = deferred<{ isError: boolean }>();
+    let tamper = true, otherOperation: string | undefined, otherFile: string | undefined;
+    let originalBytes: Buffer | undefined, expectedHash = "", fragmentLimit = 0, validFragments = 0;
+    const fragmented = mode === "assembled_corruption" || mode === "valid_fragmented";
+    let otherCard: { cardId: string; permission: string } | undefined;
+    if (mode === "operation" || mode === "file") {
+      const other = await f.prepare({ kind: "export_local_data" }); await f.confirm(other);
+      await vi.waitFor(async () => expect((await f.read(other)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
+      const data = (await f.read(other)).snapshot.data as SettingsView; otherOperation = data.operationId; otherFile = data.file!.fileId;
+    }
+    if (mode === "kind") {
+      const other = await f.wallet.createConnection(); otherCard = { cardId: other.snapshot.cardId, permission: other.permission };
+    }
+    const app = host(async (request) => {
+      if (request.name === CARD_TOOLS.readSettingsFile && fragmented) {
+        const response = await mcp.call({ ...request, arguments: { ...request.arguments, limit: fragmentLimit } });
+        expect(response.isError).not.toBe(true);
+        const delivered = structuredClone(response), value = delivered._meta![SETTINGS_FILE_METADATA_KEY] as {
+          cardId: string; operationId: string; fileId: string; offset: number; totalSize: number; sha256: string; chunkBase64: string };
+        expect(value).toMatchObject({ cardId: request.arguments.cardId, operationId: request.arguments.operationId,
+          fileId: request.arguments.fileId, offset: request.arguments.offset, totalSize: originalBytes!.length, sha256: expectedHash });
+        const fragment = Buffer.from(value.chunkBase64, "base64");
+        expect(fragment.length).toBeGreaterThan(0);
+        expect(fragment).toEqual(originalBytes!.subarray(value.offset, value.offset + fragment.length));
+        validFragments++;
+        // Only external delivery bytes change, after authenticated product FS
+        // verification. Identity, lengths, whole-file SHA and Base64 remain valid.
+        if (mode === "assembled_corruption" && tamper) {
+          fragment[0] = fragment[0]! ^ 1; value.chunkBase64 = fragment.toString("base64");
+        }
+        return delivered;
+      }
+      if (request.name === CARD_TOOLS.readSettingsFile && tamper) {
+        const argumentsValue = { ...request.arguments };
+        if (mode === "permission") argumentsValue.permission = "wrong-permission";
+        if (mode === "operation") argumentsValue.operationId = otherOperation;
+        if (mode === "file") argumentsValue.fileId = otherFile;
+        if (mode === "kind") Object.assign(argumentsValue, otherCard);
+        return mcp.call({ ...request, arguments: argumentsValue });
+      }
+      return mcp.call(request);
+    });
+    app.getHostCapabilities = () => mode === "unsupported" ? {} : { downloadFile: {} };
+    app.downloadFile.mockImplementation(async () => {
+      hostEntered.resolve();
+      if (mode === "dispose_host") return hostRelease.promise;
+      if (mode === "unconfirmed") throw new Error("Synthetic lost Host reply");
+      return { isError: mode === "not_completed" };
+    });
+    try {
+      const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+      const operationId = (initial.data as SettingsView).operationId;
+      startCard("settings", settingsRenderer); app.ontoolresult!(created);
+      await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click();
+      control("Back up local records")!.click();
+      await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false)); control("Continue")!.click();
+      await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false)); control("Create backup")!.click();
+      await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(operationId)?.result?.outcome)).toBe("completed"));
+      // Export publication completes after admission's reply. Follow the
+      // backend's declared observation cadence through the actual lifecycle;
+      // injecting a terminal snapshot would bypass this consumer boundary.
+      await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+      await vi.waitFor(() => expect(root.textContent).toContain("The local backup file was created."));
+      const result = f.wallet.run(() => f.records.get(operationId)!.result!), fileId = f.wallet.run(() => f.records.get(operationId)!.fileId)!;
+      const path = String(result.details!.path), bytes = await readFile(path);
+      expect(root.querySelectorAll(".settings-path").map((node) => node.textContent))
+        .toEqual([join(f.wallet.directory, "backups"), `${operationId}.json`]);
+      expect(root.textContent).toContain("Folder"); expect(root.textContent).toContain("File name");
+      originalBytes = bytes; expectedHash = createHash("sha256").update(bytes).digest("hex");
+      // Derive a positive split from the actual source size, never a product
+      // transfer limit or a digest calculated from the corrupted delivery.
+      fragmentLimit = Math.floor(bytes.length / 2);
+      if (fragmented) expect(fragmentLimit).toBeGreaterThan(0);
+      if (mode === "unsupported") {
+        expect(control("Download this backup")).toBeUndefined();
+        expect(root.textContent).toContain("does not support downloading from this card"); expect(app.downloadFile).not.toHaveBeenCalled();
+        expect(app.callServerTool.mock.calls.some(([request]) => request.name === CARD_TOOLS.readSettingsFile)).toBe(false);
+        return;
+      }
+      if (mode === "changed") await writeFile(path, Buffer.alloc(bytes.length, 1));
+      if (mode === "missing") await unlink(path);
+      if (mode === "dispose_read") {
+        const read = f.files.readExportRange.bind(f.files);
+        vi.spyOn(f.files, "readExportRange").mockImplementationOnce(async (...args) => {
+          readEntered.resolve(); await readRelease.promise; const value = await read(...args); readEnded.resolve(); return value;
+        });
+      }
+      await vi.waitFor(() => expect(control("Download this backup")?.disabled).toBe(false)); control("Download this backup")!.click();
+      if (mode === "dispose_read") {
+        await readEntered.promise; expect(root.textContent).toContain("Checking the backup before downloading");
+        expect(app.downloadFile).not.toHaveBeenCalled();
+        await app.onteardown!(); const ended = root.textContent; readRelease.resolve(); await readEnded.promise;
+        await vi.advanceTimersByTimeAsync(0); expect(root.textContent).toBe(ended); expect(app.downloadFile).not.toHaveBeenCalled();
+      } else if (mode === "dispose_host") {
+        await hostEntered.promise; expect(root.textContent).toContain("Checking the backup before downloading");
+        expect(app.downloadFile).toHaveBeenCalledOnce();
+        await app.onteardown!(); const ended = root.textContent; hostRelease.resolve({ isError: false });
+        await vi.advanceTimersByTimeAsync(0); expect(root.textContent).toBe(ended); expect(app.downloadFile).toHaveBeenCalledOnce();
+      } else {
+        const rejected = ["changed", "missing", "permission", "operation", "file", "kind", "assembled_corruption"].includes(mode);
+        const expected = rejected ? "Nothing was sent" : mode === "acknowledged" || mode === "valid_fragmented" ? "received the download request"
+          : mode === "not_completed" ? "did not complete the download request" : "download could not be confirmed";
+        await vi.waitFor(() => expect(root.textContent).toContain(expected));
+        expect(app.downloadFile).toHaveBeenCalledTimes(rejected ? 0 : 1);
+        if (fragmented) expect(validFragments).toBeGreaterThan(1);
+        if (!rejected) {
+          const resource = app.downloadFile.mock.calls[0]![0].contents[0]!;
+          if (resource.type !== "resource" || !("blob" in resource.resource)) throw new Error("Expected actual Host file bytes");
+          expect(Buffer.from(resource.resource.blob, "base64")).toEqual(bytes);
+        }
+        const beforeRetry = app.downloadFile.mock.calls.length;
+        tamper = false; if (mode === "changed" || mode === "missing") await writeFile(path, bytes);
+        app.downloadFile.mockResolvedValue({ isError: false });
+        await vi.waitFor(() => expect(control("Download this backup")?.disabled).toBe(false)); control("Download this backup")!.click();
+        await vi.waitFor(() => expect(app.downloadFile).toHaveBeenCalledTimes(beforeRetry + 1));
+        await vi.waitFor(() => expect(root.textContent).toContain("received the download request"));
+        if (fragmented) {
+          const last = app.downloadFile.mock.calls.at(-1)![0].contents[0]!;
+          if (last.type !== "resource" || !("blob" in last.resource)) throw new Error("Expected verified original bytes on explicit retry");
+          expect(Buffer.from(last.resource.blob, "base64")).toEqual(bytes);
+          expect(await readFile(path)).toEqual(bytes);
+        }
+      }
+      expect(f.wallet.run(() => f.records.get(operationId)!.result)).toEqual(result);
+      expect(f.wallet.run(() => f.records.get(operationId)!.fileId)).toBe(fileId);
+      expect(app.callServerTool.mock.calls.filter(([request]) => (request.arguments.input as { action?: string } | undefined)?.action === "settings_confirm")).toHaveLength(1);
+      expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+    } finally { readRelease.resolve(); hostRelease.resolve({ isError: false }); await app.onteardown?.(); await mcp.close(); f.close(); }
+  });
+
+it.each([
+  { kind: "export_local_data", page: "Local records", operation: "Backup", select: "Back up local records" },
+  { kind: "import_local_data", page: "Local records", operation: "Restore", select: "Restore local records" },
+  { kind: "reset_local_data", page: "Local records", operation: "Reset", select: "Reset local data" },
+  { kind: "clear_read_address", page: "Address for viewing assets", operation: "Clear default address", select: "Clear default address" },
+  { kind: "restart_wallet_service", page: "Troubleshooting", operation: "Connection service restart", select: "Restart connection service" },
+  { kind: "set_endpoint", page: "Advanced settings", operation: "Change network address", select: "Select network address" },
+  { kind: "restore_endpoint", page: "Advanced settings", operation: "Use default network address", select: "Select default network address" }
+] as const)("isolates $kind selection from sibling decisions and returns through local Back/Resume without applying or preparing", async (choice) => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  let app: Host | undefined;
+  try {
+    if (choice.kind === "clear_read_address") await w.approve();
+    const created = await mcp.create("settings", {}), snapshot = (created.structuredContent as { data: CardSnapshot }).data;
+    const operationId = (snapshot.data as SettingsView).operationId;
+    app = host(mcp.call); startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control(choice.page)?.disabled).toBe(false)); control(choice.page)!.click();
+    if (choice.kind === "set_endpoint") root.querySelectorAll("input")[0]!.value = "https://selected.example:9443";
+    control(choice.select)!.click();
+    await vi.waitFor(() => expect(root.querySelector(".settings-location")!.textContent).toBe(`Settings / ${choice.page} / ${choice.operation}`));
+    const selected = w.run(() => f.records.get(operationId))!, deadline = w.run(() => w.cardRecords.get(snapshot.cardId)!.state.expiresAt);
+    expect(selected.draft?.kind).toBe(choice.kind); expect(selected.phase).toBe("draft");
+    expect(root.querySelectorAll(".settings-choice")).toHaveLength(0); expect(root.querySelectorAll(".settings-endpoint")).toHaveLength(0);
+    if (choice.kind === "import_local_data") {
+      expect(root.querySelectorAll("input").map((node) => node.dataset.cardAction)).toEqual(["settings_begin_upload"]);
+      expect(control("Continue")).toBeUndefined();
+    } else {
+      expect(root.querySelectorAll("input")).toHaveLength(0);
+      expect(root.querySelectorAll("[data-card-action]").map((node) => node.dataset.cardAction).sort()).toEqual(["settings_prepare"]);
+    }
+    for (const label of ["Back up local records", "Restore local records", "Reset local data", "Select network address", "Select default network address", "Restart connection service", "Clear default address"]) {
+      expect(control(label)).toBeUndefined();
+    }
+    const calls = app.callServerTool.mock.calls.length;
+    const back = control(`Back to ${choice.page}`)!;
+    expect(back.dataset.cardAction).toBeUndefined(); expect(back.parent?.getAttribute("aria-label")).toBe("Settings navigation");
+    back.click(); expect(root.querySelector(".settings-location")!.textContent).toBe(`Settings / ${choice.page}`);
+    expect(root.querySelector(".settings-page")!.className).toContain("settings-page--back");
+    expect(control("Close Settings")).toBeUndefined(); expect(control("Cancel")).toBeUndefined();
+    expect(control("Continue")).toBeUndefined(); expect(control("Resume")).toBeDefined();
+    expect(root.textContent).toContain(`Unfinished change: ${choice.operation}.`);
+    expect(root.textContent).not.toContain("Restore available");
+    expect(w.run(() => f.records.get(operationId))).toEqual(selected); expect(app.callServerTool).toHaveBeenCalledTimes(calls);
+    control("Back to Settings")!.click();
+    expect(root.querySelector(".settings-location")!.textContent).toBe("Settings");
+    expect(root.textContent).toContain(`Unfinished change: ${choice.operation}.`);
+    expect(root.textContent).not.toContain("Restore available");
+    expect(w.run(() => f.records.get(operationId))).toEqual(selected); expect(app.callServerTool).toHaveBeenCalledTimes(calls);
+    control("Resume")!.click();
+    expect(root.querySelector(".settings-page")!.className).toContain("settings-page--forward");
+    expect(root.querySelector(".settings-location")!.textContent).toBe(`Settings / ${choice.page} / ${choice.operation}`);
+    expect(w.run(() => f.records.get(operationId))).toEqual(selected); expect(app.callServerTool).toHaveBeenCalledTimes(calls);
+    expect(w.run(() => w.cardRecords.get(snapshot.cardId)!.state.expiresAt)).toBe(deadline);
+    expect(w.run(() => f.records.control())).toMatchObject({ data_epoch: 0, active_operation_id: null });
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
+  } finally { await app?.onteardown?.(); await mcp.close(); f.close(); }
+});
+
+it("closes Settings only from the root after leaving a prepared backup without publishing and keeps its ended result readable", async () => {
+  const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
+  const publish = vi.spyOn(f.files, "publishExport"); let app: Host | undefined;
+  try {
+    const prepared = await f.prepare({ kind: "export_local_data" }), view = prepared.snapshot.data as SettingsView;
+    const ref = { cardId: prepared.snapshot.cardId, permission: prepared.permission };
+    app = host(mcp.call); startCard("settings", settingsRenderer);
+    app.ontoolresult!({ ...cardToolResult(prepared), _meta: { [CARD_METADATA_KEY]: ref } });
+    const control = (name: string) => root.querySelectorAll("button").find((node) => node.textContent === name);
+    await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
+    const actions = root.querySelector(".settings-action-row")!;
+    expect(control("Create backup")!.parent).toBe(actions);
+    expect(control("Cancel")).toBeUndefined(); expect(control("Close Settings")).toBeUndefined();
+    control("Back to Backup")!.click(); await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
+    expect(w.run(() => f.records.get(view.operationId)?.result)).toBeUndefined();
+    control("Back to Local records")!.click(); expect(control("Close Settings")).toBeUndefined();
+    control("Back to Settings")!.click();
+    expect(root.textContent).toContain("Closing Settings discards this unfinished change");
+    expect(root.querySelectorAll("[data-card-action]").map((node) => node.dataset.cardAction)).toEqual(["settings_cancel"]);
+    control("Close Settings")!.click(); await vi.waitFor(() => expect(w.run(() => f.records.get(view.operationId)?.result?.outcome)).toBe("interrupted"));
+    expect(publish).not.toHaveBeenCalled(); expect(w.run(() => f.records.get(view.operationId)?.fileId)).toBeUndefined();
+    const saved = await mcp.call({ name: CARD_TOOLS.read, arguments: ref });
+    expect(((saved.structuredContent as { data: CardSnapshot }).data.data as SettingsView).result?.outcome).toBe("interrupted");
+    const stale = await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: prepared.snapshot.revision,
+      input: { action: "settings_confirm", operationId: view.operationId, preparationId: view.preparationId } } });
+    expect(stale.isError).toBe(true); expect(publish).not.toHaveBeenCalled();
+    expect(root.querySelector(".settings-action-row")).toBeUndefined();
+    expect(w.run(() => f.records.control())).toMatchObject({ active_operation_id: null, data_epoch: 0 });
+    expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
+  } finally { await app?.onteardown?.(); await mcp.close(); f.close(); }
+});
+
+it("separates Settings navigation from preparation and preserves the same work through toolbar Back", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const operationId = (initial.data as SettingsView).operationId, app = host(mcp.call);
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false));
+    const original = f.wallet.run(() => f.records.get(operationId)), calls = app.callServerTool.mock.calls.length;
+    expect(root.querySelectorAll(".settings-menu-item").map((node) => node.getAttribute("aria-label")))
+      .toEqual(["Address for viewing assets", "Local records", "Troubleshooting", "Advanced settings"]);
+    expect(root.querySelectorAll(".settings-menu-item").every((node) => node.dataset.cardAction === undefined)).toBe(true);
+    expect(control("Close Settings")!.dataset.cardAction).toBe("settings_cancel");
+    expect(root.querySelectorAll("[data-card-action]").filter((node) => node.dataset.cardAction === "settings_cancel")).toHaveLength(1);
+    expect(root.querySelector(".settings-page")!.className).not.toMatch(/settings-page--/);
+    for (const name of ["Address for viewing assets", "Local records", "Troubleshooting", "Advanced settings"]) {
+      control(name)!.click();
+      const toolbar = root.querySelectorAll("nav").find((node) => node.getAttribute("aria-label") === "Settings navigation")!;
+      expect(toolbar.textContent).toContain(`Settings / ${name}`);
+      expect(control("Back to Settings")!.parent).toBe(toolbar);
+      expect(control("Close Settings")).toBeUndefined(); expect(control("Cancel")).toBeUndefined();
+      expect(root.querySelector(".settings-page")!.className).toContain("settings-page--forward");
+      control("Back to Settings")!.click();
+      expect(root.querySelectorAll(".settings-menu-item")).toHaveLength(4);
+      expect(root.querySelector(".settings-page")!.className).toContain("settings-page--back");
+      expect(f.wallet.run(() => f.records.get(operationId))).toEqual(original);
+      expect(app.callServerTool).toHaveBeenCalledTimes(calls);
+    }
+    control("Local records")!.click(); control("Back up local records")!.click();
+    await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
+    const selected = f.wallet.run(() => f.records.get(operationId)), selectedCalls = app.callServerTool.mock.calls.length;
+    control("Back to Local records")!.click();
+    expect(control("Continue")).toBeUndefined();
+    expect(root.textContent).toContain("Unfinished change: Backup.");
+    expect(f.wallet.run(() => f.records.get(operationId))).toEqual(selected);
+    expect(app.callServerTool).toHaveBeenCalledTimes(selectedCalls);
+    control("Resume")!.click(); control("Continue")!.click();
+    await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
+    expect(root.textContent).toContain("Settings / Local records / Backup / Confirm");
+    const back = control("Back to Backup")!;
+    expect(back.dataset.cardAction).toBe("settings_back");
+    expect(back.parent?.getAttribute("aria-label")).toBe("Settings navigation");
+    back.click();
+    await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
+    expect(f.wallet.run(() => f.records.get(operationId)?.preparationId)).toBeUndefined();
+    expect(f.wallet.run(() => f.records.get(operationId)?.draft?.kind)).toBe("export_local_data");
+    expect(f.wallet.run(() => f.records.get(operationId)?.result)).toBeUndefined();
+    expect(f.wallet.quote).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+  } finally { f.close(); }
+});
+
+it("shows the same removal-first reconciliation action in Settings overview and Troubleshooting while the service remains available", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  try {
+    f.wallet.notify({ topic: "unrecorded-ui-session", accounts: [f.wallet.account], methods: ["sui_signTransaction"], chain: "sui:mainnet",
+      expiresAt: new Date(f.wallet.now().getTime() + 60000).toISOString() });
+    const created = await mcp.create("settings", {}), app = host(mcp.call);
+    expect((created.structuredContent as { data: CardSnapshot }).data.data).toMatchObject({ facts: {
+      walletAvailability: { status: "available" }, connectionReconciliationRequired: true } });
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(root.textContent).toContain("Remove"));
+    expect(root.textContent).toContain("wallet app");
+    control("Troubleshooting")!.click();
+    expect(root.textContent).toContain("Ready"); expect(root.textContent).toContain("Remove");
+    expect(root.textContent).toContain("wallet app");
+    const restart = await f.prepare({ kind: "restart_wallet_service" }); await f.confirm(restart);
+    await vi.waitFor(async () => expect((await f.read(restart)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
+    expect((await f.read({ snapshot: (created.structuredContent as { data: CardSnapshot }).data,
+      permission: (created._meta![CARD_METADATA_KEY] as { permission: string }).permission })).snapshot.data).toMatchObject({ facts: { connectionReconciliationRequired: true } });
+    f.wallet.notify(undefined);
+    const next = await mcp.create("settings", {});
+    expect(((next.structuredContent as { data: CardSnapshot }).data.data as SettingsView).facts?.connectionReconciliationRequired).toBeUndefined();
+    expect(f.wallet.connect).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+    await app.onteardown!();
+  } finally { await mcp.close(); f.close(); }
+});
+
+it("automatically checks an uploaded backup and rechecks it only after Back and an independent same-count writer, then applies only a new confirmation", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const db = new Database(`${f.wallet.directory}/activity.sqlite`), visibility = visibleFrame();
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  const operation = () => f.wallet.run(() => f.records.get(operationId)!);
+  let operationId = "";
+  try {
+    const original = `0x${"a".repeat(64)}`, changed = `0x${"b".repeat(64)}`;
+    await f.wallet.run(() => f.wallet.activity.setActiveAccount(original, "wallet_connection", f.wallet.now()));
+    const bytes = Buffer.from(JSON.stringify(await f.wallet.run(() => f.localData.exportLocalData())));
+    const expectedHash = createHash("sha256").update(bytes).digest("hex"), applied = vi.spyOn(f.localData, "applyValidatedReplacement");
+    const creating = await mcp.create("settings", {}), snapshot = (creating.structuredContent as { data: CardSnapshot }).data;
+    operationId = (snapshot.data as SettingsView).operationId;
+    const app = host(mcp.call); startCard("settings", settingsRenderer); app.ontoolresult!(creating);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click();
+    control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").some((node) => node.dataset.cardAction === "settings_begin_upload")).toBe(true));
+    selectSettingsBackup(bytes);
+    await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    expect(control("Preview replacement")).toBeUndefined();
+    const fileId = operation().fileId!;
+    expect(f.wallet.run(() => f.records.file(fileId))).toMatchObject({ sealed: true, sha256: expectedHash, totalSize: bytes.length });
+    expect(operation().phase).toBe("prepared");
+    expect(control("Change backup file")).toBeUndefined();
+    control("Back to Restore")!.click();
+    await vi.waitFor(() => expect(control("Check backup again")?.disabled).toBe(false));
+    expect(control("Change backup file")?.disabled).toBe(false);
+    expect(operation()).toMatchObject({ phase: "sealed", fileId });
+    const sameFileWork = operation(), selectedCalls = app.callServerTool.mock.calls.length;
+    control("Back to Local records")!.click();
+    expect(control("Check backup again")).toBeUndefined(); expect(control("Resume")).toBeDefined();
+    expect(operation()).toEqual(sameFileWork); expect(app.callServerTool).toHaveBeenCalledTimes(selectedCalls);
+    control("Restore local records")!.click();
+    expect(root.querySelector(".settings-location")!.textContent).toBe("Settings / Local records / Restore");
+    expect(control("Check backup again")?.disabled).toBe(false);
+    expect(operation()).toEqual(sameFileWork); expect(app.callServerTool).toHaveBeenCalledTimes(selectedCalls);
+    expect(await readFile(join(f.wallet.directory, ".settings-staging", `${fileId}.upload`))).toEqual(bytes);
+    control("Check backup again")!.click();
+    await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    const prior = operation(), priorCard = f.wallet.run(() => f.wallet.cardRecords.get(snapshot.cardId)!);
+    db.prepare("UPDATE accounts SET sui_address=? WHERE sui_address=?").run(changed, original);
+    expect(operation()).toMatchObject({ phase: "sealed", fileId });
+    expect(db.prepare("SELECT count(*) AS count FROM accounts").get()).toEqual({ count: 1 });
+    expect(f.wallet.run(() => f.wallet.cardRecords.get(snapshot.cardId)!.state.revision)).toBe(priorCard.state.revision + 1);
+    const ref = creating._meta![CARD_METADATA_KEY] as { cardId: string; permission: string };
+    const stale = await mcp.call({ name: CARD_TOOLS.act, arguments: { ...ref, revision: priorCard.state.revision,
+      input: { action: "settings_confirm", operationId, preparationId: prior.preparationId } } });
+    expect(stale.isError).toBe(true); expect(applied).not.toHaveBeenCalled();
+    visibility("hidden"); visibility("visible");
+    await vi.waitFor(() => expect(control("Check backup again")?.disabled).toBe(false));
+    expect(control("Change backup file")?.disabled).toBe(false);
+    expect(root.textContent).not.toContain("Reading the selected file");
+    const uploadCalls = app.callServerTool.mock.calls.filter(([request]) => (request.arguments.input as { action?: string } | undefined)?.action === "settings_begin_upload").length;
+    expect(uploadCalls).toBe(1);
+    control("Check backup again")!.click();
+    await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    expect(operation().preparationId).not.toBe(prior.preparationId);
+    control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.textContent).toContain("Local records were replaced"));
+    expect(applied).toHaveBeenCalledOnce();
+    expect(await f.wallet.run(() => f.wallet.activity.getActiveAccount())).toMatchObject({ address: original });
+    visibility("hidden"); visibility("visible"); await vi.advanceTimersByTimeAsync(0);
+    expect(applied).toHaveBeenCalledOnce(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+    await app.onteardown!();
+  } finally { db.close(); await mcp.close(); f.close(); }
+});
+
+it("keeps an invalid endpoint editable after a real MCP rejection and stores only the new explicit confirmation", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  try {
+    const created = await mcp.create("settings", {}), app = host(mcp.call);
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Advanced settings")?.disabled).toBe(false)); control("Advanced settings")!.click();
+    root.querySelectorAll("input")[0]!.value = "not-a-url"; control("Select network address")!.click();
+    await vi.waitFor(() => expect(root.textContent).toContain("network address is not a valid URL"));
+    await vi.waitFor(() => expect(control("Select network address")?.disabled).toBe(false));
+    expect(await f.wallet.run(() => f.preferences.getSuiGrpcUrl())).toMatchObject({ value: "https://fullnode.mainnet.sui.io:443" });
+    root.querySelectorAll("input")[0]!.value = "https://mainnet.example:9443"; control("Select network address")!.click();
+    await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false)); control("Continue")!.click();
+    await vi.waitFor(() => expect(control("Save network address")?.disabled).toBe(false)); control("Save network address")!.click();
+    await vi.waitFor(() => expect(root.textContent).toContain("network address was saved"));
+    expect(await f.wallet.run(() => f.preferences.getSuiGrpcUrl())).toMatchObject({ value: "https://mainnet.example:9443" });
+    expect(f.wallet.sign).not.toHaveBeenCalled(); await app.onteardown!();
+  } finally { await mcp.close(); f.close(); }
+});
+
+it.each(["grpc", "graphql"] as const)("shows the exact %s restore target and captured environment effect in the Settings body", async (endpoint) => {
+  const override = endpoint === "grpc" ? "https://override.example:9443" : "https://override.example:9443/graphql";
+  const previous = endpoint === "grpc" ? "https://previous.example:8443" : "https://previous.example:8443/graphql";
+  const target = endpoint === "grpc" ? "https://fullnode.mainnet.sui.io:443" : "https://graphql.mainnet.sui.io/graphql";
+  const label = endpoint === "grpc" ? "Sui node (gRPC)" : "Activity data (GraphQL)";
+  const f = await settingsWorkflowFixture({ env: endpoint === "grpc" ? { SUI_GRPC_URL: override } : { SUI_GRAPHQL_URL: override } });
+  try {
+    await f.wallet.run(() => endpoint === "grpc" ? f.preferences.setSuiGrpcUrl(previous) : f.preferences.setSuiGraphqlUrl(previous));
+    const card = await f.prepare({ kind: "restore_endpoint", endpoint });
+    const rendered = settingsRenderer.controls(card.snapshot, vi.fn(), undefined, undefined, undefined);
+    expect(rendered.node.textContent).toContain(label); expect(rendered.node.textContent).toContain(previous);
+    expect(rendered.node.textContent).toContain(target); expect(rendered.node.textContent).toContain("Restarting without removing that launch setting will keep using that address");
+    rendered.dispose();
+    const completed = await f.confirm(card), saved = (completed.snapshot.data as SettingsView).result;
+    vi.spyOn(f.localSettings, "getLocalSettingsSync").mockImplementation(() => { throw new Error("Current provider unavailable"); });
+    const read = await f.read(card); expect((read.snapshot.data as SettingsView).result).toEqual(saved);
+    const result = settingsRenderer.result(read.snapshot, undefined, vi.fn(), undefined, undefined);
+    expect(factValues(result.node as unknown as Element, endpoint === "grpc" ? "Saved Sui node address (gRPC)" : "Saved activity data address (GraphQL)")).toEqual([target]);
+    expect(result.node.textContent).toContain(override);
+    expect(result.node.textContent).toMatch(/Remove that launch setting before restarting to use the saved address/); result.dispose();
+  } finally { f.close(); }
+});
+
+it("renders known failed SDK targets as disconnect-only and unrecorded presence as Settings guidance", async () => {
+  const f = await walletWorkflowFixture();
+  try {
+    const { connection } = await f.approve();
+    f.run(() => f.records.updateConnection(connection.connectionId, { status: "failed", reason: "Disconnection was not confirmed." }, f.now()));
+    const card = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+    const controls = connectRenderer.controls(card.snapshot, vi.fn(), undefined);
+    const guidanceContext = { confirmed: true, readOnly: false, recoveryNeeded: false, approvalUnresolved: false, automaticPaused: false };
+    expect(connectRenderer.guidance(card.snapshot, guidanceContext)).toBeUndefined();
+    const reviewSession = await f.run(() => f.sessions.createReviewSession([f.plan], f.now()));
+    const review = await f.run(() => f.cards.create("review", { reviewSessionId: reviewSession.session.id }));
+    expect(reviewRenderer.guidance(review.snapshot, guidanceContext)).toContain("open wallet connection controls");
+    expect(controls.node.textContent).toContain("Disconnection was not confirmed.");
+    expect((controls.node as unknown as Element).querySelectorAll("button").map((node) => node.textContent)).toContain("Disconnect");
+    expect((controls.node as unknown as Element).querySelectorAll("button").some((node) => ["Connect wallet", "Use address"].includes(node.textContent))).toBe(false);
+    controls.dispose();
+    const original = f.transport.session("fixture-topic")!;
+    const unknown = { ...original, topic: "unknown-sdk-target" };
+    vi.spyOn(f.transport, "inspectAll").mockReturnValue([original, unknown].map((session) => ({ topic: session.topic, status: "present", session })));
+    f.observe();
+    const unrecorded = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+    expect(connectRenderer.guidance(unrecorded.snapshot, { confirmed: true, readOnly: false, recoveryNeeded: false,
+      approvalUnresolved: false, automaticPaused: false })).toContain("open Settings");
+    const view = workflowViewSchema.parse(unrecorded.snapshot.data);
+    expect(view.connectionReconciliationRequired).toBe(true); expect(view.manageableConnectionIds).toEqual([connection.connectionId]);
+    expect(view.allowedActions).toEqual(["cancel", "disconnect"]);
+    const unknownReview = await f.read(review);
+    for (const guidance of [connectRenderer.guidance(unrecorded.snapshot, guidanceContext), reviewRenderer.guidance(unknownReview.snapshot, guidanceContext)]) {
+      expect(guidance).toContain("Remove the retained connection in your wallet app");
+      expect(guidance).toContain("Restarting does not approve an unrecorded connection");
+    }
+  } finally { f.close(); }
+});
+
+it("replaces an invalid backup through the actual file picker with an automatic check before applying", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  try {
+    const bytes = Buffer.from(JSON.stringify(await f.wallet.run(() => f.localData.exportLocalData())));
+    const created = await mcp.create("settings", {}), snapshot = (created.structuredContent as { data: CardSnapshot }).data;
+    const operationId = (snapshot.data as SettingsView).operationId, app = host(mcp.call);
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").some((node) => node.dataset.cardAction === "settings_begin_upload")).toBe(true));
+    selectSettingsBackup(Buffer.from("{"));
+    await vi.waitFor(() => expect(root.textContent).toContain("Cannot restore"));
+    const oldId = f.wallet.run(() => f.records.get(operationId)!.fileId);
+    await vi.waitFor(() => expect(root.textContent).toContain("incomplete or incorrectly formatted"));
+    await vi.waitFor(() => expect(control("Change backup file")?.disabled).toBe(false)); control("Change backup file")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").some((node) => node.dataset.cardAction === "settings_begin_upload")).toBe(true));
+    selectSettingsBackup(bytes);
+    await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    expect(f.wallet.run(() => f.records.get(operationId)!.fileId)).not.toBe(oldId);
+    expect(control("Preview replacement")).toBeUndefined();
+    control("Restore local records")!.click(); await vi.waitFor(() => expect(root.textContent).toContain("Local records were replaced"));
+    expect(f.wallet.run(() => f.records.control().data_epoch)).toBe(1); expect(f.wallet.sign).not.toHaveBeenCalled();
+    await app.onteardown!();
+  } finally { await mcp.close(); f.close(); }
+});
+
+
+it.each(["connected", "failed"] as const)("allows fresh explicit disconnect confirmation after transport refusal for SDK-present %s record", async (status) => {
+  const f = await walletWorkflowFixture();
+  const get = (label: string) => root.querySelectorAll("button").find(node => node.textContent === label);
+  try {
+    const { connection } = await f.approve();
+    if (status === "failed") {
+      const old = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+      vi.mocked(f.transport.disconnect).mockRejectedValueOnce(new Error("Logical disconnect failed; SDK session still present"));
+      await f.act(old, { action: "disconnect", connectionId: connection.connectionId });
+      await vi.waitFor(() => expect(f.run(() => f.records.connection(connection.connectionId))).toMatchObject({sdkPending:false,connection:{status:"failed"}}));
+    }
+    const baseline = vi.mocked(f.transport.disconnect).mock.calls.length;
+    const card = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+    const data = workflowViewSchema.parse(card.snapshot.data);
+    expect(data.manageableConnectionIds).toContain(connection.connectionId);
+    let calls = 0;
+    const app = host(async ({name,arguments:args}) => {
+      if (name === CARD_TOOLS.act && (args.input as any).action === "disconnect" && ++calls === 1) throw new Error("Transport failed before admission");
+      return cardToolResult(await f.run(() => name === CARD_TOOLS.read ? f.cards.read(cardReferenceSchema.parse(args)) : f.cards.act(args as any)));
+    });
+    startCard("connect", connectRenderer); app.ontoolresult!(cardCreation(card,card.permission));
+    await vi.waitFor(() => expect(get("Disconnect")?.disabled).toBe(false));
+    get("Disconnect")!.click(); get("Confirm disconnect")!.click();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await vi.advanceTimersByTimeAsync(0);
+    const check = get("Check status"); if (check && !check.disabled) check.click();
+    if (!get("Confirm disconnect")) { await vi.waitFor(() => expect(get("Disconnect")?.disabled).toBe(false)); get("Disconnect")!.click(); }
+    await vi.waitFor(() => expect(get("Confirm disconnect")?.disabled).toBe(false));
+    get("Confirm disconnect")!.click(); await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(2);
+    await vi.waitFor(() => expect(vi.mocked(f.transport.disconnect).mock.calls.length-baseline).toBe(1));
+    await app.onteardown!();
+  } finally { f.close(); }
+});
+
+
+it("recovers a committed Settings restart after a lost Host reply and frame return without another replacement", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  const replaced = vi.spyOn(f.wallet.runtime, "replace");
+  let lose = true;
+  try {
+    const created = await mcp.create("settings", {}), snapshot = (created.structuredContent as { data: CardSnapshot }).data;
+    const app = host(async (request) => {
+      const result = await mcp.call(request);
+      if (request.name === CARD_TOOLS.act && (request.arguments.input as { action: string }).action === "settings_confirm" && lose) {
+        lose = false; throw new Error("Host lost the committed Settings response");
+      }
+      return result;
+    });
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Troubleshooting")?.disabled).toBe(false)); control("Troubleshooting")!.click();
+    control("Restart connection service")!.click();
+    await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false)); control("Continue")!.click();
+    await vi.waitFor(() => expect(control("Restart connection service")?.disabled).toBe(false));
+    expect(root.textContent).toContain("Pending wallet approvals can no longer send a transaction");
+    control("Back to Connection service restart")!.click(); await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
+    control("Continue")!.click(); await vi.waitFor(() => expect(control("Restart connection service")?.disabled).toBe(false));
+    control("Restart connection service")!.click();
+    await vi.waitFor(() => expect(replaced).toHaveBeenCalledOnce());
+    await app.onteardown!();
+    const next = host(mcp.call); startCard("settings", settingsRenderer); next.ontoolresult!(created);
+    await vi.waitFor(() => expect(root.textContent).toContain("The connection service restarted"));
+    expect(control("Restart connection service")).toBeUndefined(); expect(replaced).toHaveBeenCalledOnce();
+    const record = f.wallet.run(() => f.wallet.cardRecords.get(snapshot.cardId))!;
+    expect(record.acceptedInput).toMatchObject({ action: "settings_confirm" });
+    expect((await f.wallet.run(() => f.cards.read({ cardId: snapshot.cardId, permission: (created._meta![CARD_METADATA_KEY] as { permission: string }).permission }))).snapshot.state).toBe("closed");
+    await next.onteardown!(); expect(replaced).toHaveBeenCalledOnce();
+  } finally { await mcp.close(); f.close(); }
+});
+
+it("resumes the same actual upload after teardown while the matching physical write finishes", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const entered = deferred<void>(), release = deferred<void>(), write = f.files.writeReservedChunk.bind(f.files);
+  const physical = vi.spyOn(f.files, "writeReservedChunk").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; await write(...args); });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  try {
+    const bytes = Buffer.from(JSON.stringify(await f.wallet.run(() => f.localData.exportLocalData())));
+    const created = await mcp.create("settings", {}), snapshot = (created.structuredContent as { data: CardSnapshot }).data;
+    const operationId = (snapshot.data as SettingsView).operationId, deadline = snapshot.expiresAt;
+    const app = host(mcp.call); startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Restore local records")!.click();
+    await vi.waitFor(() => expect(root.querySelectorAll("input").some((node) => node.dataset.cardAction === "settings_begin_upload")).toBe(true));
+    selectSettingsBackup(bytes); await entered.promise;
+    const fileId = f.wallet.run(() => f.records.get(operationId)!.fileId)!;
+    await app.onteardown!(); release.resolve();
+    await vi.waitFor(() => expect(f.wallet.run(() => f.records.file(fileId)?.receivedSize)).toBe(bytes.length));
+    const next = host(mcp.call); startCard("settings", settingsRenderer); next.ontoolresult!(created);
+    await vi.waitFor(() => expect(root.querySelectorAll("input").some((node) => node.dataset.cardAction === "settings_begin_upload")).toBe(true));
+    selectSettingsBackup(bytes);
+    await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
+    expect(f.wallet.run(() => f.records.get(operationId))).toMatchObject({ phase: "prepared", fileId });
+    expect(physical).toHaveBeenCalledOnce();
+    expect(f.wallet.run(() => f.wallet.cardRecords.get(snapshot.cardId)?.state.expiresAt)).toBe(deadline);
+    expect(control("Preview replacement")).toBeUndefined();
+    expect(root.textContent).toContain("cannot undo this from this card"); expect(root.textContent).toContain("Other open cards will no longer work");
+    await next.onteardown!();
+  } finally { release.resolve(); await mcp.close(); f.close(); }
 });

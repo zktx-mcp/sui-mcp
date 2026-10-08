@@ -234,13 +234,14 @@ describe("wallet cards, ordinary MCP and stored review activity", () => {
     const local = f.activity.createLocalDataService(options);
     const beforeExport = data(await call(TOOL_NAMES.readSummarizeReviewFunnel, { account: f.account }));
     const backup = await f.run(() => local.exportLocalData(f.now()));
+    const connectionJournal = f.run(() => f.records.connections());
     expect(backup.data.reviewRequests).toHaveLength(5); expect(backup.data.reviewExecutions).toHaveLength(2);
     const serialized = JSON.stringify(backup);
     for (const secret of ["symKey", "sdk_pending", "can_submit", "token_hash", "transactionBytes", '"signature":']) expect(serialized).not.toContain(secret);
     await f.run(() => local.importLocalDataReplace(backup));
     const restored = data(await call(TOOL_NAMES.readSummarizeReviewFunnel, { account: f.account }));
     expect(restored.summary).toEqual(beforeExport.summary);
-    expect(f.run(() => f.records.connections())).toEqual([]);
+    expect(f.run(() => f.records.connections())).toEqual(connectionJournal);
     const request = f.run(() => f.records.currentRequest(ids[4]!))!;
     expect(f.run(() => f.records.authority(request.attemptId))).toBeUndefined();
     const management = await call(TOOL_NAMES.sessionOpenReviewManagement, { reviewSessionId: ids[4]!, attemptId: request.attemptId });
@@ -882,7 +883,8 @@ it.each(["sdk_pending", "submit_pending", "lookup_pending", "request_deadline", 
       if (failure === "connection_expiry") {
         const pending = { ...connection, connectionId: "other-pairing", status: "awaiting_approval", accounts: [], methods: [], revision: 0,
           expiresAt: new Date(f.now().getTime() - 1).toISOString() };
-        db.prepare("INSERT INTO live_wallet_connections VALUES (?,?,?,?,?,?,?)").run(pending.connectionId, "fixture-owner", pending.status, 0, null, 1, JSON.stringify(pending));
+        db.prepare("INSERT INTO live_wallet_connections (id,owner_id,status,revision,topic,sdk_pending,run_id,connection_json) VALUES (?,?,?,?,?,?,?,?)")
+          .run(pending.connectionId, "fixture-owner", pending.status, 0, null, 1, f.runtime.runId, JSON.stringify(pending));
         db.exec("CREATE TRIGGER refuse_other BEFORE UPDATE ON live_wallet_connections WHEN OLD.id='other-pairing' BEGIN SELECT RAISE(ABORT,'unrelated write refused'); END");
       } else {
         const other = await f.prepare(connection.connectionId);
@@ -909,14 +911,14 @@ it.each(["sdk_pending", "submit_pending", "lookup_pending", "request_deadline", 
         expect(JSON.parse(String("text" in saved.contents[0]! ? saved.contents[0].text : "")).data.request).toEqual(original);
       }
       expect((await f.read(target.card)).snapshot.data).toMatchObject({ request: original });
-      expect(() => f.run(() => f.workflow.readConnectionContext())).toThrow("unrelated write refused");
+      expect(() => f.run(() => f.workflow.reconcileConnectionContext())).toThrow("unrelated write refused");
       if (otherId && failure !== "request_deadline" && failure !== "connection_expiry") {
         expect(f.run(() => f.records.authority(otherId!))?.[failure]).toBe(1);
         await expect(f.run(() => f.localData.resetLocalData())).rejects.toThrow();
       }
       expect(f.submit).toHaveBeenCalledTimes(dispatches);
       db.exec("DROP TRIGGER refuse_other");
-      f.run(() => f.workflow.readConnectionContext());
+      f.run(() => f.workflow.reconcileConnectionContext());
       expect(f.run(() => f.records.request(original.attemptId))).toEqual(original);
       if (otherId && failure !== "request_deadline" && failure !== "connection_expiry") expect(f.run(() => f.records.authority(otherId!))?.[failure]).toBe(0);
       if (failure === "connection_expiry") expect(f.run(() => f.records.connection("other-pairing")?.connection.status)).toBe("expired");

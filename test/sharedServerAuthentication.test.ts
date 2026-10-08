@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { randomBytes, randomUUID, createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -5,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import { startSharedServer } from "../src/runtime/shared/server.js";
 import { createAuthenticatedFetch, probeAuthenticatedServer } from "../src/runtime/shared/authenticatedFetch.js";
 import { IDENTITY_CHALLENGE_HEADER, IDENTITY_PATH, INTERNAL_MCP_PATH, SERVER_INSTANCE_HEADER, type ControlIdentity } from "../src/runtime/shared/control.js";
+
+const packageVersion = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 const control: ControlIdentity = { key: randomBytes(32).toString("base64url"), databaseId: "1".repeat(64), configurationId: "2".repeat(64) };
 
@@ -27,7 +30,7 @@ describe("authenticated loopback dispatch", () => {
     try {
       const fetch = createAuthenticatedFetch(server.port, control);
       const identity = await probeAuthenticatedServer(server.port, control);
-      expect(identity).toMatchObject({ service: "sui-mcp", role: "shared-server", apiVersion: 7, instanceId: server.instanceId });
+      expect(identity).toMatchObject({ service: "sui-mcp", role: "shared-server", packageVersion, instanceId: server.instanceId });
       await expect(createAuthenticatedFetch(server.port, control, randomUUID())(
         `http://127.0.0.1:${server.port}${INTERNAL_MCP_PATH}`, { method: "POST", body: "{}" }
       )).rejects.toThrow("Shared server changed before dispatch");
@@ -54,7 +57,7 @@ describe("authenticated loopback dispatch", () => {
     expect(applicationClosed).toBe(true);
   });
 
-  it.each(["valid", "proof", "databaseId", "configurationId", "role", "service", "apiVersion", "challenge"] as const)("checks the %s identity case before credential delivery", async (field) => {
+  it.each(["valid", "proof", "databaseId", "configurationId", "role", "service", "packageVersion", "challenge"] as const)("checks the %s identity case before credential delivery", async (field) => {
     const seen: Array<{ path: string; method: string | undefined; authorization: string | undefined; instance: string | string[] | undefined }> = [];
     const instanceId = randomUUID();
     const server = createServer((request, response) => {
@@ -66,17 +69,17 @@ describe("authenticated loopback dispatch", () => {
         response.end(JSON.stringify({ observed: "operation_dispatched" }));
         return;
       }
-      const identity = { service: "sui-mcp", role: "shared-server", apiVersion: 7,
+      const identity = { service: "sui-mcp", role: "shared-server", packageVersion,
         databaseId: control.databaseId, configurationId: control.configurationId, instanceId, pid: process.pid,
         challenge: String(request.headers[IDENTITY_CHALLENGE_HEADER]) };
       if (field === "databaseId" || field === "configurationId") identity[field] = "3".repeat(64);
       else if (field === "role") identity.role = "foreign";
       else if (field === "service") identity.service = "say-ur-intent";
-      else if (field === "apiVersion") identity.apiVersion = 6;
+      else if (field === "packageVersion") identity.packageVersion = "0.0.0-incompatible";
       else if (field === "challenge") identity.challenge = flipFirstByte(identity.challenge);
       // Sign the final wire payload so identity mismatch cases have valid HMACs.
       // The valid case exercises this same fixture through the actual client.
-      const proof = createHmac("sha256", control.key).update(JSON.stringify([identity.service, identity.role, identity.apiVersion,
+      const proof = createHmac("sha256", control.key).update(JSON.stringify([identity.service, identity.role, identity.packageVersion,
         identity.databaseId, identity.configurationId, identity.instanceId, identity.pid, identity.challenge])).digest("base64url");
       response.end(JSON.stringify({ ...identity, proof: field === "proof" ? flipFirstByte(proof) : proof }));
     });

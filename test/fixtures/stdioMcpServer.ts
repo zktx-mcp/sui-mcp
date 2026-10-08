@@ -78,7 +78,6 @@ const server = createMcpServer({
   }),
   activityStore,
   localSettings: new InMemoryLocalSettingsService(),
-  reviewBaseUrl: "http://127.0.0.1:4173",
   logger,
   readService: new SuiReadService({
     network: "mainnet",

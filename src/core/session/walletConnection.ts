@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { suiAddressStringSchema } from "../suiAddress.js";
 import type { WalletSessionInspection } from "./walletRuntime.js";
+import { transactionRequestStatusSchema } from "./transactionRequest.js";
 
 export const SUI_MAINNET_WALLET_CHAIN = "sui:mainnet" as const;
 export const SUI_SIGN_TRANSACTION_METHOD = "sui_signTransaction" as const;
@@ -45,6 +46,19 @@ export function workflowProgress(waiting: boolean, requiresWallet: boolean, avai
 export const walletConnectionStatusSchema = z.enum([
   "awaiting_approval", "connected", "rejected", "failed", "expired", "stopped", "disconnected"
 ]);
+// Recorded recovery facts, not proof of a currently usable wallet connection.
+export const walletRecoveryImpactSchema = z.object({
+  runId: z.string().uuid(),
+  connections: z.array(z.object({ connectionId: z.string().min(1), revision: z.number().int().nonnegative(),
+    status: walletConnectionStatusSchema, accounts: z.array(suiAddressStringSchema), walletName: z.string().optional(),
+    sdkPending: z.boolean(), disconnectPending: z.boolean() }).strict()),
+  preparations: z.array(z.object({ id: z.string().min(1), revision: z.number().int().nonnegative(),
+    review_revision: z.number().int().nonnegative(), preparation_id: z.string().nullable(), wallet_connection_id: z.string().nullable() }).strict()),
+  requests: z.array(z.object({ attempt_id: z.string().min(1), revision: z.number().int().nonnegative(),
+    request_status: transactionRequestStatusSchema, can_submit: z.number().int().min(0).max(1),
+    sdk_pending: z.number().int().min(0).max(1), submit_pending: z.number().int().min(0).max(1), lookup_pending: z.number().int().min(0).max(1) }).strict())
+}).strict();
+export type WalletRecoveryImpact = z.infer<typeof walletRecoveryImpactSchema>;
 export const walletConnectionSchema = z.object({
   connectionId: z.string().min(1),
   status: walletConnectionStatusSchema,
@@ -66,6 +80,7 @@ export const connectionConflictSchema = z.object({
 }).strict();
 export type ConnectionConflict = z.infer<typeof connectionConflictSchema>;
 export const CONNECTION_CONFLICT_MESSAGE = "More than one wallet connection is saved. Disconnect the connections you no longer need before continuing.";
+export const CONNECTION_RECONCILIATION_MESSAGE = "A wallet connection in the connection service is not recorded here. Remove the retained connection in your wallet app, then check its status. If needed, open Settings and use Troubleshooting to restart the connection service and inspect it again. Restarting does not approve an unrecorded connection.";
 export type StoredReadAccount = { address: string; walletId?: string | undefined };
 export const assetReadAccountSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("available"), account: suiAddressStringSchema }).strict(),
@@ -73,19 +88,31 @@ export const assetReadAccountSchema = z.discriminatedUnion("status", [
 ]);
 export type AssetReadAccount = z.infer<typeof assetReadAccountSchema>;
 
-// Management may name every recorded target. Account use requires exactly one
-// live connection and no connection operation still awaiting its outcome.
-export function walletConnectionSelection(connections: readonly ConnectionView[], at: number, stored?: StoredReadAccount): {
+// Private facts from the current SDK run, joined to the journal by topic.
+// Unknown inspection is not evidence of an empty connection service.
+export type WalletConnectionPresence = {
+  confirmed: boolean; connections: { connectionId: string; expiresAt: string }[]; unrecorded: boolean; pendingConnectionIds: string[];
+};
+export function walletConnectionSelection(connections: readonly ConnectionView[], at: number,
+  presence: WalletConnectionPresence, stored?: StoredReadAccount): {
   connection?: ConnectionView; conflict?: ConnectionConflict; pairingAllowed: boolean; assetReadAccount: AssetReadAccount;
+  manageableConnectionIds: string[]; connectionReconciliationRequired?: true;
 } {
   const connected = connections.filter((item) => item.status === "connected" && Date.parse(item.expiresAt) > at);
-  const pending = connections.some((item) => item.pendingAction || item.status === "awaiting_approval");
-  const connection = connected.length === 1 && !pending ? connected[0] : undefined;
+  const pending = presence.pendingConnectionIds.length > 0 || connections.some((item) => item.pendingAction || item.status === "awaiting_approval");
+  const presentIds = presence.connections.map((item) => item.connectionId);
+  const occupied = new Set([...connected.map((item) => item.connectionId), ...presentIds]);
+  const reconciliation = presence.confirmed && presence.unrecorded && !pending;
+  const connection = presence.confirmed && !presence.unrecorded && occupied.size === 1 && connected.length === 1 &&
+    presence.connections.some((item) => item.connectionId === connected[0]!.connectionId && Date.parse(item.expiresAt) > at) && !pending ? connected[0] : undefined;
   return {
-    ...(connected.length > 1 ? { conflict: { reason: "multiple_connections" as const,
-      connectionIds: connected.map((item) => item.connectionId).sort() } } : {}),
+    ...(occupied.size > 1 ? { conflict: { reason: "multiple_connections" as const,
+      connectionIds: [...occupied].sort() } } : {}),
+    ...(reconciliation ? { connectionReconciliationRequired: true as const } : {}),
+    manageableConnectionIds: connections.filter((item) => !presence.pendingConnectionIds.includes(item.connectionId) && !item.pendingAction && item.status !== "awaiting_approval" &&
+      (item.status === "connected" || presence.confirmed && presentIds.includes(item.connectionId))).map((item) => item.connectionId),
     ...(connection ? { connection } : {}),
-    pairingAllowed: connected.length === 0 && !pending,
+    pairingAllowed: presence.confirmed && !presence.unrecorded && occupied.size === 0 && !pending,
     assetReadAccount: connection && stored?.walletId === connection.connectionId && connection.accounts.includes(stored.address)
       ? { status: "available", account: stored.address } : { status: "address_required" }
   };
@@ -101,6 +128,7 @@ export type WalletConnectionRecord = {
   ownerId: string;
   topic?: string;
   sdkPending: boolean;
+  runId?: string;
 };
 
 // Shared recorded connection facts only. Each operation checks its own expiry,

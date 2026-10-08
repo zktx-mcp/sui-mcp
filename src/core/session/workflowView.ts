@@ -42,6 +42,8 @@ export const workflowViewSchema = z.object({
   walletObservation: walletObservationSchema.optional(),
   runtimeRecovery: walletRecoverySchema.optional(),
   connectionConflict: connectionConflictSchema.optional(),
+  manageableConnectionIds: z.array(z.string().min(1)),
+  connectionReconciliationRequired: z.literal(true).optional(),
   usableConnectionId: z.string().min(1).optional(),
   assetReadAccount: assetReadAccountSchema.optional(),
   acceptedWalletRunId: walletRunIdSchema.optional(),
@@ -65,9 +67,18 @@ export const workflowViewSchema = z.object({
 }).strict().superRefine((view, context) => {
   const connection = view.connections.find((item) => item.connectionId === view.usableConnectionId);
   if (view.usableConnectionId && (!connection || connection.status !== "connected" ||
-      view.walletAvailability.status !== "available" || view.connectionConflict ||
+      view.walletAvailability.status !== "available" || view.connectionConflict || view.connectionReconciliationRequired ||
       view.connections.some((item) => item.pendingAction || item.status === "awaiting_approval"))) {
     context.addIssue({ code: "custom", path: ["usableConnectionId"], message: "The usable connection must match current connection facts." });
+  }
+  if (new Set(view.manageableConnectionIds).size !== view.manageableConnectionIds.length ||
+      view.manageableConnectionIds.some((id) => !view.connections.some((item) => item.connectionId === id &&
+        !item.pendingAction && item.status !== "awaiting_approval"))) {
+    context.addIssue({ code: "custom", path: ["manageableConnectionIds"], message: "Management must name distinct recorded targets without pending operations." });
+  }
+  if (view.connectionReconciliationRequired && (view.usableConnectionId || view.assetReadAccount?.status === "available" ||
+      view.allowedActions.some((action) => ["connect", "use_account", "prepare_review", "request_signature"].includes(action)))) {
+    context.addIssue({ code: "custom", path: ["connectionReconciliationRequired"], message: "Unrecorded SDK connections cannot authorize connection or account use." });
   }
   if (view.assetReadAccount?.status === "available" && (!connection ||
       !connection.accounts.includes(view.assetReadAccount.account) || view.activeAccount !== view.assetReadAccount.account)) {
@@ -111,7 +122,10 @@ function nextStateRead(input: EvaluatedWorkflowState): number | undefined {
 // These projections do not read clocks, storage, or admission rules. The
 // evaluated facts and choices were collected together by the database owner.
 export function projectConnectionView(input: EvaluatedWorkflowState): WorkflowView {
-  const { connection, walletAvailability } = input;
+  const { walletAvailability } = input;
+  const stored = input.record?.state.data as { disconnectOutcome?: unknown } | undefined;
+  const connection = input.record?.acceptedInput?.action === "disconnect" && stored?.disconnectOutcome
+    ? connectionViewSchema.parse(stored.disconnectOutcome) : input.connection;
   const readAfter = nextStateRead(input);
   const progress = input.runtimeRecovery ? { status: "phase" in input.runtimeRecovery ? "waiting" as const : "idle" as const } :
     workflowProgress(connection?.status === "awaiting_approval" || connection?.pendingAction === "disconnect", true, walletAvailability);
@@ -121,6 +135,7 @@ export function projectConnectionView(input: EvaluatedWorkflowState): WorkflowVi
       ? { automaticAction: { action: "connect", walletRunId: walletAvailability.walletRunId } } : {}),
     runtimeRecovery: input.runtimeRecovery, walletObservation: input.walletObservation,
     connectionConflict: input.connectionConflict, usableConnectionId: input.usableConnectionId, assetReadAccount: input.assetReadAccount,
+    manageableConnectionIds: input.manageableConnectionIds, connectionReconciliationRequired: input.connectionReconciliationRequired,
     connectionAction: ["connect", "disconnect"].includes(String(input.record?.acceptedInput?.action)) ? input.record?.acceptedInput?.action : undefined,
     acceptedWalletRunId: input.record?.acceptedInput?.walletRunId,
     ...(readAfter === undefined ? {} : { nextStateReadAfterMs: readAfter }),
@@ -140,6 +155,7 @@ export function projectReviewView(input: EvaluatedWorkflowState): WorkflowView {
   return workflowViewSchema.parse({ kind: "review", mode: record.scope === "review_manage" ? "review_manage" : "review",
     allowedActions: input.allowedActions, actionRemainingMs: input.actionRemainingMs, observe: progress.status === "waiting", progress, walletAvailability,
     connections: input.connections, connectionConflict: input.connectionConflict, usableConnectionId: input.usableConnectionId,
+    manageableConnectionIds: input.manageableConnectionIds, connectionReconciliationRequired: input.connectionReconciliationRequired,
     assetReadAccount: input.assetReadAccount, activeAccount: input.activeAccount, boundary: REVIEW_BOUNDARY, receipt: input.receipt,
     walletObservation: input.walletObservation,
     acceptedWalletRunId: record.acceptedInput?.walletRunId,

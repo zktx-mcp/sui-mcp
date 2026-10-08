@@ -6,7 +6,7 @@ export const walletDisplaySchema = z.object({
 export type WalletDisplay = z.infer<typeof walletDisplaySchema>;
 
 
-export const cardKindSchema = z.enum(["account", "receipt", "chart", "connect", "review"]);
+export const cardKindSchema = z.enum(["account", "receipt", "chart", "connect", "review", "settings"]);
 export type CardKind = z.infer<typeof cardKindSchema>;
 export const cardStateSchema = z.object({
   cardId: z.string().min(1), kind: cardKindSchema,
@@ -42,7 +42,7 @@ export type CardRecord = {
   state: CardState;
   tokenHash: string;
   ownerId: string;
-  scope?: "read" | "connect" | "review" | "review_manage";
+  scope?: "read" | "connect" | "review" | "review_manage" | "settings";
   operationId?: string;
   acceptedInput?: Record<string, unknown>;
   receiptDisplay?: ReceiptDisplay;

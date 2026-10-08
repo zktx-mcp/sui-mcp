@@ -53,12 +53,13 @@ export async function walletWorkflowFixture(options: { receiptDetails?: boolean;
   const activity = new SqliteActivityStore({ databasePath: join(directory, "activity.sqlite"), guardDatabase: access.guardDatabase,
     validateAdapterLifecycle: validateSupportedAdapterLifecycle });
   await activity.createPreferencesRepository().ensureDefaultLocalSettings({ suiGrpcUrl: DEFAULT_SUI_GRPC_URL, suiGraphqlUrl: DEFAULT_SUI_GRAPHQL_URL });
-  const cardRecords = activity.createCardRecordStore(), records = activity.createWalletWorkflowStore(ownerId, now);
+  let runtime: WalletRuntime | undefined;
+  const cardRecords = activity.createCardRecordStore(), records = activity.createWalletWorkflowStore(ownerId, now, () => runtime?.snapshot());
   const materialStore = activity.createTransactionMaterialStore();
   const logger = { info() {}, warn() {}, error: vi.fn() };
   const sessions = new LocalSessionStore({ now, ...(options.eventLog ? { eventLog: options.eventLog } : {}), ownerId, activityStore: activity, transactionMaterialStore: materialStore,
     sessions: activity.createSessionRecordStore(), artifacts: activity.createPrivateReviewArtifactStore(),
-    settingsStore: activity.createSettingsRecordStore(), logger, validateAdapterLifecycle: validateSupportedAdapterLifecycle });
+    logger, validateAdapterLifecycle: validateSupportedAdapterLifecycle });
   // Preserve errors from real preparation/storage for actionable fixture failures.
   const preparationErrors: unknown[] = [];
   for (const method of ["recordWalletConnected", "recordReviewStateWithArtifacts"] as const) {
@@ -131,7 +132,7 @@ export async function walletWorkflowFixture(options: { receiptDetails?: boolean;
     getTransaction: chainRead, waitForTransaction: chainRead } };
   const verifyReceipt = (input: Parameters<typeof verifySuiChainReceipt>[1]) => verifySuiChainReceipt({ client: chain, network: "mainnet", expectedChainIdentifier: chainIdentifier }, input);
   const verifyNetwork = vi.fn(async () => {});
-  const runtime = options.createRuntime ? await options.createRuntime(directory, { account }) : new FixtureWalletRuntime(transport);
+  runtime = options.createRuntime ? await options.createRuntime(directory, { account }) : new FixtureWalletRuntime(transport);
   const workflow = new WalletWorkflow({ records, sessions, ownerId, runtime, computation,
     verifyReceipt,
     ...(options.receiptDetails ? { readReceipt: (input: { digest: string; now: Date }) => readPublicChainReceipt({
@@ -146,7 +147,7 @@ export async function walletWorkflowFixture(options: { receiptDetails?: boolean;
   await workflow.start();
   // Real child/SDK integration uses the same observation budget as the SDK tests.
   await vi.waitFor(() => expectAvailable(), options.createRuntime ? { timeout: 10000 } : undefined);
-  function expectAvailable() { if (runtime.availability().status !== "available") throw new Error("Fixture wallet service did not become available"); }
+  function expectAvailable() { if (runtime!.availability().status !== "available") throw new Error("Fixture wallet service did not become available"); }
   const cards = createReadCardStore({ records: cardRecords, ownerId, assertCurrent: access.assertCurrent, workflow, now,
     readService: { summarizeAccountInventory: options.accountReader ?? (async () => { throw new Error("Unexpected account source"); }) },
     publicChainReceiptReader: async () => { throw new Error("Unexpected receipt source"); }, chart: createDeepbookUsdcChartService() });

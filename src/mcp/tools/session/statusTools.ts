@@ -21,6 +21,7 @@ export function registerSessionStatusTools(server: McpServer, deps: McpServerDep
     outputSchema: successOutputSchema({ walletAvailability: walletAvailabilitySchema, walletObservation: walletObservationSchema.optional(), activeAccount: activeAccountResponseSchema,
       connections: z.array(connectionViewSchema), assetReadAccount: assetReadAccountSchema,
       connectionConflict: connectionConflictSchema.optional(),
+      manageableConnectionIds: z.array(z.string().min(1)), connectionReconciliationRequired: z.literal(true).optional(),
       pendingWalletConnections: z.object({ limit: z.number().int().positive(), truncated: z.boolean(),
         items: z.array(z.object({ cardId: z.string(), connectionId: z.string().optional(),
           status: pendingConnectionStatusSchema, progress: workflowProgressSchema, lastActivityAt: z.string() })) }),
@@ -34,14 +35,15 @@ export function registerSessionStatusTools(server: McpServer, deps: McpServerDep
     try {
       // Connection reconciliation can invalidate reviews and interrupt requests.
       // Complete that maintenance before projecting its dependent review facts.
-      const context = deps.workflow?.readConnectionContext() ?? { connections: [],
+      const context = deps.workflow?.reconcileConnectionContext() ?? { connections: [], manageableConnectionIds: [],
         assetReadAccount: { status: "address_required" as const }, walletAvailability: walletUnavailable("initialization_failed") };
       const connections = deps.workflow?.pendingConnections() ?? [];
       const states = await Promise.all(deps.sessions.reviewSessionIds().map((id) => readCurrentReview(deps, id)));
       const reviews = states.flatMap((state) => state && isReviewInteractionPending(state) ? [reviewStatusResponse(state)] : []);
       return okToolResult({ activeAccount: activeAccountResponse(active), pendingWalletConnections: latest(connections),
         pendingReviewSessions: latest(reviews), ...context,
-        userAnswerUse: interactionStatusUserAnswerUse("walletObservation" in context && context.walletObservation !== undefined, "connectionConflict" in context && !!context.connectionConflict) });
+        userAnswerUse: interactionStatusUserAnswerUse("walletObservation" in context && context.walletObservation !== undefined,
+          "connectionConflict" in context && !!context.connectionConflict, "connectionReconciliationRequired" in context && !!context.connectionReconciliationRequired) });
     } catch (error) { return sessionStoreToolError(error, deps.logger); }
   });
   server.registerTool(TOOL_NAMES.sessionGetReviewStatus, {
@@ -56,7 +58,7 @@ export function registerSessionStatusTools(server: McpServer, deps: McpServerDep
       const session = state.session;
       return okToolResult({ ...reviewStatusResponse(state),
         userAnswerUse: reviewStatusUserAnswerUse(!!session.reviewState, !!session.reviewState?.adapterLifecycle,
-          !!session.reviewState?.humanReadableReview, !!session.reviewState?.simulation, !!state.connectionConflict) });
+          !!session.reviewState?.humanReadableReview, !!session.reviewState?.simulation, !!state.connectionConflict, !!state.connectionReconciliationRequired) });
     } catch (error) { return sessionStoreToolError(error, deps.logger); }
   });
 }

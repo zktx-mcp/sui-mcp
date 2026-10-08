@@ -1,9 +1,8 @@
-/* Shared design tokens and atomic components for every Sui MCP page.
+/* Shared design tokens and atomic components for all Sui MCP cards.
    This file is the only place that declares `.ui-*` rules and the only place that
-   styles the bare interactive elements button/input/select/textarea. Pages keep
+   styles the bare interactive elements button/input/select/textarea. Views keep
    only their own layout, containers, third-party sizing, and compositions.
-   No inline styles are used anywhere, so the strictest page CSP (style-src 'self'
-   on the chart page) is satisfied. Colors come from the tokens below; the active
+   Styles are bundled into each card HTML with its declared Host CSP. Colors come from the tokens below; the active
    theme is the `data-theme` attribute on <html>. */
 
 :root[data-theme="light"] {
@@ -75,57 +74,6 @@ body {
   font-family: var(--ui-font-mono);
   font-size: 12.5px;
   overflow-wrap: anywhere;
-}
-
-/* Shell: the outer page structure every page renders into. */
-.ui-shell {
-  position: relative;
-  min-height: 100vh;
-}
-
-.ui-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 20px;
-  background: var(--ui-surface);
-  border-bottom: 0.5px solid var(--ui-border);
-}
-
-.ui-brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 15px;
-  font-weight: 500;
-  color: var(--ui-text);
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.ui-brand img {
-  display: block;
-  width: 24px;
-  height: 24px;
-}
-
-/* The brand mark is two theme-specific files; CSS shows the one for the active
-   theme so the swap needs no script. */
-:root[data-theme="light"] .ui-brand-dark {
-  display: none;
-}
-:root[data-theme="dark"] .ui-brand-light {
-  display: none;
-}
-
-.ui-header-spacer {
-  margin-left: auto;
-}
-
-.ui-main {
-  max-width: 920px;
-  margin: 0 auto;
-  padding: 22px 20px 48px;
 }
 
 /* Buttons. Every state has hover, active, and focus feedback; the only inert
@@ -531,59 +479,6 @@ input.ui-input {
   text-align: center;
 }
 
-/* Full-page loading overlay: set aria-busy="true" on the shell to lock the page
-   and show the overlay; clear it when the async action finishes. */
-.ui-overlay {
-  position: fixed;
-  inset: 0;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  background: color-mix(in srgb, var(--ui-bg) 70%, transparent);
-  z-index: 50;
-}
-
-.ui-shell[aria-busy="true"] .ui-overlay {
-  display: flex;
-}
-
-.ui-shell[aria-busy="true"] .ui-header,
-.ui-shell[aria-busy="true"] .ui-main {
-  filter: opacity(0.55);
-  pointer-events: none;
-}
-
-.ui-overlay-box {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 11px;
-  background: var(--ui-surface);
-  border: 0.5px solid var(--ui-border-strong);
-  border-radius: 14px;
-  padding: 20px 26px;
-}
-
-.ui-spinner {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  border: 3px solid var(--ui-border-strong);
-  border-top-color: var(--ui-accent);
-  animation: ui-spin 0.8s linear infinite;
-}
-
-.ui-overlay-label {
-  font-size: 14px;
-  font-weight: 500;
-}
-
-@keyframes ui-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 /* Quiet boundary/scope note (T4): present but low-emphasis. */
 .ui-note {
   font-size: 12.5px;
@@ -807,3 +702,81 @@ input.ui-input {
 .ui-form label > input, .ui-form label > select { width: 100%; }
 .ui-form > details, .ui-form > p, .ui-form > .card-actions { flex-basis: 100%; }
 @container mcp-card (max-width: 28rem) { .ui-form > button { width: 100%; } }
+
+/* Settings navigation stays separate from operation controls, within one card. */
+.settings-card { overflow-x: clip; }
+/* Use the existing disclosure's .18s motion for a one-step depth cue. */
+.settings-card .settings-page--forward { animation: settings-forward .18s ease-out; }
+.settings-card .settings-page--back { animation: settings-back .18s ease-out; }
+@keyframes settings-forward { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes settings-back { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: translateX(0); } }
+@media (prefers-reduced-motion: reduce) {
+  .settings-card .settings-page--forward, .settings-card .settings-page--back { animation: none; }
+}
+.settings-card .settings-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-block: 0 14px;
+  margin-block-end: 20px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.settings-card .settings-location { color: var(--ui-text-muted); font-size: 13px; }
+.settings-card .settings-back { border-color: transparent; background: transparent; padding-inline: 0 10px; }
+.settings-card .settings-back::before { content: "←"; margin-inline-end: 8px; }
+.settings-card .settings-menu { display: grid; margin-block: 16px; }
+.settings-card .settings-menu-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-content: stretch;
+  justify-items: start;
+  position: relative;
+  gap: 5px;
+  width: 100%;
+  text-align: start;
+  white-space: normal;
+  padding: 18px 32px 18px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--ui-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ui-text);
+}
+.settings-card .settings-menu-item:hover { background: var(--ui-surface-2); }
+.settings-card .settings-menu-item::after {
+  content: "";
+  position: absolute;
+  inset-inline-end: 14px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-top: 1.5px solid var(--ui-text-muted);
+  border-right: 1.5px solid var(--ui-text-muted);
+  transform: translateY(-50%) rotate(45deg);
+}
+.settings-card .settings-menu-title { font-weight: 600; }
+.settings-card .settings-menu-description { color: var(--ui-text-muted); font-size: 13px; font-weight: 400; }
+.settings-card .settings-pending { margin-block: 20px; }
+.settings-card .settings-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: var(--ui-space-2, 8px);
+  margin-block-start: 12px;
+}
+.settings-card .settings-action-row > .ui-btn {
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.settings-card .settings-path { white-space: normal; overflow-wrap: anywhere; }
+.settings-card .settings-backup-location .ui-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.settings-card .settings-backup-location .ui-row-value { text-align: start; }
+.settings-card .settings-choice { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding-block: 18px; border-bottom: 1px solid var(--ui-border); }
+.settings-card .settings-choice-copy { flex: 1 1 16rem; min-width: 0; }
+.settings-card .settings-choice h3 { margin-block: 0 6px; }
+.settings-card .settings-choice p { margin: 0; }
+.settings-card .settings-endpoint { padding-block: 16px; border-bottom: 1px solid var(--ui-border); }
+.settings-card .settings-endpoint label { display: flex; flex-direction: column; gap: 8px; }

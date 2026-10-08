@@ -11,6 +11,7 @@ export type ReviewSnapshot = {
   progress: WorkflowProgress;
   hasReviewInput: boolean;
   connectionConflict?: ConnectionConflict | undefined;
+  connectionReconciliationRequired?: true | undefined;
 };
 export function reviewProgress(preparing: boolean, request: TransactionRequest | undefined,
   availability: WalletAvailability, observation: { stopped: boolean; pending: boolean }): WorkflowProgress {
@@ -58,10 +59,10 @@ export function executionPollingHint() {
     recommendedIntervalSeconds: EXECUTION_POLLING_INTERVAL_SECONDS
   };
 }
-export function reviewStatusResponse({ session, request, walletAvailability, walletObservation, progress, connectionConflict }: ReviewSnapshot) {
+export function reviewStatusResponse({ session, request, walletAvailability, walletObservation, progress, connectionConflict, connectionReconciliationRequired }: ReviewSnapshot) {
   const pollingStatus = getExecutionPollingStatus(session, request);
   return {
-    walletAvailability, walletObservation, progress, connectionConflict,
+    walletAvailability, walletObservation, progress, connectionConflict, connectionReconciliationRequired,
     reviewSessionId: session.id, status: session.status, reviewRevision: session.reviewRevision,
     account: session.account, plans: session.plans, reviewState: session.reviewState,
     pollingStatus, statusCategory: executionStatusCategory(pollingStatus), pollingHint: executionPollingHint(),

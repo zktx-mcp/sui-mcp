@@ -6,7 +6,7 @@ It does not define tool field contracts or response wording. Use `docs/MCP_TOOLS
 
 The README keeps only the short entry path; client-specific setup, restart behavior, and troubleshooting live here.
 
-These instructions target `@zktx.io/sui-mcp@0.5.2`. Package installation requires
+These instructions target `@zktx.io/sui-mcp@0.6.0`. Package installation requires
 that exact version to be published; use the developer checkout instructions when
 it is not available. A repository rename or local build does not publish the
 package. Changing client settings or rebuilding files does not replace an
@@ -34,12 +34,12 @@ the package identity when switching installations.
 
 No Sui endpoint setup is required for the default path. The runtime creates a local SQLite database automatically, stores default Sui mainnet gRPC and GraphQL endpoints there on first start, and uses those endpoints for read-only mainnet tools.
 
-If you want a custom Sui gRPC or GraphQL provider, or local data controls, configure them after the MCP server is connected by asking your AI client to create a local settings session:
+If you want a custom Sui gRPC or GraphQL provider, or local data controls, configure them after the MCP server is connected by asking your AI client to create a Settings card:
 
 - "Show my Sui MCP local settings."
-- "Open my Sui MCP local settings page."
+- "Open my Sui MCP Settings card."
 
-Open the returned settings URL in the same machine's system browser. Custom endpoint changes apply after the MCP server restarts. Advanced temporary environment overrides are documented in [Advanced Runtime Settings](#advanced-runtime-settings).
+The tool opens an internal card; use its scoped controls in the chat app. No external URL is returned. Custom endpoint changes apply after the MCP server restarts. Advanced temporary environment overrides are documented in [Advanced Runtime Settings](#advanced-runtime-settings).
 
 DeepBook orderbook, raw-quantity quote, and display-amount quote reads use an internal mainnet SDK simulation sender placeholder.
 
@@ -125,7 +125,7 @@ per-client configuration below, which give the exact `command` and `args`.
 
 The npm package for this release is `@zktx.io/sui-mcp`. The commands below
 require the requested version to be published; confirm it with
-`npm view @zktx.io/sui-mcp@0.5.2 version` before switching. Both installation
+`npm view @zktx.io/sui-mcp@0.6.0 version` before switching. Both installation
 methods start the same `sui-mcp` stdio MCP server. Use a local checkout when
 working on a version that has not been published.
 
@@ -187,17 +187,21 @@ command, for example `"command": "cmd", "args": ["/c", "npx", "-y", "@zktx.io/su
 
 ### Updating an Existing Sui MCP Installation
 
-When updating `@zktx.io/sui-mcp`, keep its existing data directory and review
-port in every participating client. Fully quit the participating apps, update
+Confirm that the requested package version is available before changing every
+participating client's configuration. This release requires a new empty data
+directory when replacing a 0.5.x installation. Preserve the previous data,
+backups and private WalletConnect store; they are not converted or imported.
+Configure endpoints and read context as needed and connect through a new card.
+Use the same new data directory and review port in every participating client.
+Fully quit the participating apps, update
 the installed package or configured version, then reopen them and check
 `read.get_server_status` in each client. The package name, version and server
 name must match the intended installation. Updating the package does not
 replace a backend that is already running.
 
-An update that retains the current database format uses the existing data;
-it does not require a fresh database, a reset or another wallet connection.
-This release uses database format 9. Older database formats are rejected
-without migration; see [Local Database Architecture](LOCAL_DB_ARCHITECTURE.md#current-format-and-backups).
+A compatible update that retains the current database structure can use existing
+data. Incompatible databases and backups are rejected without migration;
+see [Local Database Architecture](LOCAL_DB_ARCHITECTURE.md#current-format-and-backups).
 Do not reset data or resend a transaction as an update step. Coordinate a safe
 restart if a transaction request is still in progress.
 
@@ -214,13 +218,13 @@ are unaffected and must never be resubmitted as an installation step.
 
 Fully quit every app using the service and wait for its shared backend to exit
 before starting the new package. A client using a different service identity,
-API version or data directory is refused while that backend owns the port.
+package version or data directory is refused while that backend owns the port.
 If a transaction request is in progress, inspect its state and coordinate a safe
 restart first. A previous wallet pairing can remain in the wallet app; remove
 an unwanted pairing there rather than assuming new local storage disconnected it.
 
 Replace the old registration instead of adding a second one. Use exactly
-`sui-mcp` for the registration name and select `@zktx.io/sui-mcp@0.5.2` in its
+`sui-mcp` for the registration name and select `@zktx.io/sui-mcp@0.6.0` in its
 command arguments. Do not append an environment label, version or numeric
 suffix. Remove obsolete runtime environment overrides. If you set
 `SUI_MCP_DATA_DIR`, choose a new empty directory; never point it at another
@@ -460,7 +464,7 @@ After the MCP server is connected:
    - `read.summarize_sui_function_activity_scan` for sent transactions that called one full function target.
    If the selected tool accepts `account` and the user supplied a Sui address, pass it instead of starting wallet connection. DeepBook account inventory has no explicit address input.
 8. For local review evidence, use `read.list_review_activity`, `read.summarize_review_funnel`, or `read.get_review_session_detail`.
-9. For local endpoint settings or local data controls, ask your AI client to call `settings.create_local_settings_session`, then open the returned settings URL in the same machine's system browser. Setting changes apply after restart.
+9. For local endpoint settings or local data controls, ask your AI client to call `settings.create_local_settings_session`, then use the internal card controls. Setting changes apply after restart.
 
 ## Wallet Connection Boundary
 
@@ -484,14 +488,20 @@ connections are saved, the Connect card lists them for target-specific
 Disconnect confirmation. Account use and signing remain blocked until the
 conflict is resolved. No connection is silently chosen or remotely removed.
 
-There is no Restart wallet service button in Connect or Settings. If the
-connection service is unavailable or a disconnection remains unresponsive,
-fully quit all apps using Sui MCP and reopen them. Closing only a window
-or a client that does not own the shared backend is insufficient. Another open
-client may take ownership. Verify that the old backend and SDK child exited
-and that the new service becomes available; editing a config file is not a
-runtime restart. A process that survives app exit needs separate diagnosis,
-not a claim that recovery succeeded.
+Connection service restart belongs to Settings, not Connect. If an operation
+is unresponsive or the service is unavailable, ask to open Settings and use
+Troubleshooting. Inspect the affected run/requests and confirm Restart
+connection service. The backend waits for its old SDK child to exit and a new
+run to become ready; it does not restart the parent or another app. If startup
+itself remains pending, open a new Settings card for another explicit restart;
+the prior pending startup is recorded as superseded. A known failure stays a
+failure. No read, timeout or reopened frame initiates another restart.
+
+If Settings or the parent service cannot be reached, fully quit all apps using
+Sui MCP, then reopen them. Closing a peer or window can leave the owner alive.
+Use this full app restart also for stored endpoint/configuration changes or an
+installation update. A process surviving app exit needs diagnosis; editing a
+config file is not evidence of a runtime restart.
 
 Restarting does not cancel a transaction on Sui or confirm remote disconnection.
 Check retained connections in your wallet app. Saved results and the known
@@ -499,10 +509,11 @@ digests of submitted transactions remain available after restart. An
 unsubmitted approval needs a fresh review and explicit wallet approval; nothing
 is resent automatically. Normal initialization is not a failure warning.
 
-The shared backend uses internal API version 7. All clients sharing a data
-folder must use a compatible installation. Fully quit the old clients before
+All clients sharing a data folder must use the same package release. Private
+parent/child and peer authentication bind that package identity; there is no
+separate internal API or database version counter. Fully quit the old clients before
 starting the same updated installation; an incompatible owner is refused.
-Product schema 9 and private SDK format 1 are retained.
+The runtime checks the current product and private SDK storage structures directly; neither has a separate numeric version.
 
 Review requires an explicit card action and individual wallet approval. The
 backend uses Sui sign-only requests, verifies returned bytes/digest/signer and
@@ -518,7 +529,7 @@ A card accepts one read selection. Moving between chats or recreating its frame 
 
 ## Local data format
 
-Start this runtime with an empty `SUI_MCP_DATA_DIR` or a database already in its current format. A mismatched existing database is refused before writes. There is no older DB or backup migration. The current database and public backup use schema 9; a development checkout replacing schema 8 needs a new empty data folder, preserving the previous folder. Older local records, known/active accounts and stored endpoints are not inherited; set the needed account context and endpoints again. Existing files are left in place, and environment overrides keep their existing precedence. See [Local DB Architecture](LOCAL_DB_ARCHITECTURE.md) for the current format, backup scope and card-result retention. Card results do not expire with the input period and can increase DB size. Reset/import removes them along with the affected local data; it is not a card-only space cleanup operation.
+Start this runtime with an empty `SUI_MCP_DATA_DIR` or a database already in its current format. A mismatched existing database is refused before writes. There is no older DB or backup migration. A checkout with different table, constraint or field definitions needs a new empty data folder, preserving the previous folder. Databases and backups do not carry a separate numeric schema version. Older local records, known/active accounts and stored endpoints are not inherited; set the needed account context and endpoints again. Existing files are left in place, and environment overrides keep their existing precedence. See [Local DB Architecture](LOCAL_DB_ARCHITECTURE.md) for the current format, backup scope and card-result retention. Card results do not expire with the input period and can increase DB size. Reset/import removes them along with the affected local data; it is not a card-only space cleanup operation.
 
 ## Local Settings
 
@@ -527,21 +538,37 @@ Beginner setup uses the built-in Sui mainnet gRPC and GraphQL endpoints. You do 
 To inspect settings or change stored endpoints, ask your AI client:
 
 - "Show my Sui MCP local settings."
-- "Open my Sui MCP local settings page."
+- "Open my Sui MCP Settings card."
 
-The settings page lets the user:
+Settings groups Address for viewing assets, Local records, Troubleshooting and
+Advanced settings. Each card lets you make one change and keeps its result:
 
-- save custom Sui gRPC and GraphQL endpoints;
-- restore the default Sui gRPC and GraphQL URLs;
-- clear active account read context;
-- reset logical local data;
-- export local data;
-- import replace-only local data.
+- view or clear the default address used when checking assets;
+- back up records saved on this computer;
+- restore a Sui MCP backup, replacing the current local records and settings;
+- delete local records and saved settings;
+- check or restart the wallet connection service;
+- select a custom Sui network address or return to a built-in default.
+
+Local records include saved addresses, reviews, transaction and activity records,
+and Sui network settings. Restoring them does not reconnect your wallet or restore
+wallet approvals. Transactions on Sui are not cancelled by a restore or reset.
+Internal request IDs and file hashes appear in Details. Advanced settings names
+the Sui node connection as gRPC and the activity-data connection as GraphQL.
+Network addresses set in the app launch configuration take priority over values
+saved in Settings; remove the relevant launch setting before restarting to use
+the saved value.
 
 Settings validation rules:
 
-- Import preview validates the backup shape without contacting the imported endpoint.
-- Import accepts only the current backup format and schema identifier. Required settings and activity fields must be present; missing fields are not filled from defaults.
+- Choose a backup file no larger than 16 MiB. The card shows file transfer and Checking backup while Sui MCP checks it automatically, then shows Restore available or Cannot restore with the reason. A file still being received is not a failed backup. These initial checks do not contact network addresses from the backup.
+- Restore local records is your final confirmation. Sui MCP then checks the backup's network addresses before changing any data. Back from the confirmation clears that preparation and keeps a valid complete file. Returning from an input page to a section and using Resume preserves the selection and file. A change to local records requires a fresh check. Check backup again checks that same file when needed; Change backup file lets you choose another. Choosing or checking a file never restores it automatically.
+- If Sui MCP rejects the backup's format or mainnet network settings, use Change backup file. Back and Check backup again cannot clear that rejection. If a network service is temporarily unreachable, you can check the backup again and make a new restore confirmation; network access is still checked before any records change.
+- If another Settings operation or an unsettled wallet request temporarily blocks the change, Check status reads the same card again without repeating its action.
+- Restoring or resetting can delete records whose transaction results were not confirmed and cannot cancel a transaction on Sui. It remains blocked while a wallet/transaction response is pending or the initial transaction-result waiting period has not ended, including after automatic result checks are stopped.
+- Backup results show the actual Folder and File name separately. The file is created under the configured data directory's backups folder; it is not automatically placed in Downloads.
+- A backup is a complete local file. If your chat app supports downloads, you can also choose Download this backup. The app receiving that request does not prove that the file was saved or where it was saved. If temporary-file cleanup cannot be confirmed, Check status checks it again without repeating the change.
+- Import accepts only the current backup format and required field structure. Required settings and activity fields must be present; missing fields are not filled from defaults.
 - Current-format backups can contain `function_scan` provenance. Unsupported formats and scan-kind values are rejected rather than partially imported.
 - Endpoint chain-identifier verification runs only when the user confirms the replace-only import.
 - A custom gRPC endpoint must be an `http` or `https` URL with an explicit port and no credentials, path, query string, or fragment.
@@ -565,7 +592,7 @@ Use this only when you need a one-run override or need to recover from a stored 
 
 After the MCP server starts with the override:
 
-1. Open the local settings page.
+1. Open the Settings card.
 2. Restore the default endpoint or save a new endpoint.
 3. Remove the environment override.
 4. Restart the client.
@@ -602,7 +629,7 @@ The port is not a browser-wallet authorization origin.
 `npm run release:check` checks synchronized release metadata, typechecks, tests,
 builds, and verifies the actual npm tarball and bundled licenses. It installs the
 tarball in a temporary directory and runs that installed binary to check MCP
-initialization, tools, document/card resources, the local Settings page and
+initialization, tools, document/card resources, the internal Settings card and
 assets, and the isolated SDK child. It confirms that Connect rejects restart
 input, manage does not pair merely by opening, and the SDK keeps its exclusive
 storage lease until shutdown. Runtime startup requires reachable Sui mainnet endpoints; a startup
@@ -721,7 +748,7 @@ cannot erase an earlier fatal or signal exit. SDK service unavailability is a
 separate condition and does not by itself shut down the parent read service.
 
 - Do not set `SUI_RPC_URL`; this runtime intentionally uses Sui gRPC and rejects Sui JSON-RPC config.
-- If a stored custom endpoint fails, temporarily start with `SUI_GRPC_URL`, open the local settings page, restore the default Sui gRPC URL or save a new endpoint, remove the override, and restart.
+- If a stored custom endpoint fails, temporarily start with `SUI_GRPC_URL`, open the Settings card, restore the default Sui gRPC URL or save a new endpoint, remove the override, and restart.
 - If an environment override is present, confirm it has scheme, host, and explicit port only.
 - If the startup chain identifier guard fails, use a Sui mainnet gRPC endpoint. If a Sui activity tool fails its GraphQL chain identifier guard, use a Sui mainnet GraphQL endpoint.
 
@@ -741,7 +768,7 @@ If the user supplied a specific Sui address for `read.summarize_wallet_assets` o
 
 A 404 means the requested package or version could not be retrieved from the
 selected registry. Confirm the exact name and version, for example with
-`npm view @zktx.io/sui-mcp@0.5.2 version --registry=https://registry.npmjs.org`.
+`npm view @zktx.io/sui-mcp@0.6.0 version --registry=https://registry.npmjs.org`.
 A new version may not have been published or become visible yet; a mistyped name
 or an alternate/private registry can also explain the response. Check the
 publication result and registry configuration before retrying. Do not assume

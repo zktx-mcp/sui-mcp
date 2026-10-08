@@ -11,6 +11,11 @@ import type { Logger } from "../../runtime/logger.js";
 import type { WalletWorkflow } from "./walletWorkflow.js";
 import { WorkflowConflict } from "./sqliteWalletWorkflowStore.js";
 import { parseWorkflowAction } from "./workflowView.js";
+import { randomUUID } from "node:crypto";
+import type { SettingsWorkflow } from "./settingsWorkflow.js";
+import { settingsActionSchema, SettingsConflict } from "./settingsOperation.js";
+import { settingsInputError } from "./settingsInputError.js";
+
 
 export class CardError extends Error {}
 
@@ -25,6 +30,7 @@ export class CardStore {
     now?: (() => Date) | undefined;
     logger?: Logger | undefined;
     workflow?: WalletWorkflow | undefined;
+    settings?: SettingsWorkflow | undefined;
   }) {
     this.assertCurrent();
     options.records.recover(options.ownerId, this.now());
@@ -37,6 +43,7 @@ export class CardStore {
   async create(kind: CardKind, input: Record<string, unknown>, execute = false): Promise<CardResponse & { permission: string }> {
     this.assertCurrent();
     const business = kind === "connect" || kind === "review";
+    if (kind === "settings" && (!this.options.settings || execute || Object.keys(input).length)) throw new CardError("Settings cards are unavailable for this input.");
     if (business && (!this.options.workflow || execute)) throw new CardError("This type of card is unavailable.");
     const parsed = execute ? parseCardInput(kind, input) : undefined;
     let preparation: CardPreparation = { status: "ready" };
@@ -53,13 +60,15 @@ export class CardStore {
     assertNoForbiddenMcpFields({ input, preparation });
     const { base, token } = createLocalSessionBase(this.now(), DEFAULT_SESSION_TTL_MS);
     const record: CardRecord = { ownerId: this.options.ownerId, tokenHash: base.tokenHash,
-      scope: kind === "connect" ? "connect" : kind === "review" ? input.mode === "manage" ? "review_manage" : "review" : "read",
+      scope: kind === "settings" ? "settings" : kind === "connect" ? "connect" : kind === "review" ? input.mode === "manage" ? "review_manage" : "review" : "read",
+      ...(kind === "settings" ? { operationId: randomUUID() } : {}),
       ...(kind === "review" && input.mode === "manage" && typeof input.attemptId === "string" ? { operationId: input.attemptId } : {}),
       state: { cardId: base.id, kind, state: preparation.status === "failed" ? "closed" : "ready", revision: 0,
         createdAt: base.createdAt, expiresAt: base.expiresAt, input,
         ...(preparation.status === "failed" ? { reason: "failed", error: preparation.error } :
           preparation.data === undefined ? {} : { data: preparation.data }) } };
-    this.options.records.create(record);
+    if (kind === "settings") this.options.settings!.create(record);
+    else this.options.records.create(record);
     if (preparation.status === "failed") this.reportFailure(record, "input_preparation");
     const result = parsed === undefined ? await this.describe(record, false) : await this.submit({
       cardId: base.id, permission: token, revision: 0, input: parsed
@@ -67,8 +76,21 @@ export class CardStore {
     return { ...result, permission: token };
   }
   async read(input: CardReference): Promise<CardResponse> { return this.describe(this.require(input), true); }
+  async readSettingsFile(input: CardReference & { operationId: string; fileId: string; offset: number }, limit: number) {
+    const record = this.require(input);
+    if (record.state.kind !== "settings" || !this.options.settings) throw new CardError("This card does not provide a backup file.");
+    if (record.operationId !== input.operationId) throw new CardError("This backup does not match the Settings operation.");
+    return this.options.settings.readFile(record, input.fileId, input.offset, limit);
+  }
   async readSaved(cardId: string): Promise<CardSnapshot> { return (await this.describe(this.current(cardId), false)).snapshot; }
   private async describe(record: CardRecord, uiObservation: boolean): Promise<CardResponse> {
+    if (record.state.kind === "settings") {
+      if (!this.options.settings) throw new CardError("Settings cards are unavailable.");
+      const described = await this.options.settings.describe(record);
+      return { snapshot: cardSnapshotSchema.parse({ ...described.record.state, data: described.data,
+        inputRemainingMs: described.record.state.state === "ready" ? Math.max(0, Date.parse(described.record.state.expiresAt) - this.now().getTime()) : 0,
+        pollAfterMs: EXECUTION_POLLING_INTERVAL_SECONDS * 1000 }) };
+    }
     if (record.state.kind !== "connect" && record.state.kind !== "review") return this.response(record);
     if (!this.options.workflow) throw new CardError("Wallet actions are unavailable.");
     const view = await this.options.workflow.describe(record, uiObservation);
@@ -83,6 +105,24 @@ export class CardStore {
   }
   async act(input: CardSubmission): Promise<CardResponse> {
     const record = this.require(input);
+    if (record.state.kind === "settings") {
+      if (!this.options.settings) throw new CardError("Settings cards are unavailable.");
+      const parsed = settingsActionSchema.safeParse(input.input);
+      if (!parsed.success) return { ...await this.describe(record, false), error: { code: "invalid_card_input", message: "This Settings action is not valid." } };
+      if (parsed.data.action === "settings_confirm" && record.acceptedInput !== undefined && isDeepStrictEqual(record.acceptedInput, parsed.data)) return this.describe(record, false);
+      if (input.revision !== record.state.revision) return { ...await this.describe(record, false), error: { code: "card_conflict", message: "This Settings selection changed. Review the current selection before continuing." } };
+      const kind = parsed.data.action === "settings_select" ? parsed.data.draft.kind : this.options.settings.operationKind(record);
+      try { await this.options.settings.act(record, parsed.data); }
+      catch (error) {
+        const invalid = settingsInputError(error, kind);
+        if (!(error instanceof SettingsConflict) && invalid === undefined) throw error;
+        return { ...await this.describe(this.current(input.cardId), false), error: {
+          code: invalid === undefined ? "card_conflict" : "invalid_card_input",
+          message: invalid?.message ?? (error as SettingsConflict).message
+        } };
+      }
+      return this.describe(this.current(input.cardId), false);
+    }
     if ((record.state.kind !== "connect" && record.state.kind !== "review") || !this.options.workflow) {
       return this.conflict(record, "This card does not accept wallet workflow actions.");
     }
@@ -102,7 +142,7 @@ export class CardStore {
   }
   async submit(input: CardSubmission): Promise<CardResponse> {
     const record = this.require(input);
-    if (record.state.kind === "connect" || record.state.kind === "review") throw new CardError("This card does not accept data selections.");
+    if (record.state.kind === "connect" || record.state.kind === "review" || record.state.kind === "settings") throw new CardError("This card does not accept data selections.");
     let parsed: Record<string, unknown>;
     try { parsed = parseCardInput(record.state.kind, input.input); }
     catch { return { ...this.response(record), error: { code: "invalid_card_input", message: "The selected information is not valid for this card." } }; }

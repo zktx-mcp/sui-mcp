@@ -17,7 +17,6 @@ import {
   resolveActivityDatabasePath,
   SqliteActivityStore
 } from "../src/core/activity/sqliteActivityStore.js";
-import { DB_USER_VERSION } from "../src/core/activity/schemaVersion.js";
 import { SuiEndpointError } from "../src/core/suiEndpoint.js";
 import { InMemoryActivityStore } from "./fixtures/inMemoryActivityStore.js";
 
@@ -127,9 +126,9 @@ function externalActivityScansCreateSql(db: Database.Database): string {
   return row.sql;
 }
 
-function createLegacyExternalActivityTables(
+function createIncompatibleExternalActivityTables(
   db: Database.Database,
-  options: { userVersion: number; invalidScanReference?: boolean } = { userVersion: 3 }
+  options: { includeDetails: boolean; invalidScanReference?: boolean } = { includeDetails: true }
 ): void {
   db.exec(`
     PRAGMA foreign_keys=OFF;
@@ -194,19 +193,18 @@ function createLegacyExternalActivityTables(
       last_scan_id TEXT NOT NULL REFERENCES external_activity_scans(scan_id) ON DELETE RESTRICT,
       first_fetched_at TEXT NOT NULL,
       last_fetched_at TEXT NOT NULL
-      ${options.userVersion >= 3 ? ", detail_json TEXT" : ""}
+      ${options.includeDetails ? ", detail_json TEXT" : ""}
       ,
       PRIMARY KEY (account_id, digest, relationship)
     );
     INSERT INTO external_activity_transactions
       (account_id, digest, relationship, checkpoint, timestamp, status, known_sender_account_id,
-       first_scan_id, last_scan_id, first_fetched_at, last_fetched_at${options.userVersion >= 3 ? ", detail_json" : ""})
+       first_scan_id, last_scan_id, first_fetched_at, last_fetched_at${options.includeDetails ? ", detail_json" : ""})
     VALUES
       (1, '${"5".repeat(44)}', 'sent', '100', '2026-05-11T00:00:00.000Z', 'success', 1,
        ${options.invalidScanReference ? "'missing_scan'" : "'scan_legacy'"},
        ${options.invalidScanReference ? "'missing_scan'" : "'scan_legacy'"},
-       '2026-05-11T00:00:00.000Z', '2026-05-11T00:00:00.000Z'${options.userVersion >= 3 ? ", NULL" : ""});
-    PRAGMA user_version = ${options.userVersion};
+       '2026-05-11T00:00:00.000Z', '2026-05-11T00:00:00.000Z'${options.includeDetails ? ", NULL" : ""});
     PRAGMA foreign_keys=ON;
   `);
 }
@@ -316,7 +314,6 @@ describe("SqliteActivityStore", () => {
     await withTempDb(async (_store, dbPath) => {
       const db = new Database(dbPath);
       try {
-        expect(db.prepare("PRAGMA user_version").get()).toMatchObject({ user_version: DB_USER_VERSION });
         expect(db.prepare("PRAGMA journal_mode").get()).toMatchObject({ journal_mode: "wal" });
         expect(db.prepare("PRAGMA foreign_keys").get()).toMatchObject({ foreign_keys: 1 });
         const tables = (
@@ -383,12 +380,12 @@ describe("SqliteActivityStore", () => {
     }
   });
 
-  it("refuses to open a local database from a newer schema version", () => {
+  it("refuses an unrelated existing SQLite schema before writing", () => {
     const dir = mkdtempSync(join(tmpdir(), "sui-mcp-activity-test-"));
     const dbPath = join(dir, "sui-mcp.sqlite");
     const db = new Database(dbPath);
     try {
-      db.exec("PRAGMA user_version = 999");
+      db.exec("CREATE TABLE unrelated (value TEXT NOT NULL)");
     } finally {
       db.close();
     }
@@ -399,11 +396,11 @@ describe("SqliteActivityStore", () => {
     }
   });
 
-  it.each([0, 2, 3, 6, 7, DB_USER_VERSION, 999])("rejects an incompatible existing format %i without changing its bytes", (version) => {
+  it.each([false, true])("rejects an incomplete schema (details: %s) without changing its bytes", (includeDetails) => {
     const dir = mkdtempSync(join(tmpdir(), "sui-mcp-format-refusal-"));
     const path = join(dir, "sui-mcp.sqlite");
     const db = new Database(path);
-    try { createLegacyExternalActivityTables(db, { userVersion: version }); } finally { db.close(); }
+    try { createIncompatibleExternalActivityTables(db, { includeDetails }); } finally { db.close(); }
     const before = readFileSync(path);
     try {
       expect(() => newTestSqliteActivityStore(path)).toThrow("format does not match");
@@ -1442,7 +1439,7 @@ describe("SqliteActivityStore", () => {
         });
         const targetLocalData = target.createLocalDataService(localDataOptions());
         const oldFormat: Record<string, unknown> = { ...exported };
-        delete oldFormat.schemaVersion;
+        delete oldFormat.format;
         for (const backup of [legacyBackup, oldFormat]) {
           await expect(targetLocalData.previewImportLocalData(backup)).rejects.toMatchObject({ kind: "input_invalid" });
           await expect(targetLocalData.importLocalDataReplace(backup)).rejects.toMatchObject({ kind: "input_invalid" });

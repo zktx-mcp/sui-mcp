@@ -6,6 +6,7 @@ import {
   type SuiGrpcUrlLocalSettingsView,
   LocalSettingsError,
   type LocalSettingsWriteResponse,
+  type LocalSettingRecord,
   type PreferencesRepository
 } from "../core/preferences/preferencesStore.js";
 import {
@@ -70,20 +71,48 @@ export class RuntimeLocalSettingsService implements LocalSettingsService {
   async getLocalSettings(): Promise<LocalSettingsView> {
     const stored = await this.options.preferencesRepository.getSuiGrpcUrl();
     const storedGraphql = await this.options.preferencesRepository.getSuiGraphqlUrl();
+    return this.settingsFromStored(stored?.value, storedGraphql?.value);
+  }
+
+  getLocalSettingsSync(read: (key: "suiGrpcUrl" | "suiGraphqlUrl") => LocalSettingRecord | undefined): LocalSettingsView {
+    const grpc = read("suiGrpcUrl"), graphql = read("suiGraphqlUrl");
+    if (grpc && typeof grpc.value !== "string" || graphql && typeof graphql.value !== "string") throw new LocalSettingsError("internal_error", "Stored endpoints are invalid.");
+    return this.settingsFromStored(grpc?.value as string | undefined, graphql?.value as string | undefined);
+  }
+
+  private settingsFromStored(stored: string | undefined, storedGraphql: string | undefined): LocalSettingsView {
     const currentStoredView = resolveSuiGrpcUrlView({
       defaultSuiGrpcUrl: this.defaultSuiGrpcUrl,
-      storedValue: stored?.value,
+      storedValue: stored,
       envValue: this.env.SUI_GRPC_URL
     });
     const currentStoredGraphqlView = resolveSuiGraphqlUrlView({
       defaultSuiGraphqlUrl: this.defaultSuiGraphqlUrl,
-      storedValue: storedGraphql?.value,
+      storedValue: storedGraphql,
       envValue: this.env.SUI_GRAPHQL_URL
     });
     return {
       suiGrpcUrl: withBootEffectiveEndpoint(currentStoredView, this.bootSuiGrpcUrl),
       suiGraphqlUrl: withBootEffectiveEndpoint(currentStoredGraphqlView, this.bootSuiGraphqlUrl)
     };
+  }
+
+  // The same side-effect-free target resolution serves display and final
+  // verification. Default URLs belong to this service, never to the View.
+  resolveEndpointChange(input: { kind: "set_endpoint" | "restore_endpoint"; endpoint: "grpc" | "graphql"; value?: string }):
+    { key: "suiGrpcUrl" | "suiGraphqlUrl"; value: string; status: "saved" | "reset" } {
+    const value = input.kind === "restore_endpoint"
+      ? input.endpoint === "grpc" ? this.defaultSuiGrpcUrl : this.defaultSuiGraphqlUrl
+      : input.endpoint === "grpc" ? parseEndpointForTool(input.value ?? "") : parseGraphqlEndpointForTool(input.value ?? "");
+    return { key: input.endpoint === "grpc" ? "suiGrpcUrl" : "suiGraphqlUrl", value,
+      status: input.kind === "restore_endpoint" ? "reset" : "saved" };
+  }
+
+  // Verification does not store a value or change this parent's effective URL.
+  async prepareEndpointChange(input: { kind: "set_endpoint" | "restore_endpoint"; endpoint: "grpc" | "graphql"; value?: string }) {
+    const target = this.resolveEndpointChange(input);
+    await this.verifyEndpointForTool(target.value, input.endpoint);
+    return target;
   }
 
   async setSuiGrpcUrl(url: string): Promise<LocalSettingsWriteResponse> {

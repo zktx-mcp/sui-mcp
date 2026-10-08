@@ -5,6 +5,7 @@ export const TOOL_NAMES = {
   uiReadCard: "ui.read_card",
   uiSubmitCard: "ui.submit_card",
   uiActCard: "ui.act_card",
+  uiReadSettingsFile: "ui.read_settings_file",
   sessionOpenReviewManagement: "session.open_review_management",
   readGetServerStatus: "read.get_server_status",
   readListSupportedProtocols: "read.list_supported_protocols",
@@ -43,8 +44,7 @@ export const TOOL_NAMES = {
   sessionGetReviewStatus: "session.get_review_status",
   sessionGetExecutionResult: "session.get_execution_result",
   sessionWaitExecutionResult: "session.wait_execution_result",
-  accountGetActiveAccount: "account.get_active_account",
-  accountClearActiveAccount: "account.clear_active_account"
+  accountGetActiveAccount: "account.get_active_account"
 } as const;
 
 export function assertValidToolName(name: string): void {

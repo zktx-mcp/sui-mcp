@@ -20,6 +20,7 @@ function mermaidConfig() {
   const v = (name: string): string => s.getPropertyValue(name).trim();
   return {
     startOnLoad: false,
+    suppressErrorRendering: true,
     // securityLevel "strict" keeps Mermaid from emitting click handlers or inline
     // scripts, so the rendered SVG is safe to inject as innerHTML under the page CSP.
     securityLevel: "strict" as const,

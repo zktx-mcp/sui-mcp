@@ -264,7 +264,6 @@ describe("source policy", () => {
 
     const migratedTools = [
       ["src/mcp/tools/settings/index.ts", "TOOL_NAMES.settingsGetLocalSettings"],
-      ["src/mcp/tools/account/index.ts", "TOOL_NAMES.accountClearActiveAccount"],
       ["src/mcp/tools/action/prepareSuiActionReview.ts", "TOOL_NAMES.actionPrepareExternalProposalReview"]
     ] as const;
 

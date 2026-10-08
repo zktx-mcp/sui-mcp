@@ -38,6 +38,10 @@ export async function walletRelay() {
   }));
   return { url: `ws://127.0.0.1:${server.address().port}`, calls, responseErrors,
     respondToPublish(handler: NonNullable<typeof respond>) { respond = handler; },
+    deliver(topic: string, message: string) {
+      for (const socket of server.clients) socket.send(JSON.stringify({ jsonrpc: "2.0", id: ++notification, method: "irn_subscription",
+        params: { id: id(topic), data: { topic, message, publishedAt: Date.now() } } }));
+    },
     release() { holdUnsubscribe = false; for (const send of withheld.splice(0)) send(); },
     async close() { for (const socket of server.clients) socket.terminate(); await new Promise<void>((resolve) => server.close(resolve)); }
   };

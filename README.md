@@ -16,8 +16,8 @@ cause another signing or submission request. Request failures and unknown
 outcomes are separate from independently observed chain success/failure.
 
 Account, Receipt and Chart cards provide read-only evidence independently of
-signing. Connect and Review also run inside the MCP host. Settings currently
-uses a local token page. Human-readable review is not a guarantee of safety or
+signing. Connect, Review and Settings also run inside the MCP host. Settings
+provides local data controls and explicit connection-service recovery. Human-readable review is not a guarantee of safety or
 of complete interpretation of every transaction detail; the raw PTB structure
 and addresses remain inspectable.
 
@@ -27,13 +27,13 @@ Users can ask ordinary questions:
 - "How much are my USD-denominated assets together?"
 - "What is the shortfall?"
 
-This document describes `@zktx.io/sui-mcp@0.5.2`. Confirm that version is
+This document describes `@zktx.io/sui-mcp@0.6.0`. Confirm that version is
 published before using npm installation commands. For a local build, follow
 [Developer Checkout Setup](docs/MCP_SETUP.md#developer-checkout-setup).
 
 ## Product Scope in Two Layers
 
-- **Implemented:** Sui mainnet read evidence, non-signable external proposal review, and account-bound DeepBook swap review using protocol-agnostic adapters. Five internal cards use the same SQLite state and permission model. The backend verifies stored material, ownership, quote/policy provenance, human-readable facts, simulation and PTB evidence before an explicit user request. WalletConnect carries bytes only between the backend and wallet; ordinary MCP responses expose facts, request status and observed execution results. Settings remains a local token page; an internal Settings card is not implemented.
+- **Implemented:** Sui mainnet read evidence, non-signable external proposal review, and account-bound DeepBook swap review using protocol-agnostic adapters. Six internal cards use the same SQLite state and permission model. The backend verifies stored material, ownership, quote/policy provenance, human-readable facts, simulation and PTB evidence before an explicit user request. WalletConnect carries bytes only between the backend and wallet; ordinary MCP responses expose facts, request status and observed execution results. Settings owns endpoint and read-address controls, local backup/import/reset, and explicit connection-service recovery. Settings operations require scoped user confirmation; ordinary MCP calls only create the card or read settings.
 - **Never (permanently unsupported at every layer):** no private-key custody, no MCP or AI autonomous execution, no forwarding of opaque external transaction bytes to a wallet, no silent settlement-token or route choice, no fiat cash-out, no P&L, no peg guarantee.
 
 DeepBook provides the current scoped Sui conversion, price, and orderbook
@@ -193,12 +193,12 @@ running from a local checkout, see [docs/MCP_SETUP.md](docs/MCP_SETUP.md).
 
 ### Package and repository transition
 
-The package for this release is `@zktx.io/sui-mcp@0.5.2`, and its repository is
+The package for this release is `@zktx.io/sui-mcp@0.6.0`, and its repository is
 `zktx-mcp/sui-mcp`. The previous package is `@zktx.io/say-ur-intent` (through
 0.4.4). The older `@stelis/say-ur-intent@0.4.0` is also a separate package.
 Existing installations and MCP client registrations do not change names
 automatically. Before switching, confirm the new package with
-`npm view @zktx.io/sui-mcp@0.5.2 version`; renaming the repository does not publish
+`npm view @zktx.io/sui-mcp@0.6.0 version`; renaming the repository does not publish
 an npm package or MCP Registry entry.
 
 Use the full scoped package name: the unscoped `sui-mcp` package is a different
