@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { workflowViewSchema } from "../src/core/session/workflowView.js";
 import { readFile, writeFile, rename, mkdir, rmdir } from "node:fs/promises";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { settingsWorkflowFixture } from "./fixtures/settingsWorkflow.js";
 import { deferred } from "./fixtures/walletWorkflow.js";
@@ -11,12 +11,27 @@ import type { LocalDataCounts, LocalDataImportPreview } from "../src/core/activi
 import { DEFAULT_SUI_GRPC_URL, DEFAULT_SUI_GRAPHQL_URL } from "../src/runtime/config.js";
 import { SuiEndpointError } from "../src/core/suiEndpoint.js";
 
-const resources: (() => void)[] = [];
-afterEach(() => { for (const close of resources.splice(0).reverse()) close(); });
+const resources: (() => void | Promise<void>)[] = [];
+afterEach(async () => { for (const close of resources.splice(0).reverse()) await close(); });
 async function fixture(options: Parameters<typeof settingsWorkflowFixture>[0] = {}) {
   const value = await settingsWorkflowFixture(options); resources.push(() => value.close()); return value;
 }
 const view = (card: { snapshot: { data?: unknown } }) => card.snapshot.data as SettingsView;
+const downloadPath = (f: Awaited<ReturnType<typeof fixture>>, card: Awaited<ReturnType<typeof f.create>>) => {
+  const fileId = f.wallet.run(() => f.records.get(view(card).operationId)!.fileId)!;
+  return join(f.wallet.directory, ".settings-staging", `${fileId}.download`);
+};
+async function downloadReady(f: Awaited<ReturnType<typeof fixture>>, card: Awaited<ReturnType<typeof f.create>>) {
+  let current = await f.read(card);
+  await vi.waitFor(async () => { current = await f.read(card); expect(view(current).result?.outcome).toBe("completed"); });
+  return current;
+}
+const downloadReport = (card: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>["create"]>>) => {
+  const data = view(card);
+  return { action: "settings_report_download", operationId: data.operationId, fileId: data.file!.fileId,
+    attemptId: data.download!.currentAttemptId, status: "acknowledged" };
+};
+
 
 it.each(["selected", "cleared", "different_source", "terminal", -1, 0, 1] as const)(
   "keeps same-time qualification and the next explicit action consistent (%s)", async (kind) => {
@@ -198,7 +213,7 @@ it("keeps same-time qualification blocked through pending Disconnect until its a
 it.each(["signature", "lookup"].flatMap((deadline) => ["draft", "selected", "prepared", "executing", "completed"]
   .map((phase) => ({ deadline, phase }))))("keeps $phase Settings reads independent of a refused foreign $deadline deadline write", async ({ deadline, phase }) => {
   const f = await fixture(), w = f.wallet, signature = deferred<Awaited<ReturnType<typeof w.sign>>>(), publishing = deferred<void>(), release = deferred<void>();
-  const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => db.close());
+  const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => { db.close(); });
   let heldSignature = false;
   try {
     const { connection } = await w.approve(), ready = await w.prepare(connection.connectionId);
@@ -216,9 +231,9 @@ it.each(["signature", "lookup"].flatMap((deadline) => ["draft", "selected", "pre
     let card = phase === "draft" ? await f.create() : await f.prepare({ kind: "clear_read_address" });
     if (phase === "selected") card = { ...await f.act(card, { action: "settings_back", operationId: view(card).operationId }), permission: card.permission };
     if (phase === "executing") {
-      const publish = f.files.publishExport.bind(f.files);
-      vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { publishing.resolve(); await release.promise; return publish(...args); });
-      card = await f.prepare({ kind: "export_local_data" }); await f.confirm(card); await publishing.promise;
+      const publish = f.files.createDownload.bind(f.files);
+      vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { publishing.resolve(); await release.promise; return publish(...args); });
+      card = await f.create(); await f.download(card); await publishing.promise;
       expect(w.run(() => f.records.get(view(card).operationId)?.phase)).toBe("executing");
     } else if (phase === "completed") card = { ...await f.confirm(card), permission: card.permission };
     const request = w.run(() => w.records.currentRequest(ready.session.id))!, authority = w.run(() => w.records.authority(request.attemptId))!;
@@ -268,7 +283,7 @@ it("reads Settings facts while an unrelated pending connection expiry remains un
   const pending = w.run(() => w.records.connections()[0])!;
   expect(pending.connection.status).toBe("awaiting_approval"); expect(pending.sdkPending).toBe(true);
   w.advance(Date.parse(pending.connection.expiresAt) - w.now().getTime());
-  const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => db.close());
+  const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => { db.close(); });
   try {
     db.exec(`CREATE TRIGGER refuse_foreign_connection_expiry BEFORE UPDATE ON live_wallet_connections
       WHEN OLD.id='${pending.connection.connectionId.replaceAll("'", "''")}' BEGIN SELECT RAISE(ABORT,'foreign connection expiry refused'); END`);
@@ -360,13 +375,13 @@ it.each(["endpoint_timeout", "endpoint_unreachable"] as const)("permits an expli
   expect(verify.mock.calls.length).toBeGreaterThan(calls); expect(f.wallet.sign).not.toHaveBeenCalled();
 });
 
-it("does not describe an unfinished export as a startup supersession conflict", async () => {
-  const f = await fixture(), entered = deferred<void>(), release = deferred<void>(), publish = f.files.publishExport.bind(f.files);
-  vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+it("does not describe an unfinished download snapshot as a startup supersession conflict", async () => {
+  const f = await fixture(), entered = deferred<void>(), release = deferred<void>(), publish = f.files.createDownload.bind(f.files);
+  vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
   const fresh = await f.create();
   const selected = { ...await f.act(fresh, { action: "settings_select", draft: { kind: "restart_wallet_service" } }), permission: fresh.permission };
   expect(selected.error).toBeUndefined(); expect(view(selected).draft).toEqual({ kind: "restart_wallet_service" });
-  const backup = await f.prepare({ kind: "export_local_data" }); await f.confirm(backup);
+  const backup = await f.create(); await f.download(backup);
   try {
     await entered.promise;
     expect(f.wallet.run(() => f.records.get(view(backup).operationId)?.phase)).toBe("executing");
@@ -449,7 +464,7 @@ it("retains a usable recheck after automatic preparation storage fails without c
     sha256: createHash("sha256").update(raw).digest("hex") });
   const fileId = view(card).file!.fileId;
   await call({ action: "settings_upload_chunk", operationId: id, fileId, offset: 0, chunkBase64: raw.toString("base64") });
-  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => db.close());
+  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => { db.close(); });
   db.exec("CREATE TRIGGER refuse_import_check BEFORE UPDATE ON settings_operations WHEN NEW.phase='prepared' BEGIN SELECT RAISE(ABORT,'check storage refused'); END");
   await expect(f.act(card, { action: "settings_seal_upload", operationId: id, fileId })).rejects.toThrow("check storage refused");
   card = await f.read(card);
@@ -469,7 +484,7 @@ it("projects and enforces the shared file reservation without blocking duplicate
   const prepared = await uploadBackup(f, raw);
   const selectionCases: { action: string; card: Awaited<ReturnType<typeof f.create>> }[] = [];
   for (const action of ["settings_select", "settings_back", "settings_cancel"]) {
-    selectionCases.push({ action, card: await f.prepare({ kind: "export_local_data" }) });
+    selectionCases.push({ action, card: await f.prepare({ kind: "clear_read_address" }) });
   }
   let partial = await f.create();
   partial = { ...await f.act(partial, { action: "settings_select", draft: { kind: "import_local_data" } }), permission: partial.permission };
@@ -495,11 +510,11 @@ it("projects and enforces the shared file reservation without blocking duplicate
   expect(view(partial).allowedActions).not.toContain("settings_seal_upload");
   expect(view(empty).allowedActions).toContain("settings_begin_upload");
   for (const item of selectionCases) expect(view(item.card).allowedActions).toContain(item.action);
-  const publish = f.files.publishExport.bind(f.files);
-  vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
-  const blocker = await f.prepare({ kind: "export_local_data" });
+  const publish = f.files.createDownload.bind(f.files);
+  vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+  const blocker = await f.create();
   try {
-    expect((await f.confirm(blocker)).error).toBeUndefined(); await entered.promise;
+    expect((await f.download(blocker)).error).toBeUndefined(); await entered.promise;
     const heldIO = w.run(() => f.records.control().file_io_id); expect(heldIO).not.toBeNull();
     for (const item of selectionCases) {
       const original = w.run(() => f.records.get(view(item.card).operationId));
@@ -508,7 +523,7 @@ it("projects and enforces the shared file reservation without blocking duplicate
       expect(view(current).allowedActions).not.toContain("settings_confirm");
       // Send the valid permission/revision read before the competing I/O.
       // The actual guard must still reject it; the UI projection is not a lock.
-      const input = item.action === "settings_select" ? { action: item.action, draft: { kind: "export_local_data" } }
+      const input = item.action === "settings_select" ? { action: item.action, draft: { kind: "clear_read_address" } }
         : item.action === "settings_cancel" ? { action: item.action } : { action: item.action, operationId: original!.operationId };
       expect((await f.act(item.card, input)).error?.code).toBe("card_conflict");
       expect(w.run(() => f.records.get(original!.operationId))).toEqual(original);
@@ -540,7 +555,7 @@ it("projects and enforces the shared file reservation without blocking duplicate
 
     for (const item of selectionCases) {
       const current = await f.read(item.card); expect(view(current).allowedActions).toContain(item.action);
-      const input = item.action === "settings_select" ? { action: item.action, draft: { kind: "export_local_data" } }
+      const input = item.action === "settings_select" ? { action: item.action, draft: { kind: "clear_read_address" } }
         : item.action === "settings_cancel" ? { action: item.action } : { action: item.action, operationId: view(current).operationId };
       expect((await f.act(current, input)).error).toBeUndefined();
     }
@@ -556,14 +571,14 @@ it("projects and enforces the shared file reservation without blocking duplicate
 it("projects a valid backup as unavailable while another final operation owns the slot, without consuming its input", async () => {
   const f = await fixture(), entered = deferred<void>(), release = deferred<void>();
   const raw = Buffer.from(JSON.stringify(await f.wallet.run(() => f.localData.exportLocalData())));
-  const imported = await uploadBackup(f, raw), publish = f.files.publishExport.bind(f.files);
+  const imported = await uploadBackup(f, raw), publish = f.files.createDownload.bind(f.files);
   expect(view(imported).restoreCheck).toEqual({ status: "can_restore" });
-  vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => {
+  vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => {
     entered.resolve(); await release.promise; return publish(...args);
   });
-  const exported = await f.prepare({ kind: "export_local_data" });
+  const exported = await f.create();
   try {
-    await f.confirm(exported); await entered.promise;
+    await f.download(exported); await entered.promise;
     expect(view(await f.read(imported)).restoreCheck).toMatchObject({ status: "cannot_restore", reason: "operation_busy" });
     expect((await f.confirm(imported)).error?.code).toBe("card_conflict");
     expect(f.wallet.run(() => f.wallet.cardRecords.get(imported.snapshot.cardId)!.acceptedInput)).toBeUndefined();
@@ -713,19 +728,19 @@ it.each(["sdk", "parent", "submit", "lookup", "initial_window"].flatMap((boundar
   } finally { release.resolve(); }
 });
 
-it("preserves exact completed Settings and transaction reads while an unrelated export result remains unwritable", async () => {
+it("preserves exact completed Settings and transaction reads while an unrelated download result remains unwritable", async () => {
   const f = await fixture(), w = f.wallet;
   const own = await f.prepare({ kind: "clear_read_address" }), ownResult = view(await f.confirm(own)).result;
   const { connection } = await w.approve(), ready = await w.prepare(connection.connectionId);
   await w.act(ready.card, { action: "request_signature", connectionId: connection.connectionId, account: w.account, reviewRevision: ready.session.reviewRevision });
   await vi.waitFor(() => expect(w.run(() => w.records.currentRequest(ready.session.id)?.requestStatus)).toBe("completed"));
   const completed = await w.read(ready.card);
-  const other = await f.prepare({ kind: "export_local_data" }), otherId = view(other).operationId;
-  const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => db.close());
-  db.exec(`CREATE TRIGGER reject_other_result BEFORE UPDATE ON settings_operations WHEN NEW.operation_id='${otherId}' AND NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'unrelated export result refused'); END`);
-  await f.confirm(other);
-  await vi.waitFor(async () => expect((await readFile(join(w.directory, "backups", `${otherId}.json`))).length).toBeGreaterThan(0));
-  await expect(f.read(other)).rejects.toThrow("unrelated export result refused");
+  const other = await f.create(), otherId = view(other).operationId;
+  const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => { db.close(); });
+  db.exec(`CREATE TRIGGER reject_other_result BEFORE UPDATE ON settings_operations WHEN NEW.operation_id='${otherId}' AND NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'unrelated download result refused'); END`);
+  await f.download(other);
+  await vi.waitFor(async () => expect((await readFile(downloadPath(f, other))).length).toBeGreaterThan(0));
+  await expect(f.read(other)).rejects.toThrow("unrelated download result refused");
   const overview = await f.create();
   expect(overview.error).toBeUndefined();
   expect(view(await f.read(overview)).facts).toMatchObject({ walletAvailability: { status: "available" },
@@ -733,16 +748,16 @@ it("preserves exact completed Settings and transaction reads while an unrelated 
   expect(view(await f.read(own)).result).toEqual(ownResult);
   expect((await w.read(ready.card)).snapshot).toEqual(completed.snapshot);
   expect(await w.run(() => w.activity.getActiveAccount())).toMatchObject({ address: w.account });
-  await expect(f.read(other)).rejects.toThrow("unrelated export result refused");
+  await expect(f.read(other)).rejects.toThrow("unrelated download result refused");
   db.exec("DROP TRIGGER reject_other_result"); expect(view(await f.read(other)).result?.outcome).toBe("completed");
   expect(w.submit).toHaveBeenCalledOnce();
 });
 
-it.each([-1, 0, 1])("admits an unsubmitted Settings confirmation only before its declared input deadline (%s ms)", async (offset) => {
-  const f = await fixture(), prepared = await f.prepare({ kind: "export_local_data" });
-  const publish = vi.spyOn(f.files, "publishExport");
+it.each([-1, 0, 1])("admits a single-step download only before its declared input deadline (%s ms)", async (offset) => {
+  const f = await fixture(), prepared = await f.create();
+  const publish = vi.spyOn(f.files, "createDownload");
   f.wallet.advance(Date.parse(prepared.snapshot.expiresAt) - f.wallet.now().getTime() + offset);
-  const response = await f.confirm(prepared);
+  const response = await f.download(prepared);
   if (offset < 0) {
     await vi.waitFor(async () => expect(view(await f.read(prepared)).result?.outcome).toBe("completed"));
     expect(publish).toHaveBeenCalledOnce();
@@ -753,17 +768,17 @@ it.each([-1, 0, 1])("admits an unsubmitted Settings confirmation only before its
   }
 });
 
-it("keeps an admitted export's result lifetime beyond input expiration without repeating publication", async () => {
-  const f = await fixture(), entered = deferred<void>(), release = deferred<void>(), publish = f.files.publishExport.bind(f.files);
-  const observed = vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+it("keeps an admitted download's result lifetime beyond input expiration without creating another snapshot", async () => {
+  const f = await fixture(), entered = deferred<void>(), release = deferred<void>(), publish = f.files.createDownload.bind(f.files);
+  const observed = vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
   try {
-    const card = await f.prepare({ kind: "export_local_data" }); await f.confirm(card); await entered.promise;
+    const card = await f.create(), attemptId = randomUUID(); await f.download(card, attemptId); await entered.promise;
     f.wallet.advance(Date.parse(card.snapshot.expiresAt) - f.wallet.now().getTime() + 1);
     const current = await f.read(card); expect(view(current)).toMatchObject({ phase: "executing", observe: true });
     expect(view(current).allowedActions).toEqual([]); expect(current.snapshot.state).toBe("running");
-    await f.confirm(card); expect(observed).toHaveBeenCalledOnce();
+    await f.download(card, attemptId); expect(observed).toHaveBeenCalledOnce();
     release.resolve(); await vi.waitFor(async () => expect(view(await f.read(card)).result?.outcome).toBe("completed"));
-    await f.confirm(card); expect(observed).toHaveBeenCalledOnce();
+    await f.download(card, attemptId); expect(observed).toHaveBeenCalledOnce();
   } finally { release.resolve(); }
 });
 
@@ -899,16 +914,16 @@ it.each([false, true])("preserves the restart cause for a prepared Review or lat
   } finally { release.resolve(); }
 });
 
-it.each(["clear", "grpc", "graphql", "reset", "import"])("keeps one final operation while export I/O is active and accepts the valid %s confirmation after completion", async (kind) => {
-  const f = await fixture(), entered = deferred<void>(), release = deferred<void>(), publish = f.files.publishExport.bind(f.files);
-  vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+it.each(["clear", "grpc", "graphql", "reset", "import"])("keeps one final operation while snapshot I/O is active and accepts the valid %s confirmation after completion", async (kind) => {
+  const f = await fixture(), entered = deferred<void>(), release = deferred<void>(), publish = f.files.createDownload.bind(f.files);
+  vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
   try {
     const other = kind === "import" ? await uploadBackup(f, Buffer.from(JSON.stringify(await f.wallet.run(() => f.localData.exportLocalData(f.wallet.now())))))
       : kind === "reset" ? await f.prepare({ kind: "reset_local_data" })
       : kind === "grpc" || kind === "graphql" ? await f.prepare({ kind: "restore_endpoint", endpoint: kind })
       : await f.prepare({ kind: "clear_read_address" });
-    const exporting = await f.prepare({ kind: "export_local_data" });
-    await f.confirm(exporting); await entered.promise;
+    const exporting = await f.create();
+    await f.download(exporting); await entered.promise;
     const control = f.wallet.run(() => f.records.control());
     expect(control.active_operation_id).toBe(view(exporting).operationId); expect(control.file_io_id).not.toBeNull();
     expect((await f.confirm(other)).error?.code).toBe("card_conflict");
@@ -1002,7 +1017,7 @@ it.each(["connect", "signature"] as const)("rolls actual %s admission back when 
   const target = kind === "signature" ? await w.approve() : undefined;
   const ready = target ? await w.prepare(target.connection.connectionId) : undefined;
   const card = ready?.card ?? await w.createConnection(), restart = await f.prepare({ kind: "restart_wallet_service" });
-  const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => db.close());
+  const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => { db.close(); });
   const expectedPreparation = view(restart).preparationId, id = restart.snapshot.cardId;
   const input = kind === "connect" ? { action: "connect" } : { action: "request_signature", connectionId: target!.connection.connectionId,
     account: w.account, reviewRevision: ready!.session.reviewRevision };
@@ -1057,7 +1072,7 @@ it.each(["reset", "import"] as const)("rolls back %s replacement and its authori
   const prepared = kind === "reset" ? await f.prepare({ kind: "reset_local_data" }) : await uploadBackup(f, incoming);
   const prior = await f.wallet.run(() => f.localData.exportLocalData(f.wallet.now()));
   const other = await f.create(), changed = vi.spyOn(f.localData, "notifyDataReplaced");
-  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => db.close());
+  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => { db.close(); });
   db.exec("CREATE TRIGGER reject_replacement_result BEFORE UPDATE ON settings_operations WHEN NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'replacement result refused'); END");
   await expect(f.confirm(prepared)).rejects.toThrow("replacement result refused");
   expect(f.wallet.run(() => f.records.control())).toMatchObject({ data_epoch: 0, active_operation_id: null });
@@ -1222,20 +1237,22 @@ it.each(["grpc", "graphql"] as const)("binds %s set/restore preparation to its a
   expect(endpoint === "grpc" ? current.suiGrpcUrl.effectiveValue : current.suiGraphqlUrl.effectiveValue).toBe(override);
 });
 
-it("retries only its own known-ended I/O on completed reads, without replaying export or blocking the saved result", async () => {
+it("retries only its own known-ended I/O on completed reads, without replaying download or blocking the saved result", async () => {
   const f = await fixture(), unrelated = await f.prepare({ kind: "clear_read_address" }); await f.confirm(unrelated);
-  const prepared = await f.prepare({ kind: "export_local_data" });
-  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => db.close());
+  const prepared = await f.create(); await f.download(prepared);
+  const ready = await downloadReady(f, prepared), path = downloadPath(f, prepared);
+  const bytes = await readFile(path);
+  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => { db.close(); });
   db.exec(`CREATE TRIGGER reject_finished_release BEFORE UPDATE ON settings_control
     WHEN OLD.file_io_id IS NOT NULL AND NEW.file_io_id IS NULL AND EXISTS (
       SELECT 1 FROM settings_files f JOIN settings_operations o ON o.operation_id=f.cleanup_operation_id
       WHERE f.file_id=OLD.file_io_id AND o.phase='terminal') BEGIN SELECT RAISE(ABORT,'I/O release refused'); END`);
-  const publish = vi.spyOn(f.files, "publishExport");
-  await f.confirm(prepared);
+  const publish = vi.spyOn(f.files, "createDownload");
+  await expect(f.act(ready, downloadReport(ready))).rejects.toThrow("I/O release refused");
   await vi.waitFor(() => expect(f.wallet.run(() => f.records.file(f.records.get(view(prepared).operationId)!.fileId!)?.cleanup)).toBe("complete"));
   const completed = await f.read(prepared), result = view(completed).result!;
   expect(view(completed).temporaryFileCleanup).toBe("pending");
-  const bytes = await readFile(String(result.details!.path));
+  expect(createHash("sha256").update(bytes).digest("hex")).toBe(result.details!.sha256);
   const fileId = f.wallet.run(() => f.records.control().file_io_id);
   expect(view(await f.read(unrelated)).result?.outcome).toBe("completed");
   expect(f.wallet.run(() => f.records.control().file_io_id)).toBe(fileId);
@@ -1248,7 +1265,7 @@ it("retries only its own known-ended I/O on completed reads, without replaying e
   const settled = await f.read(prepared);
   expect(view(settled)).toMatchObject({ result, temporaryFileCleanup: "complete" });
   expect(f.wallet.run(() => f.records.control().file_io_id)).toBeNull();
-  expect(await readFile(String(result.details!.path))).toEqual(bytes); expect(publish).toHaveBeenCalledOnce();
+  await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" }); expect(publish).not.toHaveBeenCalled();
   const next = await f.prepare({ kind: "clear_read_address" }); expect(view(await f.confirm(next)).result?.outcome).toBe("completed");
   expect(f.wallet.connect).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
 });
@@ -1278,7 +1295,10 @@ it("does not release a terminal operation's I/O while physical cleanup is still 
   const f = await fixture(), entered = deferred<void>(), release = deferred<void>();
   const cleanup = f.files.cleanup.bind(f.files);
   vi.spyOn(f.files, "cleanup").mockImplementationOnce(async (file) => { entered.resolve(); await release.promise; await cleanup(file); });
-  const prepared = await f.prepare({ kind: "export_local_data" }); await f.confirm(prepared); await entered.promise;
+  const prepared = await f.create(); await f.download(prepared);
+  const ready = await downloadReady(f, prepared), reported = f.act(ready, downloadReport(ready));
+  try {
+  await entered.promise;
   const fileId = f.wallet.run(() => f.records.control().file_io_id);
   expect(fileId).not.toBeNull();
   const running = await f.read(prepared);
@@ -1287,6 +1307,7 @@ it("does not release a terminal operation's I/O while physical cleanup is still 
   release.resolve();
   await vi.waitFor(async () => expect(view(await f.read(prepared)).temporaryFileCleanup).toBe("complete"));
   expect(f.wallet.run(() => f.records.control().file_io_id)).toBeNull();
+  } finally { release.resolve(); await reported; }
 });
 
 it("stores a verified endpoint and its result together; duplicate confirmation does not repeat validation", async () => {
@@ -1334,7 +1355,7 @@ it("retains reset's own result and credential as read-only after replacing other
 
 it("rolls back endpoint and admission if saving its result fails", async () => {
   const f = await fixture(), prepared = await f.prepare({ kind: "set_endpoint", endpoint: "grpc", value: "https://requested.example:443" });
-  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => db.close());
+  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => { db.close(); });
   db.exec("CREATE TRIGGER reject_settings_result BEFORE UPDATE ON settings_operations WHEN NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'result storage refused'); END");
   await expect(f.confirm(prepared)).rejects.toThrow("result storage refused");
   expect(await f.wallet.run(() => f.preferences.getSuiGrpcUrl())).toMatchObject({ value: "https://fullnode.mainnet.sui.io:443" });
@@ -1342,22 +1363,22 @@ it("rolls back endpoint and admission if saving its result fails", async () => {
   expect(f.wallet.run(() => f.wallet.cardRecords.get(prepared.snapshot.cardId)?.acceptedInput)).toBeUndefined();
 });
 
-it("exports one full local backup; repeated confirmation and file reads do not create another", async () => {
-  const f = await fixture(); const prepared = await f.prepare({ kind: "export_local_data" });
-  await f.confirm(prepared);
+it("prepares one full download snapshot; repeated admission and file reads do not create another", async () => {
+  const f = await fixture(); const prepared = await f.create(), attemptId = randomUUID();
+  await f.download(prepared, attemptId);
   let completed = await f.read(prepared);
   await vi.waitFor(async () => { completed = await f.read(prepared); expect(view(completed).result?.outcome).toBe("completed"); });
   const details = view(completed).result!.details!;
-  const data = await readFile(String(details.path));
+  const data = await readFile(downloadPath(f, prepared));
   const parsed = JSON.parse(data.toString("utf8"));
   expect(parsed).toMatchObject({ format: "sui-mcp.local-data", network: "mainnet" });
   expect(parsed).not.toHaveProperty("schemaVersion");
   expect(parsed.data).toHaveProperty("localSettings"); expect(JSON.stringify(parsed)).not.toContain(prepared.permission);
   const ownRecord = f.wallet.run(() => f.wallet.cardRecords.get(prepared.snapshot.cardId))!;
-  const range = await f.wallet.run(() => f.settings.readFile(ownRecord, String(details.fileId), 0, data.length));
+  const range = await f.wallet.run(() => f.settings.readFile(ownRecord, String(details.fileId), 0, data.length, attemptId));
   expect(Buffer.from(range.chunkBase64, "base64")).toEqual(data);
   expect(createHash("sha256").update(data).digest("hex")).toBe(details.sha256);
-  expect((await f.confirm(prepared)).snapshot).toEqual(completed.snapshot);
+  expect((await f.download(prepared, attemptId)).snapshot).toEqual(completed.snapshot);
 });
 
 it("automatically checks the same resumed upload without endpoint contact or extending input lifetime, then applies once", async () => {
@@ -1408,14 +1429,14 @@ it("rejects a changed duplicate upload chunk without overwriting the original by
   expect(await readFile(join(f.wallet.directory, ".settings-staging", `${fileId}.upload`))).toEqual(bytes);
 });
 
-it("preserves a physically published export across result storage failure without repeating file publication", async () => {
-  const f = await fixture(), prepared = await f.prepare({ kind: "export_local_data" });
-  const publish = vi.spyOn(f.files, "publishExport");
-  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => db.close());
+it("preserves a physically prepared snapshot across result storage failure without repeating file creation", async () => {
+  const f = await fixture(), prepared = await f.create();
+  const publish = vi.spyOn(f.files, "createDownload");
+  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => { db.close(); });
   db.exec("CREATE TRIGGER reject_export_result BEFORE UPDATE ON settings_operations WHEN NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'export result refused'); END");
-  await f.confirm(prepared);
+  await f.download(prepared);
   await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
-  const path = join(f.wallet.directory, "backups", `${view(prepared).operationId}.json`);
+  const path = downloadPath(f, prepared);
   await vi.waitFor(async () => expect((await readFile(path)).length).toBeGreaterThan(0));
   await expect(f.read(prepared)).rejects.toThrow("export result refused");
   db.exec("DROP TRIGGER reject_export_result");
@@ -1424,10 +1445,11 @@ it("preserves a physically published export across result storage failure withou
   expect(publish).toHaveBeenCalledOnce();
 });
 
-it.each(["upload", "export"] as const)("keeps replacement cleanup of an old %s with its own result and preserves the file identity", async (role) => {
+it.each(["upload", "download"] as const)("keeps replacement cleanup of an old %s with its own result and preserves the file identity", async (role) => {
   const f = await fixture(), bytes = Buffer.from("{}");
   await f.wallet.run(() => f.wallet.activity.setActiveAccount(`0x${"a".repeat(64)}`, "wallet_connection", f.wallet.now()));
-  let previous = await f.create(), fileId: string, operationId: string, publicPath: string | undefined, publicBytes: Buffer | undefined;
+  let previous = await f.create(), fileId: string, operationId: string, publicPath = join(f.wallet.directory, "backups", "previous-user-backup.json"), publicBytes = Buffer.from("existing user backup");
+  await mkdir(join(f.wallet.directory, "backups"), { recursive: true }); await writeFile(publicPath, publicBytes);
   if (role === "upload") {
     const permission = previous.permission;
     const call = async (input: Record<string, unknown>) => { previous = { ...await f.act(previous, input), permission }; expect(previous.error).toBeUndefined(); };
@@ -1438,18 +1460,15 @@ it.each(["upload", "export"] as const)("keeps replacement cleanup of an old %s w
     await call({ action: "settings_upload_chunk", operationId, fileId, offset: 0, chunkBase64: bytes.toString("base64") });
     await call({ action: "settings_seal_upload", operationId, fileId });
   } else {
-    previous = await f.prepare({ kind: "export_local_data" }); await f.confirm(previous);
+    previous = await f.create(); await f.download(previous);
     let complete = await f.read(previous);
     await vi.waitFor(async () => { complete = await f.read(previous); expect(view(complete).result?.outcome).toBe("completed"); });
     operationId = view(previous).operationId; fileId = view(complete).file!.fileId;
-    publicPath = String(view(complete).result!.details!.path); publicBytes = await readFile(publicPath);
-    // Seed an unfinished private-stage journal, not another export or altered
-    // public backup. Reset must own this cleanup as well as upload cleanup.
-    f.wallet.run(() => f.records.writeFile({ ...f.records.file(fileId)!, cleanup: "pending" }));
+
   }
-  const path = join(f.wallet.directory, ".settings-staging", `${fileId}.${role === "upload" ? "upload" : "stage"}`);
+  const path = join(f.wallet.directory, ".settings-staging", `${fileId}.${role === "upload" ? "upload" : "download"}`);
   const retained = join(f.wallet.directory, "retained-test-upload");
-  if (role === "upload") await rename(path, retained);
+  await rename(path, retained);
   // A directory at the recorded temporary-file path makes the real unlink fail.
   // The filesystem and cleanup implementation are not replaced by a test double.
   await mkdir(path);
@@ -1461,7 +1480,7 @@ it.each(["upload", "export"] as const)("keeps replacement cleanup of an old %s w
   await expect(f.read(previous)).rejects.toThrow("access is unavailable");
   expect(f.wallet.run(() => f.records.file(fileId))).toMatchObject({ operationId, cleanupOperationId: view(reset).operationId });
   const epoch = f.wallet.run(() => f.records.control().data_epoch);
-  await rmdir(path); if (role === "upload") await rename(retained, path);
+  await rmdir(path); await rename(retained, path);
   expect(view(await f.read(reset))).toMatchObject({ result: { outcome: "completed" }, temporaryFileCleanup: "complete" });
   expect(f.wallet.run(() => f.records.file(fileId)?.cleanup)).toBe("complete");
   await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
@@ -1470,15 +1489,16 @@ it.each(["upload", "export"] as const)("keeps replacement cleanup of an old %s w
 });
 
 it("releases only a departed owner's terminal I/O reservation without changing its completed result", async () => {
-  const f = await fixture(), prepared = await f.prepare({ kind: "export_local_data" });
-  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => db.close());
+  const f = await fixture(), prepared = await f.create();
+  await f.download(prepared); const ready = await downloadReady(f, prepared);
+  const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => { db.close(); });
   const operationId = view(prepared).operationId;
   db.exec(`CREATE TRIGGER reject_finished_release BEFORE UPDATE ON settings_control
     WHEN OLD.file_io_id IS NOT NULL AND NEW.file_io_id IS NULL AND EXISTS (
       SELECT 1 FROM settings_files f JOIN settings_operations o ON o.operation_id=f.cleanup_operation_id
       WHERE f.file_id=OLD.file_io_id AND o.phase='terminal')
     BEGIN SELECT RAISE(ABORT,'I/O release refused'); END`);
-  await f.confirm(prepared);
+  await expect(f.act(ready, downloadReport(ready))).rejects.toThrow("I/O release refused");
   await vi.waitFor(() => {
     const operation = f.wallet.run(() => f.records.get(operationId)!);
     expect(operation.phase).toBe("terminal");

@@ -1243,13 +1243,20 @@ API or compatibility alias. A client without internal cards receives
 `ui_unavailable`; ordinary model calls never apply a Settings change.
 
 Settings groups Address for viewing assets, Local records, Troubleshooting and Advanced
-settings. Final operations are `clear_read_address`, `set_endpoint`,
-`restore_endpoint` (gRPC or GraphQL), `export_local_data`, `import_local_data`,
-`reset_local_data` and `restart_wallet_service`. User preparation and confirmation
-use app-only `ui.act_card` with card permission, revision, operation identity
-and the exact preparation identity. Choosing or previewing does not apply data,
-contact a wallet or restart the SDK. The same confirmation returns the same
-admitted result; MCP JSON-RPC request IDs do not authorize another operation.
+settings. Confirmed changes are `clear_read_address`, `set_endpoint`,
+`restore_endpoint` (gRPC or GraphQL), `import_local_data`, `reset_local_data`
+and `restart_wallet_service`. Their preparation and confirmation use app-only
+`ui.act_card` with card permission, revision, operation identity and the exact
+preparation identity. Choosing or checking data does not apply it, contact a
+wallet or restart the SDK. Duplicate confirmation returns the same admitted
+result; MCP JSON-RPC request IDs do not authorize another operation.
+
+Download backup uses one `settings_download_backup` action with `operationId`
+and an `attemptId` UUID, admitted atomically through the same scoped card input.
+It creates a `download_backup` operation and one immutable snapshot. It requires
+no separate selection, preparation or confirmation action. The same admitted
+start returns the same request; a different start cannot replace it. New
+`export_local_data` selection/preparation/confirmation is not accepted.
 
 The card uses plain-language display labels without changing wire fields or
 enums. Wallet-service `available`, `initializing`, `recovering` and `unavailable`
@@ -1292,10 +1299,22 @@ selection requires no separate Preview action. A failed check preserves its
 current file/operation identity and correction path. Owner replacement ends old
 input; a new card must receive a new explicit file selection.
 
-A completed export provides `data.backupLocation.directory` and
-`data.backupLocation.filename` from its recorded native path. These describe the
-created local file, independently of the Host's optional download capability.
-Download acknowledgment is not proof of a save location or delivery.
+A download's `result.completionScope: "backup_snapshot"` identifies the immutable
+preparation result, not a saved user file. `data.download` separately carries
+`availability` (`preparing`, `available`, `ended`), `currentAttemptId`, an optional
+`hostReport` (`acknowledged`, `not_completed`, `unconfirmed`), `previousUnconfirmed`,
+`expiresAt`, `remainingMs`, `endReason` and `allowedFileActions`. End reasons are
+`acknowledged`, `cancelled`, `expired`, `server_restarted`, `data_replaced` or
+`source_unavailable`. Replacement revokes the old card rather than preserving
+its input. The transfer period is thirty minutes from physical readiness;
+reads/retries never extend it or reopen the original business-input deadline.
+Raw per-attempt preparation is not copied into public `preparation`.
+
+New download results contain no server Folder/path. Their file name is a
+suggestion for Host saving. A recorded `export_local_data` result can provide
+`data.backupLocation.directory` and `filename` describing its existing local
+file. Those fields do not identify a Host download destination. Existing user
+files are never deleted by private snapshot cleanup.
 
 Current `data.facts` uses the same connection selection and qualification rules
 as interaction status, through a fact reader that does not settle another
@@ -1316,19 +1335,22 @@ Neither service availability nor an absent flag establishes account authority
 or proves that no SDK session exists.
 
 `data.phase` is `draft`, `uploading`, `sealed`, `prepared`, `executing`,
-`stopping`, `starting` or `terminal`. `allowedActions` is backend authority;
+`stopping`, `starting` or `terminal`. `allowedActions` lists permitted business input;
 `observe` permits reading the existing operation only. Known file-I/O and final-slot
 conditions affect the offered actions; final admission rechecks them atomically.
 Local section navigation and Resume do not call `settings_back` or change stored
 preparation. Check status reads the same card when a change is temporarily
-unavailable and never retries the earlier action. Public fields include
+unavailable and never repeats a business action or Host download. After a
+successful read, an already received but unrecorded download report can be
+recorded idempotently without resending bytes. Public fields include
 `operationId`, `draft`, preparation identity/impact, file ID/name/length/hash,
 `priorRunId`, `nextRunId`, supersession links and a recorded result. Results use
 `completed`, `failed`, `interrupted` or `superseded`. Completion describes that
 local operation, not a transaction's chain outcome. Optional
 `temporaryFileCleanup` separately reports `pending`, `failed` or `complete`;
-reading/checking it never repeats data replacement, backup creation or SDK
-replacement. Public fields contain no raw file, transaction bytes, signatures,
+reading/checking it never repeats data replacement, backup creation, Host delivery or SDK
+replacement. Terminal business input remains closed; only the separate scoped
+file continuations in `data.download.allowedFileActions` may remain available. Public fields contain no raw file, transaction bytes, signatures,
 SDK credentials or card permission.
 
 A user-data writer invalidates its affected prepared confirmation atomically.
@@ -1371,19 +1393,36 @@ mainnet and stores that target. Its result captures `effectiveValueAtSave` and
 An environment override continues to take precedence after restart while it
 remains set; storing an endpoint does not modify that environment.
 
-Export creates one full local backup at a backend-generated path using durable,
-exclusive publication. A response/storage failure never creates another file.
-`ui.read_settings_file` is app-only and binds card/permission, operation, file,
-offset and verified hash/length. Its ordinary content gives range metadata;
-Base64 bytes appear only in `sui-mcp/settings-file` UI metadata. Host delivery is
-explicit and uses the same complete artifact. An acknowledged download request
-is not proof of a save location. `isError` does not distinguish cancellation,
-denial or failure; an unknown reply is unconfirmed, not successful delivery.
-Reset and temporary-file cleanup never truncate or delete a published backup.
-Its recorded path is not a guarantee that the file still exists or is unchanged:
-each delivery re-reads and verifies it before contacting the Host. Verification
-failure sends nothing; an acknowledged, failed or unknown Host reply describes
-only delivery of the already verified bytes, not current file persistence.
+Download creates and verifies one private snapshot with an exclusive generated
+file identity. It does not publish a second permanent backup. Response or result
+storage failure never regenerates that snapshot. `ui.read_settings_file` is
+app-only and binds card/permission, operation, file, offset, verified hash/length
+and the current `attemptId` for a private download. Its ordinary content carries
+range metadata; Base64 bytes appear only in `sui-mcp/settings-file` UI metadata.
+The View checks the complete hash before standard Host delivery.
+
+File continuations also use app-only `ui.act_card`:
+
+- `settings_retry_download`: `operationId`, `fileId`, `previousAttemptId` and a
+  new `attemptId`; atomically advances one attempt on the same live snapshot.
+- `settings_report_download`: `operationId`, `fileId`, `attemptId` and `status`
+  (`acknowledged`, `not_completed`, `unconfirmed`); the same report is idempotent,
+  and conflicting reports for one attempt are rejected. A late older report
+  cannot change the current attempt or end its retention.
+- `settings_cancel_download`: `operationId`, `fileId` and `attemptId`; ends
+  further delivery of that snapshot, not a Host dialog or a user-saved file.
+
+These actions validate current owner, epoch, credential and exact file/attempt
+identity independently of terminal business input. Retry/read requires a live
+transfer period. A late report can record a fact after that period ends but
+cannot restore the file or authority. Host acknowledgment ends retention and
+requests cleanup; it does not prove a save location or completed disk storage.
+`isError` does not distinguish cancellation, denial or failure. A lost response
+is unconfirmed and never triggers automatic retransmission. Cleanup failure is
+reported separately and is retried through Check status or owner recovery.
+A missing or changed source ends that private transfer; a new explicit request
+is required. An existing public backup is verified on the same descriptor used
+for each range and is never truncated or removed by temporary cleanup.
 
 Troubleshooting recovery confirms a precise SDK run and affected unsubmitted
 requests. Admission revokes their submission authority before stopping the old

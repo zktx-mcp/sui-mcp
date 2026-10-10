@@ -13,7 +13,7 @@ import { WorkflowConflict } from "./sqliteWalletWorkflowStore.js";
 import { parseWorkflowAction } from "./workflowView.js";
 import { randomUUID } from "node:crypto";
 import type { SettingsWorkflow } from "./settingsWorkflow.js";
-import { settingsActionSchema, SettingsConflict } from "./settingsOperation.js";
+import { settingsActionSchema, isSettingsDownloadFileAction, SettingsConflict } from "./settingsOperation.js";
 import { settingsInputError } from "./settingsInputError.js";
 
 
@@ -76,11 +76,11 @@ export class CardStore {
     return { ...result, permission: token };
   }
   async read(input: CardReference): Promise<CardResponse> { return this.describe(this.require(input), true); }
-  async readSettingsFile(input: CardReference & { operationId: string; fileId: string; offset: number }, limit: number) {
+  async readSettingsFile(input: CardReference & { operationId: string; fileId: string; offset: number; attemptId?: string | undefined }, limit: number) {
     const record = this.require(input);
     if (record.state.kind !== "settings" || !this.options.settings) throw new CardError("This card does not provide a backup file.");
     if (record.operationId !== input.operationId) throw new CardError("This backup does not match the Settings operation.");
-    return this.options.settings.readFile(record, input.fileId, input.offset, limit);
+    return this.options.settings.readFile(record, input.fileId, input.offset, limit, input.attemptId);
   }
   async readSaved(cardId: string): Promise<CardSnapshot> { return (await this.describe(this.current(cardId), false)).snapshot; }
   private async describe(record: CardRecord, uiObservation: boolean): Promise<CardResponse> {
@@ -109,8 +109,8 @@ export class CardStore {
       if (!this.options.settings) throw new CardError("Settings cards are unavailable.");
       const parsed = settingsActionSchema.safeParse(input.input);
       if (!parsed.success) return { ...await this.describe(record, false), error: { code: "invalid_card_input", message: "This Settings action is not valid." } };
-      if (parsed.data.action === "settings_confirm" && record.acceptedInput !== undefined && isDeepStrictEqual(record.acceptedInput, parsed.data)) return this.describe(record, false);
-      if (input.revision !== record.state.revision) return { ...await this.describe(record, false), error: { code: "card_conflict", message: "This Settings selection changed. Review the current selection before continuing." } };
+      if ((parsed.data.action === "settings_confirm" || parsed.data.action === "settings_download_backup") && record.acceptedInput !== undefined && isDeepStrictEqual(record.acceptedInput, parsed.data)) return this.describe(record, false);
+      if (input.revision !== record.state.revision && !isSettingsDownloadFileAction(parsed.data)) return { ...await this.describe(record, false), error: { code: "card_conflict", message: "This Settings selection changed. Review the current selection before continuing." } };
       const kind = parsed.data.action === "settings_select" ? parsed.data.draft.kind : this.options.settings.operationKind(record);
       try { await this.options.settings.act(record, parsed.data); }
       catch (error) {

@@ -24,10 +24,32 @@ export const storedRestoreCheckSchema = z.object({ fileId: identity, sha256, tot
 export const settingsDraftSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("set_endpoint"), endpoint: z.enum(["grpc", "graphql"]), value: z.string().min(1) }).strict(),
   z.object({ kind: z.literal("restore_endpoint"), endpoint: z.enum(["grpc", "graphql"]) }).strict(),
-  z.object({ kind: z.enum(["clear_read_address", "export_local_data", "import_local_data", "reset_local_data", "restart_wallet_service"]) }).strict()
+  z.object({ kind: z.enum(["clear_read_address", "export_local_data", "download_backup", "import_local_data", "reset_local_data", "restart_wallet_service"]) }).strict()
 ]);
 export type SettingsDraft = z.infer<typeof settingsDraftSchema>;
+export const settingsDownloadReportSchema = z.enum(["acknowledged", "not_completed", "unconfirmed"]);
+export const settingsDownloadEndSchema = z.enum(["acknowledged", "cancelled", "expired", "server_restarted", "data_replaced", "source_unavailable"]);
+export const storedSettingsDownloadSchema = z.object({
+  currentAttemptId: identity,
+  attempts: z.array(z.object({ attemptId: identity, admittedAt: z.string().datetime(), previousAttemptId: identity.optional(),
+    hostReport: settingsDownloadReportSchema.optional() }).strict()).min(1),
+  readyAt: z.string().datetime().optional(), expiresAt: z.string().datetime().optional(), endReason: settingsDownloadEndSchema.optional()
+}).strict().superRefine((value, context) => {
+  if (new Set(value.attempts.map((attempt) => attempt.attemptId)).size !== value.attempts.length ||
+      !value.attempts.some((attempt) => attempt.attemptId === value.currentAttemptId) ||
+      (value.readyAt === undefined) !== (value.expiresAt === undefined)) {
+    context.addIssue({ code: "custom", message: "Download attempts and lifetime must identify one stored snapshot." });
+  }
+});
+export type SettingsDownload = z.infer<typeof storedSettingsDownloadSchema>;
+export const settingsDownloadFileActionSchema = z.enum(["settings_retry_download", "settings_report_download", "settings_cancel_download"]);
 export const settingsActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("settings_download_backup"), operationId: identity, attemptId: identity }).strict(),
+  z.object({ action: z.literal("settings_retry_download"), operationId: identity, fileId: identity,
+    previousAttemptId: identity, attemptId: identity }).strict(),
+  z.object({ action: z.literal("settings_report_download"), operationId: identity, fileId: identity,
+    attemptId: identity, status: settingsDownloadReportSchema }).strict(),
+  z.object({ action: z.literal("settings_cancel_download"), operationId: identity, fileId: identity, attemptId: identity }).strict(),
   z.object({ action: z.literal("settings_select"), draft: settingsDraftSchema }).strict(),
   z.object({ action: z.literal("settings_prepare"), operationId: identity }).strict(),
   z.object({ action: z.literal("settings_begin_upload"), operationId: identity,
@@ -46,6 +68,7 @@ export type SettingsResult = {
   recordedAt: string;
   message: string;
   details?: Record<string, unknown> | undefined;
+  completionScope?: "backup_snapshot" | undefined;
 };
 export type SettingsOperation = {
   operationId: string; cardId: string; ownerId: string; dataEpoch: number;
@@ -90,7 +113,7 @@ export class SettingsConflict extends Error {}
 
 export const settingsResultSchema: z.ZodType<SettingsResult> = z.object({
   outcome: z.enum(["completed", "failed", "interrupted", "superseded"]), recordedAt: z.string().datetime(),
-  message: z.string().min(1), details: z.record(z.string(), z.unknown()).optional()
+  message: z.string().min(1), details: z.record(z.string(), z.unknown()).optional(), completionScope: z.literal("backup_snapshot").optional()
 }).strict();
 const endpointView = z.object({ storedValue: z.string(), effectiveValue: z.string(),
   source: z.enum(["environment", "local_db", "builtin_default"]), pendingStoredValue: z.string().optional(),
@@ -113,6 +136,10 @@ export const settingsViewSchema = z.object({
   draft: settingsDraftSchema.optional(), preparationId: identity.optional(), preparation: z.record(z.string(), z.unknown()).optional(),
   file: z.object({ fileId: identity, displayName: z.string(), totalSize: size, receivedSize: size, sha256,
     sealed: z.boolean(), cleanup: z.enum(["pending", "complete", "failed"]) }).strict().optional(),
+  download: z.object({ availability: z.enum(["preparing", "available", "ended"]), currentAttemptId: identity,
+    hostReport: settingsDownloadReportSchema.optional(), previousUnconfirmed: z.boolean(),
+    endReason: settingsDownloadEndSchema.optional(), expiresAt: z.string().datetime().optional(), remainingMs: size.optional(),
+    allowedFileActions: z.array(settingsDownloadFileActionSchema) }).strict().optional(),
   restoreCheck: restoreCheckSchema.optional(),
   backupLocation: z.object({ directory: z.string().min(1), filename: z.string().min(1) }).strict().optional(),
   result: settingsResultSchema.optional(),
@@ -125,6 +152,14 @@ export const settingsViewSchema = z.object({
     connectionReconciliationRequired: z.literal(true).optional(), observedAt: z.string().datetime().optional(),
     counts: localDataCounts }).strict().optional()
 }).strict().superRefine((value, context) => {
+  if (value.download && (value.draft?.kind !== "download_backup" || !value.file ||
+      value.download.availability === "available" && (!value.file.sealed || !value.result || value.download.endReason || !value.download.expiresAt) ||
+      value.download.availability === "ended" && !value.download.endReason)) {
+    context.addIssue({ code: "custom", message: "Download delivery must describe its own snapshot and lifetime." });
+  }
+  if (value.draft?.kind === "download_backup" && value.preparation !== undefined) {
+    context.addIssue({ code: "custom", message: "Private download preparation is not public preparation data." });
+  }
   if (value.restoreCheck && (value.draft?.kind !== "import_local_data" || value.result)) {
     context.addIssue({ code: "custom", message: "Restore checks belong to an uncompleted import preparation." });
   }
@@ -169,3 +204,11 @@ export const settingsViewSchema = z.object({
   }
   if (value.file && value.file.receivedSize > value.file.totalSize) context.addIssue({ code: "custom", message: "Received content exceeds the selected file." });
 });
+
+export function settingsDownload(operation: SettingsOperation): SettingsDownload | undefined {
+  return operation.draft?.kind === "download_backup" ? storedSettingsDownloadSchema.parse(operation.preparation?.download) : undefined;
+}
+export type SettingsDownloadFileAction = Extract<SettingsAction, { action: z.infer<typeof settingsDownloadFileActionSchema> }>;
+export function isSettingsDownloadFileAction(action: SettingsAction): action is SettingsDownloadFileAction {
+  return settingsDownloadFileActionSchema.safeParse(action.action).success;
+}

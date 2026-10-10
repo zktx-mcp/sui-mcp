@@ -45,7 +45,7 @@ export async function uploadSettingsFile(file: File, transport: SettingsViewTran
         const details = error && typeof error === "object" && "data" in error ? error.data as { code?: unknown; rawChunkLimit?: unknown } | undefined : undefined;
         if (details?.code !== "settings_payload_too_large" || typeof details.rawChunkLimit !== "number" || !Number.isSafeInteger(details.rawChunkLimit) ||
             details.rawChunkLimit < 1 || details.rawChunkLimit >= amount) throw error;
-        const confirmed = settingsViewSchema.parse((await transport.readCurrent()).data);
+        const confirmed = settingsViewSchema.parse((await transport.readCurrent()).snapshot.data);
         if (confirmed.file?.fileId !== uploadId || confirmed.file.receivedSize !== received) throw new Error("The file transfer changed after a message was rejected. Choose the same file again to check how much was received.");
         budget = details.rawChunkLimit; continue;
       }
@@ -60,26 +60,48 @@ export async function uploadSettingsFile(file: File, transport: SettingsViewTran
   } finally { transport.setFileTransferActive(false); }
 }
 
-export type SettingsDownloadStatus = "unsupported" | "pending" | "backup_unverified" | "acknowledged" | "not_completed" | "unconfirmed";
-export async function downloadSettingsFile(file: { operationId: string; fileId: string; displayName: string; totalSize: number; sha256: string },
-  transport: SettingsViewTransport, status: (value: SettingsDownloadStatus) => void, active: () => boolean): Promise<void> {
-  if (!transport.canDownload()) { status("unsupported"); return; }
+export type SettingsDownloadStatus = "pending" | "backup_unverified" | "acknowledged" | "not_completed" | "unconfirmed";
+export async function downloadSettingsFile(file: { operationId: string; fileId: string; displayName: string; totalSize: number; sha256: string; attemptId?: string },
+  transport: SettingsViewTransport, status: (value: SettingsDownloadStatus) => void, active: () => boolean): Promise<SettingsDownloadStatus | undefined> {
   status("pending");
   let data: Uint8Array;
   try {
     data = new Uint8Array(file.totalSize);
     let offset = 0;
     while (offset < data.length && active()) {
-      const value = await transport.readFile({ operationId: file.operationId, fileId: file.fileId, offset });
+      const value = await transport.readFile({ operationId: file.operationId, fileId: file.fileId, offset, ...(file.attemptId ? { attemptId: file.attemptId } : {}) });
       const chunk = settingsDecode(value.chunkBase64);
       if (value.totalSize !== data.length || value.sha256 !== file.sha256 || !chunk.length || offset + chunk.length > data.length) throw new Error("Part of the downloaded backup does not match the original file.");
       data.set(chunk, offset); offset += chunk.length;
     }
     if (!active()) return;
     if (offset !== data.length || bytesToHex(sha256(data)) !== file.sha256) throw new Error("The complete downloaded backup could not be checked against the original file.");
-  } catch { if (active()) status("backup_unverified"); return; }
+  } catch {
+    if (file.attemptId && active()) { try { await transport.readCurrent(); } catch { /* The lifecycle owns current-read recovery. */ } }
+    if (active()) status("backup_unverified"); return "backup_unverified";
+  }
+  if (file.attemptId) {
+    try {
+      const read = await transport.readCurrent();
+      const current = settingsViewSchema.parse(read.snapshot.data);
+      if (!active() || current.operationId !== file.operationId || current.file?.fileId !== file.fileId ||
+          current.file.sha256 !== file.sha256 || current.file.totalSize !== file.totalSize ||
+          current.download?.currentAttemptId !== file.attemptId || current.download.availability !== "available" ||
+          !current.download.remainingMs) return;
+      // The remaining period was computed before the reply arrived. Include
+      // the original read's elapsed time even when this call joined its flight.
+      // A delayed reply cannot grant a fresh period for already-received bytes.
+      if (current.download.remainingMs <= Math.max(0, performance.now() - read.requestStartedAt)) {
+        try { await transport.readCurrent(); } catch { /* Current-read recovery belongs to the lifecycle. */ }
+        return;
+      }
+    } catch { if (active()) status("backup_unverified"); return "backup_unverified"; }
+  }
   try {
-    const response = await transport.download(file.displayName, settingsBase64(data));
-    if (active()) status(response.isError === true ? "not_completed" : "acknowledged");
-  } catch { if (active()) status("unconfirmed"); }
+    if (!active()) return;
+    const response = await (file.attemptId ? transport.download(file.displayName, settingsBase64(data), file.attemptId) : transport.download(file.displayName, settingsBase64(data)));
+    const outcome = response.isError === true ? "not_completed" : "acknowledged";
+    if (active()) status(outcome);
+    return outcome;
+  } catch { if (active()) status("unconfirmed"); return "unconfirmed"; }
 }

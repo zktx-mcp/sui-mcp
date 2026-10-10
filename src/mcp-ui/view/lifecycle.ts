@@ -23,12 +23,11 @@ export type CardContent = {
 };
 export type SettingsViewTransport = {
   act(input: Record<string, unknown>, fileTransfer?: boolean): Promise<CardSnapshot>;
-  readCurrent(): Promise<CardSnapshot>;
+  readCurrent(): Promise<{ snapshot: CardSnapshot; requestStartedAt: number }>;
   uploadChunkLimit(operationId: string, fileId: string): number;
   setFileTransferActive(active: boolean): void;
-  readFile(input: { operationId: string; fileId: string; offset: number }): Promise<SettingsFileDisplay>;
-  canDownload(): boolean;
-  download(filename: string, base64: string): Promise<{ isError?: boolean | undefined }>;
+  readFile(input: { operationId: string; fileId: string; offset: number; attemptId?: string | undefined }): Promise<SettingsFileDisplay>;
+  download(filename: string, base64: string, attemptId?: string): Promise<{ isError?: boolean | undefined }>;
 };
 type NonImportSettingsDraft = SettingsDraft & { kind: Exclude<SettingsDraft["kind"], "import_local_data"> };
 export type SettingsCommandProgress =
@@ -166,7 +165,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   type Confirmation = { status: "unconfirmed" | "confirmed" } |
     { status: "needed"; afterRead: number; automatic: boolean } |
     { status: "read_failed" | "rejected"; message: string };
-  type ReadOutcome = { kind: "accepted"; snapshot: CardSnapshot; id: number } |
+  type ReadOutcome = { kind: "accepted"; snapshot: CardSnapshot; id: number; requestStartedAt: number } |
     { kind: "ignored" | "failed" | "disposed"; id: number };
   type ReadFlight = { id: number; promise: Promise<ReadOutcome> };
   type CommandFlight = { input: Record<string, unknown>; basis: CardSnapshot; phase: "confirming" | "sending" };
@@ -306,8 +305,13 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
 
   // All effect consumers share this decision. In particular, lack of input
   // authority must not erase an outstanding confirmation or observation.
+  let downloadEndsAt: number | undefined;
+  let downloadLease: string | undefined;
   function decide() {
-    const data = object(snapshot?.data), permitted = Array.isArray(data?.allowedActions) ? data.allowedActions : [];
+    const data = object(snapshot?.data), download = settings ? object(data?.download) : undefined;
+    const fileActions = Array.isArray(download?.allowedFileActions) ? download.allowedFileActions : [];
+    const permitted = [...(Array.isArray(data?.allowedActions) ? data.allowedActions : []),
+      ...fileActions.filter((action) => action === "settings_report_download" || downloadEndsAt === undefined || Date.now() < downloadEndsAt)];
     const reviewInput = kind === "review" && data?.mode === "review" && !data.request && !!reference && snapshot?.state === "ready";
     const reviewPeriodElapsed = reviewInput && reviewEndsAt !== undefined && Date.now() >= reviewEndsAt;
     const visible = document.visibilityState !== "hidden";
@@ -334,7 +338,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     const settingsInputBlocked = settings && available && snapshot?.state === "ready" &&
       !commandFlight && !settingsFileTransfer && !data?.result && data?.observe !== true &&
       (restore?.status === "cannot_restore" && ["operation_busy", "wallet_request_unsettled"].includes(String(restore.reason)) ||
-        !permitted.includes("settings_select") || data?.phase === "prepared" && !permitted.includes("settings_confirm") ||
+        !permitted.includes("settings_select") || !permitted.includes("settings_download_backup") || data?.phase === "prepared" && !permitted.includes("settings_confirm") ||
         data?.phase === "draft" && object(data.draft)?.kind !== undefined && object(data.draft)?.kind !== "import_local_data" && !permitted.includes("settings_prepare"));
     let recover: "read" | "retry" | undefined;
     if (!ended && cardId) {
@@ -354,7 +358,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     }
     const remaining = business ? data?.actionRemainingMs : snapshot?.inputRemainingMs;
     if (recover === "retry" && reviewPeriodElapsed) recover = "read";
-    const nextRead = business ? data?.nextStateReadAfterMs : undefined;
+    const nextRead = business ? data?.nextStateReadAfterMs : settings && downloadEndsAt !== undefined ? Math.max(0, downloadEndsAt - observedAt) : undefined;
     const timed = business ? permitted.length > 0 : snapshot?.state === "ready";
     const intervals = [timed ? remaining : undefined, nextRead].filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
     const canObserve = !ended && !!reference && visible && !inputRequest && !openingError && confirmation.status !== "read_failed";
@@ -416,7 +420,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   function canSendFileInput(input: Record<string, unknown>): boolean {
     const d = decide();
     return settings && settingsFileTransfer && d.current && !!reference && !commandFlight && !reading && !displayError &&
-      !lifetime.signal.aborted && ["settings_begin_upload", "settings_upload_chunk", "settings_seal_upload"].includes(String(input.action)) && d.permitted.includes(input.action);
+      !lifetime.signal.aborted && ["settings_begin_upload", "settings_upload_chunk", "settings_seal_upload", "settings_retry_download", "settings_report_download", "settings_cancel_download"].includes(String(input.action)) && d.permitted.includes(input.action);
   }
   function updateChrome(d: Decision): void {
     const workflow = object(snapshot?.data);
@@ -458,6 +462,10 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       if (!interactive || control.tagName !== "BUTTON" || control.dataset.cardAction !== undefined) control.disabled = interactive ? !canAct(undefined, d) : !canSubmit(d);
     }
     if (interactive) for (const control of content.querySelectorAll<HTMLButtonElement>("[data-card-action]")) control.disabled = !canAct({ action: control.dataset.cardAction }, d);
+    if (settings) for (const control of content.querySelectorAll<HTMLButtonElement>("[data-settings-file-action]")) {
+      control.disabled = control.dataset.settingsLocalBlocked === "true" ||
+        !(settingsFileTransfer ? canSendFileInput({ action: control.dataset.cardAction }) : canAct({ action: control.dataset.cardAction }, d));
+    }
     if (primaryAction && (d.reviewUpdatePending || primaryAction.dataset.cardAction === "request_signature" && d.reviewCommandDeliveryFailed || primaryAction.dataset.cardAction === undefined)) primaryAction.disabled = true;
     if (recovery) recovery.disabled = !!commandFlight || !!reading;
   }
@@ -482,7 +490,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     // Workflow projections include referenced connection/account facts. Those
     // may change while this already-consumed card's own revision stays fixed.
     // Remaining milliseconds affect timers, not the displayed content identity.
-    const projection = interactive ? { ...object(snapshot.data), actionRemainingMs: undefined, nextStateReadAfterMs: undefined } : undefined;
+    const projection = interactive ? { ...object(snapshot.data), actionRemainingMs: undefined, nextStateReadAfterMs: undefined,
+      ...(settings && object(snapshot.data)?.download ? { download: { ...object(object(snapshot.data)?.download), remainingMs: undefined } } : {}) } : undefined;
     const settingsProgress = settings && commandFlight?.phase === "sending" && confirmation.status === "confirmed"
       ? settingsCommandProgress(commandFlight.basis, snapshot, commandFlight.input) : undefined;
     const key = `${automation === "paused"}:${JSON.stringify(settingsProgress)}:${snapshot.revision}:${reference !== undefined}:${display !== undefined}:${walletDisplay !== undefined}:${JSON.stringify(projection)}`;
@@ -560,6 +569,12 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     reconcileFailedCommand();
     if (current) {
       observedAt = Date.now();
+      const download = settings ? object(data?.download) : undefined;
+      if (download?.availability === "available" && typeof download.remainingMs === "number" && Number.isFinite(download.remainingMs)) {
+        const key = `${data?.operationId}:${object(data?.file)?.fileId}:${download.expiresAt}`;
+        if (downloadLease !== key) { downloadLease = key; downloadEndsAt = undefined; }
+        downloadEndsAt = Math.min(downloadEndsAt ?? Infinity, observedAt + Math.max(0, download.remainingMs));
+      } else if (settings && download?.availability === "ended") downloadEndsAt = undefined;
       if (reference && kind === "review" && data?.mode === "review" && !data.request &&
           typeof data.actionRemainingMs === "number" && Number.isFinite(data.actionRemainingMs) && data.actionRemainingMs >= 0) {
         // Relative backend authority is independent of the local wall-clock
@@ -663,7 +678,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     return (reading as ReadFlight | undefined)?.promise ?? Promise.resolve(undefined);
   }
   function startRead(): void {
-    const id = ++readSerial;
+    const id = ++readSerial, requestStartedAt = performance.now();
     // Install the complete single-flight handle before a Host call can re-enter.
     const work = Promise.resolve().then(async (): Promise<ReadOutcome> => {
       try {
@@ -690,7 +705,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
           confirmation = { ...confirmation, automatic: false };
         }
         publish(accepted);
-        return accepted && confirmation.status === "confirmed" ? { kind: "accepted", snapshot: next, id } : { kind: "ignored", id };
+        return accepted && confirmation.status === "confirmed" ? { kind: "accepted", snapshot: next, id, requestStartedAt } : { kind: "ignored", id };
       } catch (error) {
         if (lifetime.signal.aborted) return { kind: "disposed", id };
         if (confirmation.status !== "rejected") confirmation = { status: "read_failed", message: error instanceof Error ? error.message : "Saved card data could not be read. The last displayed result is unchanged." };
@@ -782,7 +797,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     async readCurrent() {
       const result = await requestRead(true);
       if (result?.kind !== "accepted") throw new Error("The current Settings selection could not be checked. Use Check status before continuing.");
-      return result.snapshot;
+      return { snapshot: result.snapshot, requestStartedAt: result.requestStartedAt };
     },
     async act(input, fileTransfer = false) {
       if (fileTransfer ? !canSendFileInput(input) : !canAct(input)) throw new Error("This Settings action is unavailable until its current status has been checked.");
@@ -801,13 +816,18 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       if (!reference || !cardId || !decide().current || lifetime.signal.aborted) throw new Error("Backup read permission is unavailable.");
       const response = await call(CARD_TOOLS.readSettingsFile, { ...reference, ...input });
       const value = settingsFileDisplaySchema.parse(object(response._meta)?.[SETTINGS_FILE_METADATA_KEY]);
-      if (value.cardId !== cardId || value.operationId !== input.operationId || value.fileId !== input.fileId || value.offset !== input.offset) throw new Error("The backup response does not match this card's selected file.");
+      if (value.cardId !== cardId || value.operationId !== input.operationId || value.fileId !== input.fileId || value.offset !== input.offset || value.attemptId !== input.attemptId) throw new Error("The backup response does not match this card's selected file.");
       return value;
     },
-    canDownload: () => app.getHostCapabilities()?.downloadFile !== undefined,
-    download: (filename, base64) => app.downloadFile({ contents: [{ type: "resource", resource: {
-      uri: `file:///${encodeURIComponent(filename)}`, mimeType: "application/json", blob: base64
-    } }] }, { signal: lifetime.signal })
+    download: (filename, base64, attemptId) => {
+      const data = object(snapshot?.data), download = object(data?.download);
+      if (!reference || !decide().current || lifetime.signal.aborted || document.visibilityState === "hidden" ||
+          (download && (download.currentAttemptId !== attemptId || download.availability !== "available" ||
+            downloadEndsAt === undefined || Date.now() >= downloadEndsAt))) throw new Error("This download is no longer available in this card.");
+      return app.downloadFile({ contents: [{ type: "resource", resource: {
+        uri: `file:///${encodeURIComponent(filename)}`, mimeType: "application/json", blob: base64
+      } }] }, { signal: lifetime.signal });
+    }
   };
   async function initialize(): Promise<void> {
     if (!connected || creating === undefined || initialized) return;

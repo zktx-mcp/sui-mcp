@@ -1,3 +1,4 @@
+import { SETTINGS_DOWNLOAD_FILE_SQL, SETTINGS_FILE_CLEANUP_SQL } from "../session/settingsFileIdentity.js";
 import { hasUnsettledWalletWork } from "../session/sqliteWalletWorkflowStore.js";
 import type Database from "better-sqlite3";
 import type { AdapterLifecycleValidator } from "../action/adapterLifecycleValidation.js";
@@ -159,7 +160,7 @@ export class SqliteLocalDataService implements LocalDataService {
   notifyDataReplaced(): void { this.options.onDataReplaced?.(); }
 
   private resetLocalDataTables(preserveCardId?: string): void {
-    this.db.prepare("UPDATE settings_files SET invalidated=1 WHERE role='upload'").run();
+    this.db.prepare(`UPDATE settings_files SET invalidated=1 WHERE role='upload' OR ${SETTINGS_DOWNLOAD_FILE_SQL}`).run();
     if (preserveCardId) {
       // Deleted cards cannot report or retry their cleanup. Transfer cleanup
       // responsibility while preserving file identities and public backup paths.
@@ -167,7 +168,7 @@ export class SqliteLocalDataService implements LocalDataService {
       const operation = this.db.prepare("SELECT operation_id FROM settings_operations WHERE card_id=?").get(preserveCardId) as { operation_id: string } | undefined;
       if (!operation) throw new LocalDataError("internal_error", "The replacement result identity is unavailable.");
       this.db.prepare(`UPDATE settings_files SET cleanup_operation_id=? WHERE cleanup!='complete'
-        AND (role='export' OR invalidated=1)`).run(operation.operation_id);
+        AND ${SETTINGS_FILE_CLEANUP_SQL}`).run(operation.operation_id);
       this.db.prepare("DELETE FROM live_read_cards WHERE id!=?").run(preserveCardId);
     }
     else this.db.prepare("DELETE FROM live_read_cards").run();

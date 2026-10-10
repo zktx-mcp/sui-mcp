@@ -69,7 +69,7 @@ async function fixture() {
   return { ...f, act, bodies, stdio, reference, get snapshot() { return snapshot; }, actCard,
     setSize(size?: number) { targetSize = size; }, setPadding(value: string) { hostPadding = value; },
     async readCard() { return f.wallet.run(async () => update(await client.callTool({ name: CARD_TOOLS.read, arguments: reference }) as CallToolResult)); },
-    async close() { await stdio.close(); await proxy.close(); await client.close(); await runtime.close(); f.close(); } };
+    async close() { await stdio.close(); await proxy.close(); await client.close(); await runtime.close(); await f.close(); } };
 }
 
 it("enforces the actual authenticated wire limit before Settings dispatch, including Unicode Host metadata and the stdio proxy", async () => {
@@ -108,8 +108,8 @@ it("lets the actual card upload consumer reduce a rejected chunk at the same fil
     f.setPadding("x".repeat(20000));
     const raw = Uint8Array.from({ length: 70001 }, (_, index) => index % 251), file = new File([raw], "資料.json");
     const active: boolean[] = [];
-    const transport: SettingsViewTransport = { act: f.actCard, readCurrent: f.readCard, uploadChunkLimit: () => 49000,
-      setFileTransferActive: (value: boolean) => { active.push(value); }, canDownload: () => false,
+    const transport: SettingsViewTransport = { act: f.actCard, readCurrent: async () => { const requestStartedAt = performance.now(); return { snapshot: await f.readCard(), requestStartedAt }; }, uploadChunkLimit: () => 49000,
+      setFileTransferActive: (value: boolean) => { active.push(value); },
       readFile: async () => { throw new Error("Unexpected download during upload"); },
       download: async () => { throw new Error("Unexpected Host download during upload"); } };
     await uploadSettingsFile(file, transport, () => ({ operationId, cardId: f.snapshot.cardId }), () => true);

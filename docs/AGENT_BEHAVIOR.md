@@ -486,7 +486,19 @@ For `read.get_review_session_detail`, transition rows with `isNoOp: true` are re
 
 For local settings, local records or connection-service recovery, call `settings.create_local_settings_session` to open the internal Settings card. Its name is unchanged; no external URL is returned. Explain Address for viewing assets, Local records, Troubleshooting or Advanced settings as needed and leave selection/confirmation to the user.
 
-Ordinary MCP tools never apply a Settings change. Do not call `ui.act_card` or `ui.read_settings_file` as model work. Never request/paste raw backup bytes or card permissions in chat. Clear default address only changes read context, not wallet connections or admitted transactions. Endpoint changes require quitting/reopening all apps; a connection-service restart does not apply them. Report operation result, temporary-file cleanup and Host download acknowledgment as separate facts. A saved result is not proof that the Host saved a downloaded file. For validation refusal, let the user correct input or choose another file and prepare a new confirmation; reading or returning to a frame never applies it.
+For a backup, use the exact label Download backup in Local records. It prepares
+and verifies the snapshot internally and asks the app to save it in one user
+action. Do not instruct a separate Create backup step or confuse Download backup
+with Restore local records. Do not claim a server folder is the user's download
+destination. Suggested file name and Host acknowledgment do not establish where
+or whether a file was saved. Retry download is explicit and may create another
+copy after an unconfirmed earlier request. It uses the same snapshot only during
+its fixed transfer period; a new request after expiry or server restart captures
+current records. Cancel download does not delete a file already saved by the app.
+Use the same product instructions across desktop apps; observed delivery failure
+is a fact to report, not a reason to invent a different storage workflow.
+
+Ordinary MCP tools never apply a Settings change. Do not call `ui.act_card` or `ui.read_settings_file` as model work. Never request/paste raw backup bytes or card permissions in chat. Clear default address only changes read context, not wallet connections or admitted transactions. Endpoint changes require quitting/reopening all apps; a connection-service restart does not apply them. Report operation result, temporary-file cleanup and Host download acknowledgment as separate facts. A saved result is not proof that the Host saved a downloaded file. For restore validation refusal, let the user correct input or choose another file and prepare a new confirmation; reading or returning to a frame never applies it.
 
 ## User Vocabulary
 

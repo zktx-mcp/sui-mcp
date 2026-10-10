@@ -246,6 +246,19 @@ and adjacent invariants that must hold for the work to be complete.
 - Reuse existing source-of-truth modules, pinned SDK/source APIs, verified
   mainnet data, local registries, and established infrastructure when they own
   the boundary.
+- Base Host integration and UI feature decisions on documented function
+  capabilities and verified protocol outcomes, not application or vendor names.
+  Normalize verified response formats into common behavior. A capability does
+  not grant user or card authorization.
+- Distinguish unsupported functions from cancellation, permission denial,
+  invalid inputs, timeouts, and unconfirmed delivery. Missing capability
+  advertisement is not proof of non-support unless the relevant contract says
+  so; an exact method-not-found response applies only to that method and
+  connection. Do not cache a Host-wide support verdict by application name.
+- Apply the same function-based decision rules across Hosts. A fallback must
+  have an agreed contract for its effects, result, storage lifetime, cleanup,
+  and consumer handoff; do not silently change destinations or repeat an
+  effect after an uncertain delivery result.
 - Add new code only when no suitable source exists or the existing source is
   demonstrably insufficient.
 - Do not duplicate logic, registries, parsers, protocol metadata, SDK behavior,

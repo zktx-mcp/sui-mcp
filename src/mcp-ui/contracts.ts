@@ -31,7 +31,7 @@ export const cardReceiptDisplaySchema = receiptDisplaySchema.extend({
 export type CardReceiptDisplay = z.infer<typeof cardReceiptDisplaySchema>;
 export const cardWalletDisplaySchema = walletDisplaySchema.extend({ cardId: z.string().min(1), revision: z.number().int().nonnegative() });
 export type CardWalletDisplay = z.infer<typeof cardWalletDisplaySchema>;
-export const settingsFileDisplaySchema = z.object({ cardId: z.string().min(1), operationId: z.string().uuid(), fileId: z.string().uuid(),
+export const settingsFileDisplaySchema = z.object({ attemptId: z.string().uuid().optional(), cardId: z.string().min(1), operationId: z.string().uuid(), fileId: z.string().uuid(),
   offset: z.number().int().nonnegative().safe(), totalSize: z.number().int().nonnegative().safe(), sha256: z.string().regex(/^[a-f0-9]{64}$/),
   chunkBase64: z.string() }).strict();
 export type SettingsFileDisplay = z.infer<typeof settingsFileDisplaySchema>;

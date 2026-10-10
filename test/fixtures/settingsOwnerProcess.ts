@@ -7,6 +7,7 @@ import { SqliteActivityStore } from "../../src/core/activity/sqliteActivityStore
 import { LocalSessionStore } from "../../src/core/session/sessionStore.js";
 import { WalletWorkflow } from "../../src/core/session/walletWorkflow.js";
 import { SettingsWorkflow } from "../../src/core/session/settingsWorkflow.js";
+import { settingsIdentity } from "../../src/core/session/sqliteSettingsWorkflowStore.js";
 import { SettingsFileStore } from "../../src/core/session/settingsFileStore.js";
 import { createReadCardStore } from "../../src/mcp-ui/readCards.js";
 import { createDeepbookUsdcChartService } from "../../src/core/read/deepbookUsdcChartService.js";
@@ -30,11 +31,14 @@ const [directory, fault = "none"] = process.argv.slice(2);
 if (!directory) throw new Error("A private test directory is required");
 const send = (value: unknown) => process.send?.(value);
 const hold = async (name: string) => { send({ event: "boundary", name }); await new Promise<void>(() => {}); };
-let publications = 0;
-const originalOpen = fs.open, originalLink = fs.link;
+let creations = 0;
+const originalOpen = fs.open;
 fs.open = async (...args: Parameters<typeof fs.open>) => {
+  const downloadWrite = String(args[0]).endsWith(".download") && typeof args[1] === "number" && (args[1] & (constants.O_RDWR | constants.O_WRONLY));
+  if (downloadWrite && fault === "unsupported_create") throw Object.assign(new Error("Unsupported fixture exclusive creation"), { code: "EOPNOTSUPP" });
   const handle = await originalOpen(...args);
-  if (String(args[0]).endsWith(".stage") && typeof args[1] === "number" && (args[1] & constants.O_WRONLY)) {
+  if (downloadWrite) {
+    creations++;
     const write = handle.writeFile.bind(handle), sync = handle.sync.bind(handle);
     handle.writeFile = async (bytes, options) => {
       if (fault === "write_before") await hold(fault);
@@ -45,12 +49,6 @@ fs.open = async (...args: Parameters<typeof fs.open>) => {
     handle.sync = async () => { if (fault === "sync_before") await hold(fault); await sync(); if (fault === "sync_after") await hold(fault); };
   }
   return handle;
-};
-fs.link = async (from, to) => {
-  if (fault === "link_before") await hold(fault);
-  if (fault === "unsupported_link") throw Object.assign(new Error("Unsupported fixture filesystem link"), { code: "EOPNOTSUPP" });
-  await originalLink(from, to); publications++;
-  if (fault === "link_after") await hold(fault);
 };
 syncBuiltinESMExports();
 const lease = acquireDataDirectoryOwner(join(directory, "activity.sqlite"));
@@ -82,9 +80,9 @@ const local = new RuntimeLocalSettingsService({ preferencesRepository: preferenc
 const localData = activity.createLocalDataService({ suiGrpcUrl: DEFAULT_SUI_GRPC_URL, suiGraphqlUrl: DEFAULT_SUI_GRAPHQL_URL,
   advanceRequestDeadlines: (now) => walletRecords.advanceRequestDeadlines(now),
   verifySuiGrpcUrl: async () => { if (fault === "verify_before") await hold(fault); }, verifySuiGraphqlUrl: async () => {},
-  onDataReplaced: () => { access.dataReplaced(); wallet.dataReplaced(); } });
+  onDataReplaced: () => { access.dataReplaced(); wallet.dataReplaced(); settings.dataReplaced(); } });
 const settings = new SettingsWorkflow({ records, files, activity, preferences, localData, wallet,
-  assertCurrent: access.assertCurrent, resolveEndpoint: (input) => local.resolveEndpointChange(input), verifyEndpoint: (input) => local.prepareEndpointChange(input),
+  assertCurrent: access.assertCurrent, runMaintenance: (work) => access.run(work), resolveEndpoint: (input) => local.resolveEndpointChange(input), verifyEndpoint: (input) => local.prepareEndpointChange(input),
   interruptRun: (run) => walletRecords.invalidateWalletRun("wallet_service_restarted", new Date(), run),
   readFacts: async () => records.transaction(() => ({ server: { name: "sui-mcp", version: SERVER_VERSION, network: "mainnet" },
     localSettings: local.getLocalSettingsSync((key) => preferences.getLocalSettingSync(key)), counts: localData.getDataCountsSync(),
@@ -93,6 +91,8 @@ settings.recoverOwner(); await wallet.start();
 const cards = createReadCardStore({ ownerId, records: activity.createCardRecordStore(), workflow: wallet, settings, assertCurrent: access.assertCurrent,
   readService: { summarizeAccountInventory: unexpected }, publicChainReceiptReader: unexpected, chart: createDeepbookUsdcChartService() });
 access.ready();
+await access.run(() => settings.cleanupAfterOwnerChange());
+let selectedKind: SettingsDraft["kind"] | undefined;
 let card: CardResponse & { permission: string };
 const data = () => card.snapshot.data as SettingsView;
 async function act(input: Record<string, unknown>) {
@@ -105,11 +105,33 @@ if (fault === "result_after") access.run(() => records.db.exec(`CREATE TRIGGER r
     SELECT 1 FROM settings_files f JOIN settings_operations o ON o.operation_id=coalesce(f.cleanup_operation_id,f.operation_id)
     WHERE f.file_id=OLD.file_io_id AND o.phase='terminal')
   BEGIN SELECT RAISE(ABORT,'finished cleanup release refused'); END`));
-process.on("message", (message: { command: "prepare" | "confirm" | "read" | "stop"; draft?: SettingsDraft; reference?: { cardId: string; permission: string } }) => {
+process.on("message", (message: { command: "prepare" | "confirm" | "read" | "stop" | "historical_export"; draft?: SettingsDraft; reference?: { cardId: string; permission: string } }) => {
   void access.run(async () => {
-    if (message.command === "prepare") {
+    if (message.command === "historical_export") {
+      // Historical input to today's recovery reader: an old-format current-DB
+      // export admitted and physically published by a departed version. This
+      // setup does not exercise or reintroduce a new product export action.
       card = await cards.create("settings", {});
+      const operation = records.get(data().operationId)!, record = records.cards.get(card.snapshot.cardId)!;
+      const bytes = Buffer.from(JSON.stringify(localData.exportLocalDataSync(new Date()))), fileId = randomUUID();
+      const input = { action: "settings_confirm", operationId: operation.operationId, preparationId: randomUUID() };
+      records.transaction(() => {
+        records.createFile({ fileId, operationId: operation.operationId, role: "export", relativePath: `backups/${operation.operationId}.json`,
+          displayName: `${operation.operationId}.json`, totalSize: bytes.length, receivedSize: 0,
+          sha256: createHash("sha256").update(bytes).digest("hex"), sealed: false, invalidated: false, cleanup: "pending" });
+        records.claimFinal(operation.operationId);
+        records.write(operation, { ...operation, phase: "executing", draft: { kind: "export_local_data" }, fileId,
+          admittedAt: new Date().toISOString(), acceptedDigest: settingsIdentity(input) }, record,
+          { ...record, acceptedInput: input, state: { ...record.state, state: "running", revision: record.state.revision + 1 } });
+      });
+      await fs.mkdir(join(directory, "backups"), { recursive: true });
+      await fs.writeFile(join(directory, "backups", `${operation.operationId}.json`), bytes, { flag: "wx" });
+      send({ event: "historical_export", card });
+    } else if (message.command === "prepare") {
+      card = await cards.create("settings", {});
+      selectedKind = message.draft?.kind;
       await activity.setActiveAccount(`0x${"a".repeat(64)}`, "wallet_connection");
+      if (selectedKind === "download_backup") { send({ event: "prepared", card }); return; }
       await act({ action: "settings_select", draft: message.draft });
       if (message.draft?.kind === "import_local_data") {
         const envelope = await localData.exportLocalData(), raw = Buffer.from(JSON.stringify(envelope));
@@ -122,7 +144,8 @@ process.on("message", (message: { command: "prepare" | "confirm" | "read" | "sto
       send({ event: "prepared", card });
     } else if (message.command === "confirm") {
       if (fault === "stopping") peers[0]!.killMode = "hold";
-      await act({ action: "settings_confirm", operationId: data().operationId, preparationId: data().preparationId });
+      await act(selectedKind === "download_backup" ? { action: "settings_download_backup", operationId: data().operationId, attemptId: randomUUID() }
+        : { action: "settings_confirm", operationId: data().operationId, preparationId: data().preparationId });
       send({ event: "admitted", card });
       if (fault === "result_before") {
         while (!data().result) {
@@ -132,6 +155,11 @@ process.on("message", (message: { command: "prepare" | "confirm" | "read" | "sto
         }
       }
       if (fault === "result_after") {
+        while (!records.get(data().operationId)?.result) await new Promise<void>((resolve) => setImmediate(resolve));
+        card = { ...await cards.read({ cardId: card.snapshot.cardId, permission: card.permission }), permission: card.permission };
+        try { await act({ action: "settings_report_download", operationId: data().operationId, fileId: data().file!.fileId,
+          attemptId: data().download!.currentAttemptId, status: "acknowledged" }); }
+        catch (error) { if (!(error instanceof Error) || !error.message.includes("finished cleanup release refused")) throw error; }
         while (true) {
           const operation = records.get(data().operationId)!, file = operation.fileId && records.file(operation.fileId);
           if (operation.result && file && file.cleanup === "complete" && records.control().file_io_id === file.fileId) {
@@ -143,9 +171,9 @@ process.on("message", (message: { command: "prepare" | "confirm" | "read" | "sto
     } else if (message.command === "read") {
       const reference = message.reference ?? { cardId: card.snapshot.cardId, permission: card.permission };
       card = { ...await cards.read(reference), permission: reference.permission };
-      send({ event: "read", card, publications, control: records.control(), account: activity.getActiveAccountSync() ?? null });
+      send({ event: "read", card, creations, control: records.control(), account: activity.getActiveAccountSync() ?? null });
     } else {
-      wallet.stop(); cards.stop(); await runtime.close(); activity.close(); access.close(); lease.close(); process.exit(0);
+      wallet.stop(); cards.stop(); await settings.close(); await runtime.close(); activity.close(); access.close(); lease.close(); process.exit(0);
     }
   }).catch((error: unknown) => send({ event: "error", message: error instanceof Error ? error.message : "Fixture failure" }));
 });

@@ -33,7 +33,7 @@ async function fixture(ui = true, options: Parameters<typeof settingsWorkflowFix
   const send = peer.send.bind(peer);
   peer.send = async (message, options) => { outgoing.push(message); await send(message, options); };
   await f.wallet.run(() => server.connect(peer)); await client.connect(transport);
-  cleanup.push(async () => { await client.close(); await server.close(); f.close(); });
+  cleanup.push(async () => { await client.close(); await server.close(); await f.close(); });
   const call = (name: string, argumentsValue: Record<string, unknown>) => f.wallet.run(() => client.callTool({ name, arguments: argumentsValue })) as Promise<CallToolResult>;
   return { ...f, client, outgoing, call };
 }
@@ -235,11 +235,12 @@ it("transfers backup bytes only in UI metadata and keeps every actual serialized
   const f = await fixture();
   // Enough real account history to require more than one encoded response.
   for (let id = 1; id <= 350; id++) await f.wallet.run(() => f.wallet.activity.setActiveAccount(`0x${id.toString(16).padStart(64, "0")}`, "wallet_connection", f.wallet.now()));
-  const prepared = await f.prepare({ kind: "export_local_data" }); await f.confirm(prepared);
+  const prepared = await f.create(); await f.download(prepared);
   let completed = await f.read(prepared);
   await vi.waitFor(async () => { completed = await f.read(prepared); expect((completed.snapshot.data as SettingsView).result?.outcome).toBe("completed"); });
   const file = (completed.snapshot.data as SettingsView).file!, target = { cardId: completed.snapshot.cardId, permission: completed.permission,
-    operationId: (completed.snapshot.data as SettingsView).operationId, fileId: file.fileId };
+    operationId: (completed.snapshot.data as SettingsView).operationId, fileId: file.fileId,
+    attemptId: (completed.snapshot.data as SettingsView).download!.currentAttemptId };
   const chunks: Buffer[] = []; let offset = 0;
   while (offset < file.totalSize) {
     const response = await f.call(CARD_TOOLS.readSettingsFile, { ...target, offset });
@@ -254,7 +255,7 @@ it("transfers backup bytes only in UI metadata and keeps every actual serialized
   const assembled = Buffer.concat(chunks);
   expect(chunks.length).toBeGreaterThan(1);
   expect(createHash("sha256").update(assembled).digest("hex")).toBe(file.sha256);
-  const path = (completed.snapshot.data as SettingsView).result!.details!.path as string;
+  const path = join(f.wallet.directory, ".settings-staging", `${file.fileId}.download`);
   expect(assembled).toEqual(await readFile(path));
   const responses = f.outgoing.filter((value) => value && typeof value === "object" && "result" in value &&
     (value as { result?: CallToolResult }).result?._meta?.[SETTINGS_FILE_METADATA_KEY] !== undefined);

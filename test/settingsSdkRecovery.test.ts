@@ -22,7 +22,7 @@ async function sdkFixture() {
       } });
   } });
   const db = new Database(join(f.wallet.directory, "activity.sqlite"));
-  return { f, relay, children, commands, db, async close() { await f.wallet.runtime.close(); db.close(); f.close(); await relay.close(); } };
+  return { f, relay, children, commands, db, async close() { await f.wallet.runtime.close(); db.close(); await f.close(); await relay.close(); } };
 }
 
 it.each(["selected", "cleared"] as const)("restores a known approved connection through actual SDK replacement while keeping its %s address provenance", async (selection) => {

@@ -129,9 +129,9 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
       }
     });
   }
-  const fileInput = cardReferenceSchema.extend({ operationId: z.string().uuid(), fileId: z.string().uuid(), offset: z.number().int().nonnegative().safe(),
+  const fileInput = cardReferenceSchema.extend({ attemptId: z.string().uuid().optional(), operationId: z.string().uuid(), fileId: z.string().uuid(), offset: z.number().int().nonnegative().safe(),
     limit: z.number().int().positive().safe().optional() }).strict();
-  registerAppTool(server, CARD_TOOLS.readSettingsFile, { description: "Read a completed local backup file.", inputSchema: fileInput,
+  registerAppTool(server, CARD_TOOLS.readSettingsFile, { description: "Read a verified backup file for its current download attempt.", inputSchema: fileInput,
     _meta: { ui: { visibility: ["app"] } }, annotations: { readOnlyHint: true, openWorldHint: false }
   }, async (input, extra) => {
     try {
@@ -139,7 +139,7 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
       // Measure the actual response shape, including its text fallback and UI
       // metadata. Reserve maximum safe-integer digit widths for size fields.
       const base = okToolResult({ status: "read", fileId: input.fileId, offset: input.offset, rangeSize: Number.MAX_SAFE_INTEGER });
-      const metadata = { cardId: input.cardId, operationId: input.operationId, fileId: input.fileId, offset: input.offset, totalSize: Number.MAX_SAFE_INTEGER,
+      const metadata = { ...(input.attemptId ? { attemptId: input.attemptId } : {}), cardId: input.cardId, operationId: input.operationId, fileId: input.fileId, offset: input.offset, totalSize: Number.MAX_SAFE_INTEGER,
         sha256: "0".repeat(64), chunkBase64: "" };
       base._meta = { [SETTINGS_FILE_METADATA_KEY]: metadata };
       const budget = settingsRawChunkBudget({ jsonrpc: "2.0", id: extra.requestId, result: base });

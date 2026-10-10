@@ -40,6 +40,7 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
   let activityStore: SqliteActivityStore | undefined;
   let cards: CardStore | undefined;
   let workflow: WalletWorkflow | undefined;
+  let settings: SettingsWorkflow | undefined;
   let chart: ReturnType<typeof createDeepbookUsdcChartService> | undefined;
   try {
     const store = new SqliteActivityStore({
@@ -78,7 +79,7 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
     const workflowRecords = store.createWalletWorkflowStore(ownerId, () => new Date(), () => walletRuntime?.snapshot());
     const localData = store.createLocalDataService({
       advanceRequestDeadlines: (now) => workflowRecords.advanceRequestDeadlines(now),
-      onDataReplaced: () => { access.dataReplaced(); workflow?.dataReplaced(); chart?.clearCache(); },
+      onDataReplaced: () => { access.dataReplaced(); workflow?.dataReplaced(); settings?.dataReplaced(); chart?.clearCache(); },
       suiGrpcUrl: DEFAULT_SUI_GRPC_URL,
       suiGraphqlUrl: DEFAULT_SUI_GRAPHQL_URL,
       verifySuiGrpcUrl: async (url) => {
@@ -154,8 +155,8 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
       submitTransaction: (transaction, signature) => suiClient.core.executeTransaction({ transaction, signatures: [signature] })
     });
     const settingsRecords = store.createSettingsWorkflowStore(ownerId);
-    const settings = new SettingsWorkflow({ records: settingsRecords, files: new SettingsFileStore(dirname(bootConfig.activityDatabasePath)),
-      activity: store, localData, preferences: preferencesRepository, wallet: workflow, assertCurrent: access.assertCurrent,
+    settings = new SettingsWorkflow({ records: settingsRecords, files: new SettingsFileStore(dirname(bootConfig.activityDatabasePath)),
+      activity: store, localData, preferences: preferencesRepository, wallet: workflow, assertCurrent: access.assertCurrent, runMaintenance: (work) => access.run(work),
       resolveEndpoint: (input) => localSettings.resolveEndpointChange(input),
       verifyEndpoint: (input) => localSettings.prepareEndpointChange(input),
       interruptRun: (runId) => workflowRecords.invalidateWalletRun("wallet_service_restarted", new Date(), runId),
@@ -194,15 +195,16 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
     }));
 
     access.ready();
-    void access.run(() => settings.cleanupAfterOwnerChange()).catch(() => {
+    void access.run(() => settings!.cleanupAfterOwnerChange()).catch(() => {
       try { logger.error("Temporary settings file cleanup is incomplete", { stage: "settings_file_cleanup" }); } catch { /* Stored cleanup facts remain authoritative. */ }
     });
     return {
       handleMcp: (request, response) => access.run(() => mcp.handle(request, response)),
       handleHttp: (request, response) => access.run(() => httpHandler(request, response)),
       async close() {
-        workflow?.stop(); access.close(); cards?.stop(); chart?.clearCache();
-        try { await walletRuntime!.close(); } finally { try { await mcp.close(); } finally { store.close(); ownership.close(); } }
+        workflow?.stop(); cards?.stop(); chart?.clearCache();
+        try { await settings!.close(); }
+        finally { access.close(); try { await walletRuntime!.close(); } finally { try { await mcp.close(); } finally { store.close(); ownership.close(); } } }
       }
     };
   } catch (error) {

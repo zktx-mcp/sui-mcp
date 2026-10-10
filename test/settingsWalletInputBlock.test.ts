@@ -4,8 +4,8 @@ import { verifyTransactionSignature } from "@mysten/sui/verify";
 import { settingsWorkflowFixture } from "./fixtures/settingsWorkflow.js";
 import type { SettingsView } from "../src/core/session/settingsOperation.js";
 
-const close: (() => void)[] = [];
-afterEach(() => { for (const cleanup of close.splice(0).reverse()) cleanup(); });
+const close: (() => void | Promise<void>)[] = [];
+afterEach(async () => { for (const cleanup of close.splice(0).reverse()) await cleanup(); });
 type Fixture = Awaited<ReturnType<typeof settingsWorkflowFixture>>;
 
 // The block is an explicit SQLite unit-state input, not an observable gap

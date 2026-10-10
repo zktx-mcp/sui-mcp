@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createReadCardStore } from "../../src/mcp-ui/readCards.js";
 import { createDeepbookUsdcChartService } from "../../src/core/read/deepbookUsdcChartService.js";
 import { SettingsWorkflow } from "../../src/core/session/settingsWorkflow.js";
@@ -23,10 +24,10 @@ export async function settingsWorkflowFixture(options: Parameters<typeof walletW
   const localData = wallet.run(() => wallet.activity.createLocalDataService({ now: wallet.now,
     suiGrpcUrl: DEFAULT_SUI_GRPC_URL, suiGraphqlUrl: DEFAULT_SUI_GRAPHQL_URL,
     advanceRequestDeadlines: (now) => wallet.records.advanceRequestDeadlines(now),
-    onDataReplaced: () => { wallet.access.dataReplaced(); wallet.workflow.dataReplaced(); },
+    onDataReplaced: () => { wallet.access.dataReplaced(); wallet.workflow.dataReplaced(); settings.dataReplaced(); },
     verifySuiGrpcUrl: options.verifyEndpoint ?? (async () => {}), verifySuiGraphqlUrl: options.verifyEndpoint ?? (async () => {}) }));
   const settings = new SettingsWorkflow({ records, files, preferences, activity: wallet.activity, localData, wallet: wallet.workflow,
-    assertCurrent: wallet.access.assertCurrent,
+    assertCurrent: wallet.access.assertCurrent, runMaintenance: (work) => wallet.run(work),
     resolveEndpoint: (input) => localSettings.resolveEndpointChange(input),
     verifyEndpoint: (input) => localSettings.prepareEndpointChange(input),
     interruptRun: (runId) => wallet.records.invalidateWalletRun("wallet_service_restarted", wallet.now(), runId),
@@ -56,10 +57,12 @@ export async function settingsWorkflowFixture(options: Parameters<typeof walletW
     if (next.error) throw new Error(next.error.message);
     return next;
   };
+  const download = (card: Awaited<ReturnType<typeof create>>, attemptId = randomUUID()) => act(card, { action: "settings_download_backup",
+    operationId: (card.snapshot.data as SettingsView).operationId, attemptId });
   const confirm = (card: Awaited<ReturnType<typeof create>>) => {
     const view = card.snapshot.data as SettingsView;
     return act(card, { action: "settings_confirm", operationId: view.operationId, preparationId: view.preparationId });
   };
-  return { wallet, records, preferences, localSettings, localData, files, settings, cards, create, read, act, prepare, confirm,
-    close() { cards.stop(); wallet.close(); } };
+  return { wallet, records, preferences, localSettings, localData, files, settings, cards, create, read, act, prepare, confirm, download,
+    async close() { cards.stop(); try { await settings.close(); } finally { wallet.close(); } } };
 }

@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, link, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { isSettingsDownloadFile } from "./settingsFileIdentity.js";
 import { SettingsConflict, type SettingsFile } from "./settingsOperation.js";
+
+export class SettingsDownloadPathExists extends SettingsConflict {}
 
 export function settingsFileDigest(data: Uint8Array): string { return createHash("sha256").update(data).digest("hex"); }
 export function decodeSettingsChunk(value: string): Buffer {
@@ -35,7 +38,7 @@ export class SettingsFileStore {
   }
   private stagingPath(file: SettingsFile): string {
     this.assertId(file.fileId);
-    return join(this.directory("staging"), `${file.fileId}.${file.role === "upload" ? "upload" : "stage"}`);
+    return join(this.directory("staging"), `${file.fileId}.${file.role === "upload" ? "upload" : isSettingsDownloadFile(file) ? "download" : "stage"}`);
   }
   private finalPath(file: SettingsFile): string {
     this.assertId(file.operationId);
@@ -112,19 +115,30 @@ export class SettingsFileStore {
       if (read.bytesRead !== data.length || !actual.equals(data)) throw new SettingsConflict("Different file content was already received at this position.");
     } finally { await handle.close(); }
   }
-  async publishExport(file: SettingsFile, data: Buffer): Promise<string> {
-    if (file.role !== "export" || file.invalidated || data.length !== file.totalSize || settingsFileDigest(data) !== file.sha256) {
-      throw new SettingsConflict("The backup does not match the records selected for this request.");
+  async createDownload(file: SettingsFile, data: Buffer): Promise<void> {
+    if (!isSettingsDownloadFile(file) || file.invalidated || data.length !== file.totalSize || settingsFileDigest(data) !== file.sha256) {
+      throw new SettingsConflict("The download snapshot does not match the selected records.");
     }
-    await this.prepareDirectory("staging"); await this.prepareDirectory("backups");
-    const staging = this.stagingPath(file), destination = this.finalPath(file);
-    const handle = await this.handle(staging, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL);
-    try { await handle.writeFile(data); await handle.sync(); } finally { await handle.close(); }
-    // Exclusive publication on the same volume. A prior user file is never
-    // overwritten or renamed away. Unsupported filesystems fail explicitly.
-    await link(staging, destination);
-    await this.verifyExport(file);
-    return destination;
+    await this.prepareDirectory("staging");
+    let handle;
+    try { handle = await this.handle(this.stagingPath(file), constants.O_RDWR | constants.O_CREAT | constants.O_EXCL); }
+    catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
+        throw new SettingsDownloadPathExists("The reserved backup location already contains a file.");
+      }
+      throw error;
+    }
+    try {
+      await handle.writeFile(data); await handle.sync();
+      if ((await handle.stat()).size !== file.totalSize) throw new SettingsConflict("The download snapshot length changed.");
+      const hash = createHash("sha256");
+      for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) hash.update(chunk as Buffer);
+      if (hash.digest("hex") !== file.sha256) throw new SettingsConflict("The download snapshot content changed.");
+    } finally { await handle.close(); }
+  }
+  async readDownloadRange(file: SettingsFile, offset: number, length: number): Promise<Buffer> {
+    if (!isSettingsDownloadFile(file)) throw new SettingsConflict("This file is not the private download snapshot.");
+    return this.readVerifiedRange(file, this.directory("staging"), this.stagingPath(file), offset, length);
   }
   async verifyExport(file: SettingsFile): Promise<void> {
     const directory = this.directory("backups");
@@ -139,13 +153,16 @@ export class SettingsFileStore {
     } finally { await handle.close(); }
   }
   async readExportRange(file: SettingsFile, offset: number, length: number): Promise<Buffer> {
+    return this.readVerifiedRange(file, this.directory("backups"), this.finalPath(file), offset, length);
+  }
+  private async readVerifiedRange(file: SettingsFile, directory: string, path: string, offset: number, length: number): Promise<Buffer> {
     if (!file.sealed || file.invalidated || !Number.isSafeInteger(offset) || !Number.isSafeInteger(length) ||
         offset < 0 || length < 1 || offset + length > file.totalSize) throw new SettingsConflict("This part of the backup is unavailable.");
     // Verify the artifact on the same open descriptor used for this chunk, so
     // path replacement cannot substitute unchecked content between two opens.
-    const info = await lstat(this.directory("backups"));
+    const info = await lstat(directory);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new SettingsConflict("The local backup directory changed.");
-    const handle = await this.handle(this.finalPath(file), constants.O_RDONLY);
+    const handle = await this.handle(path, constants.O_RDONLY);
     try {
       if ((await handle.stat()).size !== file.totalSize) throw new SettingsConflict("The local backup length changed.");
       const hash = createHash("sha256");

@@ -105,7 +105,8 @@ class Element extends EventTarget {
   querySelectorAll(selector: string): Element[] {
     const tags = selector.split(",").map((value) => value.trim());
     return this.children.flatMap((child) => [...(tags.includes(child.tagName.toLowerCase()) || tags.some((tag) => tag.startsWith(".") && child.className.split(/\s+/).includes(tag.slice(1))) ||
-      (tags.includes("[data-card-action]") && child.dataset.cardAction !== undefined) ? [child] : []), ...child.querySelectorAll(selector)]);
+      (tags.includes("[data-card-action]") && child.dataset.cardAction !== undefined) ||
+      (tags.includes("[data-settings-file-action]") && child.dataset.settingsFileAction !== undefined) ? [child] : []), ...child.querySelectorAll(selector)]);
   }
   querySelector(selector: string): Element | undefined { return this.querySelectorAll(selector)[0]; }
   click(): void { if (!this.disabled) this.dispatchEvent(new Event("click")); }
@@ -3640,9 +3641,9 @@ it.each(["file_io", "wallet", "restart"] as const)("keeps prepared Restore navig
     const prepared = w.run(() => f.records.get(id))!, card = w.run(() => w.cardRecords.get(initial.cardId))!;
     expect(prepared.phase).toBe("prepared");
     if (blocker === "file_io") {
-      const publish = f.files.publishExport.bind(f.files);
-      vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
-      other = await f.prepare({ kind: "export_local_data" }); expect((await f.confirm(other)).error).toBeUndefined();
+      const publish = f.files.createDownload.bind(f.files);
+      vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+      other = await f.create(); expect((await f.download(other)).error).toBeUndefined();
     } else if (blocker === "wallet") {
       const disconnect = w.transport.disconnect.bind(w.transport);
       vi.spyOn(w.transport, "disconnect").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return disconnect(...args); });
@@ -3696,38 +3697,38 @@ it.each(["file_io", "wallet", "restart"] as const)("keeps prepared Restore navig
     release.resolve();
     if (other) await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
     if (connected) await vi.waitFor(() => expect(w.run(() => w.records.connection(connected.connection.connectionId)!.sdkPending)).toBe(false));
-    await app?.onteardown?.(); await mcp.close(); f.close();
+    await app?.onteardown?.(); await mcp.close(); await f.close();
   }
 });
 
-it("keeps a prepared backup's impact visible with a status-read exit while another card publishes a file", async () => {
+it("keeps a prepared reset's impact visible with a status-read exit while another card publishes a file", async () => {
   const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards }), visibility = visibleFrame();
   const entered = deferred<void>(), release = deferred<void>();
   const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
   let app: Host | undefined, other: Awaited<ReturnType<typeof f.create>> | undefined;
   try {
-    const card = await f.prepare({ kind: "export_local_data" }), id = (card.snapshot.data as SettingsView).operationId;
+    const card = await f.prepare({ kind: "reset_local_data" }), id = (card.snapshot.data as SettingsView).operationId;
     app = host(mcp.call); startCard("settings", settingsRenderer);
     app.ontoolresult!({ ...cardToolResult(card), _meta: { [CARD_METADATA_KEY]: { cardId: card.snapshot.cardId, permission: card.permission } } });
-    await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
-    const original = w.run(() => f.records.get(id)), publish = f.files.publishExport.bind(f.files);
-    vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
-    other = await f.prepare({ kind: "export_local_data" }); await f.confirm(other); await entered.promise;
+    await vi.waitFor(() => expect(control("Reset local data")?.disabled).toBe(false));
+    const original = w.run(() => f.records.get(id)), publish = f.files.createDownload.bind(f.files);
+    vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+    other = await f.create(); await f.download(other); await entered.promise;
     visibility("hidden"); visibility("visible");
     await vi.waitFor(() => expect(control("Check status")?.disabled).toBe(false));
-    expect(root.textContent).toContain("Back up local records?");
+    expect(root.textContent).toContain("Reset local data?");
     expect(root.textContent).toContain("This change cannot be confirmed right now.");
     expect(root.textContent).toContain("Use Check status to read this card again.");
-    expect(control("Create backup")).toBeUndefined(); expect(control("Back to Backup")).toBeUndefined();
+    expect(control("Reset local data")).toBeUndefined(); expect(control("Back to Reset")).toBeUndefined();
     expect(w.run(() => f.records.get(id))).toEqual(original);
     release.resolve(); await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
-    control("Check status")!.click(); await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
+    control("Check status")!.click(); await vi.waitFor(() => expect(control("Reset local data")?.disabled).toBe(false));
     expect(root.textContent).not.toContain("cannot be confirmed right now"); expect(control("Check status")).toBeUndefined();
     expect(w.run(() => f.records.get(id))).toEqual(original);
     expect(app.callServerTool.mock.calls.some(([call]) => call.name === CARD_TOOLS.act)).toBe(false);
   } finally {
     release.resolve(); if (other) await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
-    await app?.onteardown?.(); await mcp.close(); f.close();
+    await app?.onteardown?.(); await mcp.close(); await f.close();
   }
 });
 
@@ -3745,15 +3746,15 @@ it.each(["file_io", "restart"] as const)("offers a current read for a selected r
     const before = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
     const original = w.run(() => f.records.get(id)); expect(original?.phase).toBe("draft");
     if (blocker === "file_io") {
-      const publish = f.files.publishExport.bind(f.files);
-      vi.spyOn(f.files, "publishExport").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
-      other = await f.prepare({ kind: "export_local_data" });
+      const publish = f.files.createDownload.bind(f.files);
+      vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
+      other = await f.create();
     } else {
       const replace = w.runtime.replace.bind(w.runtime);
       vi.spyOn(w.runtime, "replace").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return replace(...args); });
       other = await f.prepare({ kind: "restart_wallet_service" });
     }
-    expect((await f.confirm(other)).error).toBeUndefined(); await entered.promise;
+    expect((await (blocker === "file_io" ? f.download(other) : f.confirm(other))).error).toBeUndefined(); await entered.promise;
     const blocked = (await mcp.call({ name: CARD_TOOLS.read, arguments: ref })).structuredContent as { data: CardSnapshot };
     expect((blocked.data.data as SettingsView).allowedActions).not.toContain("settings_prepare");
     if (blocker === "restart") {
@@ -3773,7 +3774,7 @@ it.each(["file_io", "restart"] as const)("offers a current read for a selected r
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
   } finally {
     release.resolve(); if (other) await vi.waitFor(async () => expect((await f.read(other!)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
-    await app?.onteardown?.(); await mcp.close(); f.close();
+    await app?.onteardown?.(); await mcp.close(); await f.close();
   }
 });
 
@@ -3781,16 +3782,16 @@ it("restores a prepared Settings operation without action permission or a fictit
   const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
   let app: Host | undefined;
   try {
-    const card = await f.prepare({ kind: "export_local_data" }), original = w.run(() => f.records.get((card.snapshot.data as SettingsView).operationId));
+    const card = await f.prepare({ kind: "reset_local_data" }), original = w.run(() => f.records.get((card.snapshot.data as SettingsView).operationId));
     const { _meta, ...publicResult } = cardToolResult(card);
     app = host(mcp.call); app.readServerResource.mockImplementation(mcp.readResource);
     startCard("settings", settingsRenderer); app.ontoolresult!(publicResult);
-    await vi.waitFor(() => expect(root.textContent).toContain("Back up local records?"));
+    await vi.waitFor(() => expect(root.textContent).toContain("Reset local data?"));
     expect(root.querySelectorAll("button").some((node) => node.textContent.startsWith("Back to"))).toBe(false);
     expect(root.querySelectorAll("[data-card-action]")).toHaveLength(0);
     expect(app.readServerResource).toHaveBeenCalledOnce(); expect(app.callServerTool).not.toHaveBeenCalled();
     expect(w.run(() => f.records.get(original!.operationId))).toEqual(original);
-  } finally { await app?.onteardown?.(); await mcp.close(); f.close(); }
+  } finally { await app?.onteardown?.(); await mcp.close(); await f.close(); }
 });
 
 it.each(["size", "read"] as const)("scopes a local backup %s error to its input through navigation and a different operation result", async (failure) => {
@@ -3800,7 +3801,7 @@ it.each(["size", "read"] as const)("scopes a local backup %s error to its input 
   try {
     const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
     const id = (initial.data as SettingsView).operationId;
-    app = host(mcp.call); startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    app = host(mcp.call); app.downloadFile.mockResolvedValue({}); startCard("settings", settingsRenderer); app.ontoolresult!(created);
     await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Restore local records")!.click();
     await vi.waitFor(() => expect(root.querySelectorAll("input").find((node) => node.dataset.cardAction === "settings_begin_upload")?.disabled).toBe(false));
     const file = new File([failure === "size" ? new Uint8Array(16 * 1024 * 1024 + 1) : "{}"], "unreadable.json");
@@ -3822,20 +3823,20 @@ it.each(["size", "read"] as const)("scopes a local backup %s error to its input 
     readRelease.resolve(); await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
     const uploadId = w.run(() => f.records.get(id)!.fileId)!;
     control("Back to Restore")!.click(); await vi.waitFor(() => expect(control("Check backup again")?.disabled).toBe(false));
-    control("Back to Local records")!.click(); control("Back up local records")!.click();
-    await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false)); expect(root.textContent).not.toContain(message);
-    control("Continue")!.click(); await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
-    expect(root.textContent).not.toContain(message); control("Create backup")!.click();
+    control("Back to Local records")!.click(); control("Download backup")!.click();
+    expect(root.textContent).not.toContain(message);
+    expect(root.textContent).not.toContain("readable.json");
+    expect(root.textContent).not.toContain("File SHA-256");
     await vi.waitFor(() => expect(w.run(() => f.records.get(id)?.result?.outcome)).toBe("completed"));
     await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
-    await vi.waitFor(() => expect(root.textContent).toContain("The local backup file was created."));
+    await vi.waitFor(() => expect(root.textContent).toContain("The app accepted the download request."));
     expect(root.textContent).not.toContain(message);
-    expect(w.run(() => f.records.get(id))).toMatchObject({ draft: { kind: "export_local_data" }, phase: "terminal" });
+    expect(w.run(() => f.records.get(id))).toMatchObject({ draft: { kind: "download_backup" }, phase: "terminal" });
     expect(w.run(() => f.records.control())).toMatchObject({ file_io_id: null, active_operation_id: null, data_epoch: 0 });
     expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string })?.action === "settings_begin_upload")).toHaveLength(1);
     expect(w.run(() => f.records.file(uploadId))).toMatchObject({ invalidated: true, cleanup: "complete" });
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
-  } finally { readRelease.resolve(); await app?.onteardown?.(); await mcp.close(); f.close(); }
+  } finally { readRelease.resolve(); await app?.onteardown?.(); await mcp.close(); await f.close(); }
 });
 
 it.each([
@@ -3882,7 +3883,7 @@ it.each([
       expect(result.isError).not.toBe(true);
     }
     expect(w.run(() => f.records.control())).toMatchObject({ file_io_id: null, active_operation_id: null, data_epoch: 0 });
-  } finally { release.resolve(); await app?.onteardown?.(); await mcp.close(); f.close(); }
+  } finally { release.resolve(); await app?.onteardown?.(); await mcp.close(); await f.close(); }
 });
 
 it("shows actual receiving and check-request progress in the uploading frame without injecting a checking snapshot", async () => {
@@ -3935,14 +3936,13 @@ it("shows actual receiving and check-request progress in the uploading frame wit
     retryRelease.resolve(); await vi.waitFor(() => expect(control("Restore local records")?.disabled).toBe(false));
     expect(w.run(() => f.records.get(operationId)?.fileId)).toBe(fileId);
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled(); await app.onteardown!();
-  } finally { chunkRelease.resolve(); checkRelease.resolve(); retryRelease.resolve(); await mcp.close(); f.close(); }
+  } finally { chunkRelease.resolve(); checkRelease.resolve(); retryRelease.resolve(); await mcp.close(); await f.close(); }
 });
 
 it.each([
   { kind: "set_endpoint", page: "Advanced settings", operation: "Change network address", select: "Select network address", final: "Save network address" },
   { kind: "restore_endpoint", page: "Advanced settings", operation: "Use default network address", select: "Select default network address", final: "Use default network address" },
   { kind: "clear_read_address", page: "Address for viewing assets", operation: "Clear default address", select: "Clear default address", final: "Clear default address" },
-  { kind: "export_local_data", page: "Local records", operation: "Backup", select: "Back up local records", final: "Create backup" },
   { kind: "reset_local_data", page: "Local records", operation: "Reset", select: "Reset local data", final: "Reset local data" },
   { kind: "restart_wallet_service", page: "Troubleshooting", operation: "Connection service restart", select: "Restart connection service", final: "Restart connection service" }
 ] as const satisfies readonly { kind: Exclude<SettingsDraft["kind"], "import_local_data">; page: string; operation: string; select: string; final: string }[])("keeps $kind preparation waiting distinct from backup checks and application", async (choice) => {
@@ -4010,7 +4010,7 @@ it.each([
     expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string } | undefined)?.action === "settings_confirm")).toHaveLength(0);
     expect(replaced).not.toHaveBeenCalled(); expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
     await app.onteardown!();
-  } finally { release.resolve(); await mcp.close(); f.close(); }
+  } finally { release.resolve(); await mcp.close(); await f.close(); }
 });
 
 it.each(["lost_reply", "changed_selection"] as const)("settles preparation progress after %s without replaying or rebinding the command", async (mode) => {
@@ -4073,7 +4073,7 @@ it.each(["lost_reply", "changed_selection"] as const)("settles preparation progr
     expect(w.run(() => f.records.control())).toMatchObject({ data_epoch: 0, active_operation_id: null });
     expect(await w.run(() => f.preferences.getSuiGrpcUrl())).toMatchObject({ value: "https://fullnode.mainnet.sui.io:443" });
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled(); await app.onteardown!();
-  } finally { release.resolve(); readRelease.resolve(); await mcp.close(); f.close(); }
+  } finally { release.resolve(); readRelease.resolve(); await mcp.close(); await f.close(); }
 });
 
 it("labels the recorded disconnected wallet in restart confirmation without presenting current approval", async () => {
@@ -4109,7 +4109,7 @@ it("labels the recorded disconnected wallet in restart confirmation without pres
     expect(rendered.node.textContent).toContain("not confirmation that a wallet is connected now");
     expect(w.run(() => w.workflow.currentConnectionContext().assetReadAccount)).toEqual({ status: "address_required" });
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled(); rendered.dispose?.();
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 it("shows independently admitted stopped and waiting request records with distinct restart counts and Details-only identities", async () => {
@@ -4177,7 +4177,7 @@ it("shows independently admitted stopped and waiting request records with distin
       expect(w.run(() => w.records.request(flight.id)?.requestStatus)).toBe("stopped");
     }
     expect(w.submit).not.toHaveBeenCalled();
-    await app?.onteardown?.(); await mcp.close(); f.close();
+    await app?.onteardown?.(); await mcp.close(); await f.close();
   }
 });
 
@@ -4214,7 +4214,7 @@ it("shows the actual unconfirmed disconnection in restart confirmation while its
       await vi.waitFor(() => expect(w.run(() => w.records.connection(connectionId!)?.sdkPending)).toBe(false));
       expect(w.run(() => w.records.connection(connectionId!)?.connection.status)).toBe("disconnected");
     }
-    await app?.onteardown?.(); await mcp.close(); f.close();
+    await app?.onteardown?.(); await mcp.close(); await f.close();
   }
 });
 
@@ -4268,7 +4268,7 @@ it.each(["valid", "invalid_json"] as const)("keeps the actual %s backup verdict 
     expect(app.callServerTool.mock.calls.filter(([call]) => ["settings_prepare", "settings_confirm"].includes(String((call.arguments.input as { action?: string } | undefined)?.action)))).toHaveLength(0);
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled(); expect(applied).not.toHaveBeenCalled();
   } finally {
-    release.resolve(); await app?.onteardown?.(); await mcp.close(); f.close();
+    release.resolve(); await app?.onteardown?.(); await mcp.close(); await f.close();
   }
 });
 
@@ -4335,12 +4335,12 @@ it("keeps the currently selected upload after a different file replaces a backup
       }
     } finally {
       try { await app?.onteardown?.(); await mcp.close(); }
-      finally { f.close(); }
+      finally { await f.close(); }
     }
   }
 });
 
-it.each(["unsupported", "acknowledged", "not_completed", "unconfirmed", "changed", "missing", "permission", "operation", "file", "kind", "dispose_read", "dispose_host", "assembled_corruption", "valid_fragmented"] as const)(
+it.each(["unadvertised", "acknowledged", "not_completed", "unconfirmed", "changed", "missing", "permission", "operation", "file", "kind", "dispose_read", "dispose_host", "assembled_corruption", "valid_fragmented"] as const)(
   "delivers the same backup through the actual Settings renderer, lifecycle and authenticated MCP path (%s)", async (mode) => {
     const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
     const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
@@ -4350,15 +4350,28 @@ it.each(["unsupported", "acknowledged", "not_completed", "unconfirmed", "changed
     let originalBytes: Buffer | undefined, expectedHash = "", fragmentLimit = 0, validFragments = 0;
     const fragmented = mode === "assembled_corruption" || mode === "valid_fragmented";
     let otherCard: { cardId: string; permission: string } | undefined;
+    const createSnapshot = f.files.createDownload.bind(f.files);
+    vi.spyOn(f.files, "createDownload").mockImplementation(async (file, bytes) => {
+      await createSnapshot(file, bytes);
+      originalBytes = Buffer.from(bytes); expectedHash = createHash("sha256").update(bytes).digest("hex");
+      fragmentLimit = Math.floor(bytes.length / 2);
+      // The real writer and digest check have finished. These filesystem faults
+      // occur before the subsequent real authenticated range reader opens it.
+      const path = join(f.wallet.directory, ".settings-staging", `${file.fileId}.download`);
+      if (mode === "changed") await writeFile(path, Buffer.alloc(bytes.length, 1));
+      if (mode === "missing") await unlink(path);
+    });
     if (mode === "operation" || mode === "file") {
-      const other = await f.prepare({ kind: "export_local_data" }); await f.confirm(other);
+      const other = await f.create(); await f.download(other);
       await vi.waitFor(async () => expect((await f.read(other)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
       const data = (await f.read(other)).snapshot.data as SettingsView; otherOperation = data.operationId; otherFile = data.file!.fileId;
     }
-    if (mode === "kind") {
-      const other = await f.wallet.createConnection(); otherCard = { cardId: other.snapshot.cardId, permission: other.permission };
-    }
+    if (mode === "kind") { const other = await f.wallet.createConnection(); otherCard = { cardId: other.snapshot.cardId, permission: other.permission }; }
     const app = host(async (request) => {
+      if (request.name === CARD_TOOLS.readSettingsFile && mode === "dispose_read") {
+        readEntered.resolve(); await readRelease.promise;
+        try { return await mcp.call(request); } finally { readEnded.resolve(); }
+      }
       if (request.name === CARD_TOOLS.readSettingsFile && fragmented) {
         const response = await mcp.call({ ...request, arguments: { ...request.arguments, limit: fragmentLimit } });
         expect(response.isError).not.toBe(true);
@@ -4367,116 +4380,84 @@ it.each(["unsupported", "acknowledged", "not_completed", "unconfirmed", "changed
         expect(value).toMatchObject({ cardId: request.arguments.cardId, operationId: request.arguments.operationId,
           fileId: request.arguments.fileId, offset: request.arguments.offset, totalSize: originalBytes!.length, sha256: expectedHash });
         const fragment = Buffer.from(value.chunkBase64, "base64");
-        expect(fragment.length).toBeGreaterThan(0);
-        expect(fragment).toEqual(originalBytes!.subarray(value.offset, value.offset + fragment.length));
+        expect(fragment.length).toBeGreaterThan(0); expect(fragment).toEqual(originalBytes!.subarray(value.offset, value.offset + fragment.length));
         validFragments++;
-        // Only external delivery bytes change, after authenticated product FS
-        // verification. Identity, lengths, whole-file SHA and Base64 remain valid.
-        if (mode === "assembled_corruption" && tamper) {
-          fragment[0] = fragment[0]! ^ 1; value.chunkBase64 = fragment.toString("base64");
-        }
+        // Only external delivery bytes change after the real product reader.
+        if (mode === "assembled_corruption" && tamper) { fragment[0] = fragment[0]! ^ 1; value.chunkBase64 = fragment.toString("base64"); }
         return delivered;
       }
       if (request.name === CARD_TOOLS.readSettingsFile && tamper) {
-        const argumentsValue = { ...request.arguments };
-        if (mode === "permission") argumentsValue.permission = "wrong-permission";
-        if (mode === "operation") argumentsValue.operationId = otherOperation;
-        if (mode === "file") argumentsValue.fileId = otherFile;
-        if (mode === "kind") Object.assign(argumentsValue, otherCard);
-        return mcp.call({ ...request, arguments: argumentsValue });
+        const args = { ...request.arguments };
+        if (mode === "permission") args.permission = "wrong-permission";
+        if (mode === "operation") args.operationId = otherOperation;
+        if (mode === "file") args.fileId = otherFile;
+        if (mode === "kind") Object.assign(args, otherCard);
+        return mcp.call({ ...request, arguments: args });
       }
       return mcp.call(request);
     });
-    app.getHostCapabilities = () => mode === "unsupported" ? {} : { downloadFile: {} };
+    app.getHostCapabilities = () => mode === "unadvertised" ? {} : { downloadFile: {} };
     app.downloadFile.mockImplementation(async () => {
       hostEntered.resolve();
       if (mode === "dispose_host") return hostRelease.promise;
-      if (mode === "unconfirmed") throw new Error("Synthetic lost Host reply");
-      return { isError: mode === "not_completed" };
+      if (mode === "unconfirmed" && tamper) throw new Error("Synthetic lost Host reply");
+      return { isError: mode === "not_completed" && tamper };
     });
     try {
       const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
       const operationId = (initial.data as SettingsView).operationId;
       startCard("settings", settingsRenderer); app.ontoolresult!(created);
       await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click();
-      control("Back up local records")!.click();
-      await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false)); control("Continue")!.click();
-      await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false)); control("Create backup")!.click();
+      expect(control("Create backup")).toBeUndefined(); control("Download backup")!.click();
+      expect(control("Restore local records")).toBeUndefined(); expect(control("Reset local data")).toBeUndefined();
       await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(operationId)?.result?.outcome)).toBe("completed"));
-      // Export publication completes after admission's reply. Follow the
-      // backend's declared observation cadence through the actual lifecycle;
-      // injecting a terminal snapshot would bypass this consumer boundary.
-      await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
-      await vi.waitFor(() => expect(root.textContent).toContain("The local backup file was created."));
       const result = f.wallet.run(() => f.records.get(operationId)!.result!), fileId = f.wallet.run(() => f.records.get(operationId)!.fileId)!;
-      const path = String(result.details!.path), bytes = await readFile(path);
-      expect(root.querySelectorAll(".settings-path").map((node) => node.textContent))
-        .toEqual([join(f.wallet.directory, "backups"), `${operationId}.json`]);
-      expect(root.textContent).toContain("Folder"); expect(root.textContent).toContain("File name");
-      originalBytes = bytes; expectedHash = createHash("sha256").update(bytes).digest("hex");
-      // Derive a positive split from the actual source size, never a product
-      // transfer limit or a digest calculated from the corrupted delivery.
-      fragmentLimit = Math.floor(bytes.length / 2);
-      if (fragmented) expect(fragmentLimit).toBeGreaterThan(0);
-      if (mode === "unsupported") {
-        expect(control("Download this backup")).toBeUndefined();
-        expect(root.textContent).toContain("does not support downloading from this card"); expect(app.downloadFile).not.toHaveBeenCalled();
-        expect(app.callServerTool.mock.calls.some(([request]) => request.name === CARD_TOOLS.readSettingsFile)).toBe(false);
+      expect(result.completionScope).toBe("backup_snapshot"); expect(result.details).not.toHaveProperty("path");
+      await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+      if (mode === "dispose_read") {
+        await readEntered.promise; await app.onteardown!(); readRelease.resolve(); await readEnded.promise;
+        await vi.advanceTimersByTimeAsync(0); expect(app.downloadFile).not.toHaveBeenCalled(); return;
+      }
+      if (mode === "dispose_host") {
+        await hostEntered.promise; await app.onteardown!(); hostRelease.resolve({ isError: false });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(app.downloadFile).toHaveBeenCalledOnce();
+        expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string })?.action === "settings_report_download")).toHaveLength(0);
         return;
       }
-      if (mode === "changed") await writeFile(path, Buffer.alloc(bytes.length, 1));
-      if (mode === "missing") await unlink(path);
-      if (mode === "dispose_read") {
-        const read = f.files.readExportRange.bind(f.files);
-        vi.spyOn(f.files, "readExportRange").mockImplementationOnce(async (...args) => {
-          readEntered.resolve(); await readRelease.promise; const value = await read(...args); readEnded.resolve(); return value;
-        });
+      expect(root.textContent).not.toContain("Folder"); expect(root.textContent).not.toContain("does not support downloads");
+      const verificationFailure = ["changed", "missing", "permission", "operation", "file", "kind", "assembled_corruption"].includes(mode);
+      if (mode === "changed" || mode === "missing") {
+        await vi.waitFor(() => expect(root.textContent).toContain("Download ended"));
+        expect(control("Retry download")).toBeUndefined(); expect(app.downloadFile).not.toHaveBeenCalled();
+        expect(f.wallet.run(() => f.records.get(operationId)!.result)).toEqual(result); return;
       }
-      await vi.waitFor(() => expect(control("Download this backup")?.disabled).toBe(false)); control("Download this backup")!.click();
-      if (mode === "dispose_read") {
-        await readEntered.promise; expect(root.textContent).toContain("Checking the backup before downloading");
+      if (verificationFailure) {
+        await vi.waitFor(() => expect(root.textContent).toContain("Nothing was sent to the app for download."));
         expect(app.downloadFile).not.toHaveBeenCalled();
-        await app.onteardown!(); const ended = root.textContent; readRelease.resolve(); await readEnded.promise;
-        await vi.advanceTimersByTimeAsync(0); expect(root.textContent).toBe(ended); expect(app.downloadFile).not.toHaveBeenCalled();
-      } else if (mode === "dispose_host") {
-        await hostEntered.promise; expect(root.textContent).toContain("Checking the backup before downloading");
-        expect(app.downloadFile).toHaveBeenCalledOnce();
-        await app.onteardown!(); const ended = root.textContent; hostRelease.resolve({ isError: false });
-        await vi.advanceTimersByTimeAsync(0); expect(root.textContent).toBe(ended); expect(app.downloadFile).toHaveBeenCalledOnce();
       } else {
-        const rejected = ["changed", "missing", "permission", "operation", "file", "kind", "assembled_corruption"].includes(mode);
-        const expected = rejected ? "Nothing was sent" : mode === "acknowledged" || mode === "valid_fragmented" ? "received the download request"
-          : mode === "not_completed" ? "did not complete the download request" : "download could not be confirmed";
-        await vi.waitFor(() => expect(root.textContent).toContain(expected));
-        expect(app.downloadFile).toHaveBeenCalledTimes(rejected ? 0 : 1);
-        if (fragmented) expect(validFragments).toBeGreaterThan(1);
-        if (!rejected) {
-          const resource = app.downloadFile.mock.calls[0]![0].contents[0]!;
-          if (resource.type !== "resource" || !("blob" in resource.resource)) throw new Error("Expected actual Host file bytes");
-          expect(Buffer.from(resource.resource.blob, "base64")).toEqual(bytes);
-        }
-        const beforeRetry = app.downloadFile.mock.calls.length;
-        tamper = false; if (mode === "changed" || mode === "missing") await writeFile(path, bytes);
-        app.downloadFile.mockResolvedValue({ isError: false });
-        await vi.waitFor(() => expect(control("Download this backup")?.disabled).toBe(false)); control("Download this backup")!.click();
-        await vi.waitFor(() => expect(app.downloadFile).toHaveBeenCalledTimes(beforeRetry + 1));
-        await vi.waitFor(() => expect(root.textContent).toContain("received the download request"));
-        if (fragmented) {
-          const last = app.downloadFile.mock.calls.at(-1)![0].contents[0]!;
-          if (last.type !== "resource" || !("blob" in last.resource)) throw new Error("Expected verified original bytes on explicit retry");
-          expect(Buffer.from(last.resource.blob, "base64")).toEqual(bytes);
-          expect(await readFile(path)).toEqual(bytes);
-        }
+        await vi.waitFor(() => expect(app.downloadFile).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(root.textContent).toContain(mode === "not_completed" ? "Download not completed" : mode === "unconfirmed" ? "Download unconfirmed" : "Download requested"));
       }
+      if (mode === "not_completed" || mode === "unconfirmed" || verificationFailure) {
+        const before = app.downloadFile.mock.calls.length;
+        tamper = false;
+        await vi.waitFor(() => expect(control("Retry download")?.disabled).toBe(false)); control("Retry download")!.click();
+        await vi.waitFor(() => expect(app.downloadFile).toHaveBeenCalledTimes(before + 1));
+      }
+      await vi.waitFor(() => expect(root.textContent).toContain("The app accepted the download request."));
+      const sent = app.downloadFile.mock.calls.at(-1)![0] as { contents: [{ resource: { blob: string } }] };
+      expect(Buffer.from(sent.contents[0].resource.blob, "base64")).toEqual(originalBytes);
+      if (fragmented) expect(validFragments).toBeGreaterThan(1);
       expect(f.wallet.run(() => f.records.get(operationId)!.result)).toEqual(result);
-      expect(f.wallet.run(() => f.records.get(operationId)!.fileId)).toBe(fileId);
-      expect(app.callServerTool.mock.calls.filter(([request]) => (request.arguments.input as { action?: string } | undefined)?.action === "settings_confirm")).toHaveLength(1);
+      expect(f.wallet.run(() => f.records.file(fileId))).toMatchObject({ cleanup: "complete", invalidated: true });
+      await expect(readFile(join(f.wallet.directory, ".settings-staging", `${fileId}.download`))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string })?.action === "settings_download_backup")).toHaveLength(1);
       expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
-    } finally { readRelease.resolve(); hostRelease.resolve({ isError: false }); await app.onteardown?.(); await mcp.close(); f.close(); }
+    } finally { readRelease.resolve(); hostRelease.resolve({ isError: false }); await app.onteardown?.(); await mcp.close(); await f.close(); }
   });
 
 it.each([
-  { kind: "export_local_data", page: "Local records", operation: "Backup", select: "Back up local records" },
   { kind: "import_local_data", page: "Local records", operation: "Restore", select: "Restore local records" },
   { kind: "reset_local_data", page: "Local records", operation: "Reset", select: "Reset local data" },
   { kind: "clear_read_address", page: "Address for viewing assets", operation: "Clear default address", select: "Clear default address" },
@@ -4506,7 +4487,7 @@ it.each([
       expect(root.querySelectorAll("input")).toHaveLength(0);
       expect(root.querySelectorAll("[data-card-action]").map((node) => node.dataset.cardAction).sort()).toEqual(["settings_prepare"]);
     }
-    for (const label of ["Back up local records", "Restore local records", "Reset local data", "Select network address", "Select default network address", "Restart connection service", "Clear default address"]) {
+    for (const label of ["Download backup", "Restore local records", "Reset local data", "Select network address", "Select default network address", "Restart connection service", "Clear default address"]) {
       expect(control(label)).toBeUndefined();
     }
     const calls = app.callServerTool.mock.calls.length;
@@ -4531,23 +4512,23 @@ it.each([
     expect(w.run(() => w.cardRecords.get(snapshot.cardId)!.state.expiresAt)).toBe(deadline);
     expect(w.run(() => f.records.control())).toMatchObject({ data_epoch: 0, active_operation_id: null });
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
-  } finally { await app?.onteardown?.(); await mcp.close(); f.close(); }
+  } finally { await app?.onteardown?.(); await mcp.close(); await f.close(); }
 });
 
-it("closes Settings only from the root after leaving a prepared backup without publishing and keeps its ended result readable", async () => {
+it("closes Settings only from the root after leaving a prepared reset without applying and keeps its ended result readable", async () => {
   const f = await settingsWorkflowFixture(), w = f.wallet, mcp = await savedWorkflowMcp({ ...w, cards: f.cards });
-  const publish = vi.spyOn(f.files, "publishExport"); let app: Host | undefined;
+  const publish = vi.spyOn(f.files, "createDownload"); let app: Host | undefined;
   try {
-    const prepared = await f.prepare({ kind: "export_local_data" }), view = prepared.snapshot.data as SettingsView;
+    const prepared = await f.prepare({ kind: "reset_local_data" }), view = prepared.snapshot.data as SettingsView;
     const ref = { cardId: prepared.snapshot.cardId, permission: prepared.permission };
     app = host(mcp.call); startCard("settings", settingsRenderer);
     app.ontoolresult!({ ...cardToolResult(prepared), _meta: { [CARD_METADATA_KEY]: ref } });
     const control = (name: string) => root.querySelectorAll("button").find((node) => node.textContent === name);
-    await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
+    await vi.waitFor(() => expect(control("Reset local data")?.disabled).toBe(false));
     const actions = root.querySelector(".settings-action-row")!;
-    expect(control("Create backup")!.parent).toBe(actions);
+    expect(control("Reset local data")!.parent).toBe(actions);
     expect(control("Cancel")).toBeUndefined(); expect(control("Close Settings")).toBeUndefined();
-    control("Back to Backup")!.click(); await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
+    control("Back to Reset")!.click(); await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
     expect(w.run(() => f.records.get(view.operationId)?.result)).toBeUndefined();
     control("Back to Local records")!.click(); expect(control("Close Settings")).toBeUndefined();
     control("Back to Settings")!.click();
@@ -4563,7 +4544,7 @@ it("closes Settings only from the root after leaving a prepared backup without p
     expect(root.querySelector(".settings-action-row")).toBeUndefined();
     expect(w.run(() => f.records.control())).toMatchObject({ active_operation_id: null, data_epoch: 0 });
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
-  } finally { await app?.onteardown?.(); await mcp.close(); f.close(); }
+  } finally { await app?.onteardown?.(); await mcp.close(); await f.close(); }
 });
 
 it("separates Settings navigation from preparation and preserves the same work through toolbar Back", async () => {
@@ -4594,27 +4575,27 @@ it("separates Settings navigation from preparation and preserves the same work t
       expect(f.wallet.run(() => f.records.get(operationId))).toEqual(original);
       expect(app.callServerTool).toHaveBeenCalledTimes(calls);
     }
-    control("Local records")!.click(); control("Back up local records")!.click();
+    control("Local records")!.click(); control("Reset local data")!.click();
     await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
     const selected = f.wallet.run(() => f.records.get(operationId)), selectedCalls = app.callServerTool.mock.calls.length;
     control("Back to Local records")!.click();
     expect(control("Continue")).toBeUndefined();
-    expect(root.textContent).toContain("Unfinished change: Backup.");
+    expect(root.textContent).toContain("Unfinished change: Reset.");
     expect(f.wallet.run(() => f.records.get(operationId))).toEqual(selected);
     expect(app.callServerTool).toHaveBeenCalledTimes(selectedCalls);
     control("Resume")!.click(); control("Continue")!.click();
-    await vi.waitFor(() => expect(control("Create backup")?.disabled).toBe(false));
-    expect(root.textContent).toContain("Settings / Local records / Backup / Confirm");
-    const back = control("Back to Backup")!;
+    await vi.waitFor(() => expect(control("Reset local data")?.disabled).toBe(false));
+    expect(root.textContent).toContain("Settings / Local records / Reset / Confirm");
+    const back = control("Back to Reset")!;
     expect(back.dataset.cardAction).toBe("settings_back");
     expect(back.parent?.getAttribute("aria-label")).toBe("Settings navigation");
     back.click();
     await vi.waitFor(() => expect(control("Continue")?.disabled).toBe(false));
     expect(f.wallet.run(() => f.records.get(operationId)?.preparationId)).toBeUndefined();
-    expect(f.wallet.run(() => f.records.get(operationId)?.draft?.kind)).toBe("export_local_data");
+    expect(f.wallet.run(() => f.records.get(operationId)?.draft?.kind)).toBe("reset_local_data");
     expect(f.wallet.run(() => f.records.get(operationId)?.result)).toBeUndefined();
     expect(f.wallet.quote).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 it("shows the same removal-first reconciliation action in Settings overview and Troubleshooting while the service remains available", async () => {
@@ -4641,7 +4622,7 @@ it("shows the same removal-first reconciliation action in Settings overview and 
     expect(((next.structuredContent as { data: CardSnapshot }).data.data as SettingsView).facts?.connectionReconciliationRequired).toBeUndefined();
     expect(f.wallet.connect).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
     await app.onteardown!();
-  } finally { await mcp.close(); f.close(); }
+  } finally { await mcp.close(); await f.close(); }
 });
 
 it("automatically checks an uploaded backup and rechecks it only after Back and an independent same-count writer, then applies only a new confirmation", async () => {
@@ -4708,7 +4689,7 @@ it("automatically checks an uploaded backup and rechecks it only after Back and 
     visibility("hidden"); visibility("visible"); await vi.advanceTimersByTimeAsync(0);
     expect(applied).toHaveBeenCalledOnce(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
     await app.onteardown!();
-  } finally { db.close(); await mcp.close(); f.close(); }
+  } finally { db.close(); await mcp.close(); await f.close(); }
 });
 
 it("keeps an invalid endpoint editable after a real MCP rejection and stores only the new explicit confirmation", async () => {
@@ -4728,7 +4709,7 @@ it("keeps an invalid endpoint editable after a real MCP rejection and stores onl
     await vi.waitFor(() => expect(root.textContent).toContain("network address was saved"));
     expect(await f.wallet.run(() => f.preferences.getSuiGrpcUrl())).toMatchObject({ value: "https://mainnet.example:9443" });
     expect(f.wallet.sign).not.toHaveBeenCalled(); await app.onteardown!();
-  } finally { await mcp.close(); f.close(); }
+  } finally { await mcp.close(); await f.close(); }
 });
 
 it.each(["grpc", "graphql"] as const)("shows the exact %s restore target and captured environment effect in the Settings body", async (endpoint) => {
@@ -4751,7 +4732,7 @@ it.each(["grpc", "graphql"] as const)("shows the exact %s restore target and cap
     expect(factValues(result.node as unknown as Element, endpoint === "grpc" ? "Saved Sui node address (gRPC)" : "Saved activity data address (GraphQL)")).toEqual([target]);
     expect(result.node.textContent).toContain(override);
     expect(result.node.textContent).toMatch(/Remove that launch setting before restarting to use the saved address/); result.dispose();
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 it("renders known failed SDK targets as disconnect-only and unrecorded presence as Settings guidance", async () => {
@@ -4785,7 +4766,7 @@ it("renders known failed SDK targets as disconnect-only and unrecorded presence 
       expect(guidance).toContain("Remove the retained connection in your wallet app");
       expect(guidance).toContain("Restarting does not approve an unrecorded connection");
     }
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 it("replaces an invalid backup through the actual file picker with an automatic check before applying", async () => {
@@ -4811,7 +4792,7 @@ it("replaces an invalid backup through the actual file picker with an automatic 
     control("Restore local records")!.click(); await vi.waitFor(() => expect(root.textContent).toContain("Local records were replaced"));
     expect(f.wallet.run(() => f.records.control().data_epoch)).toBe(1); expect(f.wallet.sign).not.toHaveBeenCalled();
     await app.onteardown!();
-  } finally { await mcp.close(); f.close(); }
+  } finally { await mcp.close(); await f.close(); }
 });
 
 
@@ -4847,7 +4828,7 @@ it.each(["connected", "failed"] as const)("allows fresh explicit disconnect conf
     expect(calls).toBe(2);
     await vi.waitFor(() => expect(vi.mocked(f.transport.disconnect).mock.calls.length-baseline).toBe(1));
     await app.onteardown!();
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 
@@ -4883,7 +4864,7 @@ it("recovers a committed Settings restart after a lost Host reply and frame retu
     expect(record.acceptedInput).toMatchObject({ action: "settings_confirm" });
     expect((await f.wallet.run(() => f.cards.read({ cardId: snapshot.cardId, permission: (created._meta![CARD_METADATA_KEY] as { permission: string }).permission }))).snapshot.state).toBe("closed");
     await next.onteardown!(); expect(replaced).toHaveBeenCalledOnce();
-  } finally { await mcp.close(); f.close(); }
+  } finally { await mcp.close(); await f.close(); }
 });
 
 it("resumes the same actual upload after teardown while the matching physical write finishes", async () => {
@@ -4912,5 +4893,167 @@ it("resumes the same actual upload after teardown while the matching physical wr
     expect(control("Preview replacement")).toBeUndefined();
     expect(root.textContent).toContain("cannot undo this from this card"); expect(root.textContent).toContain("Other open cards will no longer work");
     await next.onteardown!();
-  } finally { release.resolve(); await mcp.close(); f.close(); }
+  } finally { release.resolve(); await mcp.close(); await f.close(); }
+});
+
+it.each([
+  { hostName: "chatgpt", capabilities: {} },
+  { hostName: "Claude", capabilities: { downloadFile: {} } },
+  { hostName: "Unregistered standard desktop fixture", capabilities: {} }
+])("downloads once through the actual Settings path without a Host-specific menu ($hostName)", async ({ hostName, capabilities }) => {
+  const visibility = new EventTarget(); document.addEventListener = visibility.addEventListener.bind(visibility); document.removeEventListener = visibility.removeEventListener.bind(visibility);
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  const app = host(mcp.call); app.getHostCapabilities = () => capabilities; app.getHostVersion = () => ({ name: hostName });
+  app.downloadFile.mockResolvedValue({});
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const operationId = (initial.data as SettingsView).operationId;
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click();
+    expect(control("Create backup")).toBeUndefined(); expect(control("Download this backup")).toBeUndefined();
+    await vi.waitFor(() => expect(control("Download backup")?.disabled).toBe(false)); control("Download backup")!.click();
+    await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(operationId)?.result?.outcome)).toBe("completed"));
+    await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+    await vi.waitFor(() => expect(app.downloadFile).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(root.textContent).toContain("The app accepted the download request."));
+    expect(root.textContent).not.toContain("Folder"); expect(root.textContent).not.toContain("Create backup");
+    expect(root.textContent).toContain("Suggested file name");
+    const requests = app.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.act).map(([call]) => (call.arguments.input as { action: string }).action);
+    expect(requests).toEqual(["settings_download_backup", "settings_report_download"]);
+    const download = app.downloadFile.mock.calls[0]![0] as { contents: [{ resource: { blob: string } }] };
+    const bytes = Buffer.from(download.contents[0].resource.blob, "base64"), data = f.wallet.run(() => f.records.get(operationId)!);
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(data.result?.details?.sha256);
+    expect(f.wallet.run(() => f.records.file(data.fileId!)?.cleanup)).toBe("complete");
+    const calls = app.downloadFile.mock.calls.length;
+    for (const visibilityState of ["hidden", "visible"]) {
+      Object.defineProperty(document, "visibilityState", { value: visibilityState, writable: true }); visibility.dispatchEvent(new Event("visibilitychange"));
+    }
+    await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+    expect(app.downloadFile).toHaveBeenCalledTimes(calls);
+    expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+  } finally { await app.onteardown?.(); await mcp.close(); await f.close(); }
+});
+
+
+it.each(["before", "after"] as const)("recovers the same download report after reply loss %s its commit without resending bytes", async (when) => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  let lose = true;
+  const app = host(async (request) => {
+    if (lose && (request.arguments.input as { action?: string })?.action === "settings_report_download") {
+      lose = false;
+      if (when === "after") await mcp.call(request);
+      throw new Error("Synthetic report reply loss");
+    }
+    return mcp.call(request);
+  });
+  app.downloadFile.mockResolvedValue({});
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const id = (initial.data as SettingsView).operationId;
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Download backup")!.click();
+    await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(id)?.result?.outcome)).toBe("completed"));
+    await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+    await vi.waitFor(() => expect(app.downloadFile).toHaveBeenCalledOnce());
+    if (when === "before") {
+      await vi.waitFor(() => expect(control("Check status")?.disabled).toBe(false)); control("Check status")!.click();
+    }
+    await vi.waitFor(() => expect(root.textContent).toContain("The app accepted the download request."));
+    expect(app.downloadFile).toHaveBeenCalledOnce();
+    expect(f.wallet.run(() => f.records.get(id)?.preparation?.download)).toMatchObject({ endReason: "acknowledged" });
+    expect(control("Retry download")).toBeUndefined();
+    expect(app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string })?.action === "settings_download_backup")).toHaveLength(1);
+  } finally { await app.onteardown?.(); await mcp.close(); await f.close(); }
+});
+
+it("requires an explicit same-snapshot retry after a Settings frame is recreated", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  const first = host(mcp.call); first.downloadFile.mockRejectedValue(new Error("Synthetic lost download response"));
+  let second: Host | undefined;
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const id = (initial.data as SettingsView).operationId;
+    startCard("settings", settingsRenderer); first.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Download backup")!.click();
+    await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(id)?.result?.outcome)).toBe("completed"));
+    await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+    await vi.waitFor(() => expect(root.textContent).toContain("Download unconfirmed"));
+    const original = f.wallet.run(() => f.records.get(id)!)!;
+    await first.onteardown!(); root = new Element("main"); second = host(mcp.call); second.downloadFile.mockResolvedValue({});
+    startCard("settings", settingsRenderer); second.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Retry download")?.disabled).toBe(false));
+    expect(second.downloadFile).not.toHaveBeenCalled(); expect(root.textContent).toContain("Retrying may save another copy");
+    control("Retry download")!.click();
+    await vi.waitFor(() => expect(root.textContent).toContain("The app accepted the download request."));
+    expect(second.downloadFile).toHaveBeenCalledOnce(); expect(second.downloadFile.mock.calls[0]![0]).toEqual(first.downloadFile.mock.calls[0]![0]);
+    expect(f.wallet.run(() => f.records.get(id)!.result)).toEqual(original.result);
+    expect(f.wallet.run(() => f.records.get(id)!.fileId)).toBe(original.fileId);
+    expect(second.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string })?.action === "settings_download_backup")).toHaveLength(0);
+  } finally { await first.onteardown?.(); await second?.onteardown?.(); await mcp.close(); await f.close(); }
+});
+
+it("does not dispatch a backup using a current-read reply delayed beyond the remaining file lease", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  const entered = deferred<void>(), release = deferred<void>();
+  let sawRange = false, held = false, elapsed = 0;
+  const monotonic = vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+  const app = host(async (request) => {
+    if (request.name === CARD_TOOLS.read && sawRange && !held) {
+      held = true;
+      const record = f.wallet.run(() => f.wallet.cardRecords.get(String(request.arguments.cardId)))!;
+      const download = f.wallet.run(() => f.records.get(record.operationId!)!.preparation!.download) as { expiresAt: string };
+      // The real backend produces a valid last read, then only its external
+      // delivery is delayed. This must not grant another 100 ms on arrival.
+      f.wallet.advance(Date.parse(download.expiresAt) - f.wallet.now().getTime() - 100);
+      const response = await mcp.call(request);
+      expect(((response.structuredContent as { data: CardSnapshot }).data.data as SettingsView).download?.remainingMs).toBe(100);
+      entered.resolve(); await release.promise; return response;
+    }
+    const response = await mcp.call(request);
+    if (request.name === CARD_TOOLS.readSettingsFile) sawRange = true;
+    return response;
+  });
+  app.downloadFile.mockResolvedValue({});
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const id = (initial.data as SettingsView).operationId;
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Download backup")!.click();
+    await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(id)?.result?.outcome)).toBe("completed"));
+    await vi.advanceTimersByTimeAsync(initial.pollAfterMs); await entered.promise;
+    f.wallet.advance(1000); elapsed = 1000; await vi.advanceTimersByTimeAsync(1000);
+    release.resolve();
+    await vi.waitFor(() => expect(root.textContent).toContain("Download ended"));
+    expect(app.downloadFile).not.toHaveBeenCalled();
+    expect(f.wallet.run(() => f.records.get(id)?.preparation?.download)).toMatchObject({ endReason: "expired" });
+  } finally { release.resolve(); await app.onteardown?.(); monotonic.mockRestore(); await mcp.close(); await f.close(); }
+});
+
+it("offers a same-card status read when another final operation temporarily blocks Download backup", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const entered = deferred<void>(), release = deferred<void>(), replace = f.wallet.runtime.replace.bind(f.wallet.runtime);
+  vi.spyOn(f.wallet.runtime, "replace").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return replace(...args); });
+  const control = (name: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === name || node.textContent === name);
+  const other = await f.prepare({ kind: "restart_wallet_service" });
+  const app = host(mcp.call);
+  try {
+    expect((await f.confirm(other)).error).toBeUndefined(); await entered.promise;
+    expect(f.wallet.run(() => f.records.control().file_io_id)).toBeNull();
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click();
+    expect(control("Download backup")?.disabled).toBe(true);
+    expect(control("Check status")?.disabled).toBe(false);
+    expect(f.wallet.run(() => f.records.get((initial.data as SettingsView).operationId)?.admittedAt)).toBeUndefined();
+    release.resolve(); await vi.waitFor(async () => expect((await f.read(other)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }));
+    control("Check status")!.click();
+    await vi.waitFor(() => expect(control("Download backup")?.disabled).toBe(false));
+    expect(control("Check status")).toBeUndefined();
+    expect(app.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.act)).toHaveLength(0);
+    expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+  } finally { release.resolve(); await vi.waitFor(async () => expect((await f.read(other)).snapshot.data).toMatchObject({ result: { outcome: "completed" } })); await app.onteardown?.(); await mcp.close(); await f.close(); }
 });

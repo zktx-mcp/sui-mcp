@@ -2,14 +2,14 @@ import { settingsViewSchema, SETTINGS_IMPORT_MAX_SIZE, type SettingsDraft } from
 import type { CardSnapshot } from "../contracts.js";
 import { section, accordion, element, row, mono, button, buttonRow, endRow, field, input, timeValue, type ButtonVariant } from "../../../review-app/src/ui/ui.js";
 import { uploadSettingsFile, downloadSettingsFile, type SettingsDownloadStatus, type SettingsUploadProgress } from "./settingsFiles.js";
-import type { CardRenderer, CardViewContext, SettingsViewTransport } from "./lifecycle.js";
+import type { CardRenderer, CardViewContext, CardDisplayRecovery, SettingsViewTransport } from "./lifecycle.js";
 import { CONNECTION_RECONCILIATION_MESSAGE, walletRecoveryImpactSchema, type WalletConnection, type WalletRecoveryImpact } from "../../core/session/walletConnection.js";
 
 type Page = "overview" | "address" | "records" | "troubleshooting" | "advanced";
 type Route = { kind: "section"; page: Page } | { kind: "operation"; operation: SettingsDraft["kind"] };
 const operationLabels: Record<SettingsDraft["kind"], string> = {
   set_endpoint: "Change network address", restore_endpoint: "Use default network address", clear_read_address: "Clear default address",
-  export_local_data: "Backup", import_local_data: "Restore", reset_local_data: "Reset", restart_wallet_service: "Connection service restart"
+  download_backup: "Backup", export_local_data: "Backup", import_local_data: "Restore", reset_local_data: "Reset", restart_wallet_service: "Connection service restart"
 };
 const pageLabels: Record<Page, string> = { overview: "Settings", address: "Address for viewing assets", records: "Local records",
   troubleshooting: "Troubleshooting", advanced: "Advanced settings" };
@@ -25,12 +25,12 @@ const recordLabels = [["accounts", "Saved addresses"], ["reviewSessions", "Revie
   ["outcomeUnknownRequests", "Transaction requests with unconfirmed results"], ["externalActivityTransactions", "Activity records"], ["localSettings", "Saved network settings"]] as const;
 const titles: Record<SettingsDraft["kind"], string> = {
   set_endpoint: "Save network address?", restore_endpoint: "Use default network address?", clear_read_address: "Clear the default address for viewing assets?",
-  export_local_data: "Back up local records?", import_local_data: "Restore available", reset_local_data: "Reset local data?",
+  download_backup: "Download backup", export_local_data: "Back up local records?", import_local_data: "Restore available", reset_local_data: "Reset local data?",
   restart_wallet_service: "Restart connection service?"
 };
 const finalLabels: Record<SettingsDraft["kind"], string> = {
   set_endpoint: "Save network address", restore_endpoint: "Use default network address", clear_read_address: "Clear default address",
-  export_local_data: "Create backup", import_local_data: "Restore local records", reset_local_data: "Reset local data",
+  download_backup: "Download backup", export_local_data: "Create backup", import_local_data: "Restore local records", reset_local_data: "Reset local data",
   restart_wallet_service: "Restart connection service"
 };
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
@@ -52,6 +52,9 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
   let fileNotice: { cardId: string; operationId: string; revision: number; draft: string; fileId: string | undefined; message: string } | undefined;
   let fileWork = false, downloadStatus: SettingsDownloadStatus | undefined;
   let commandProgress = context?.settingsCommandProgress;
+  let downloadJob: { attemptId: string; phase: "admitting" | "waiting" | "sending" } | undefined;
+  let pendingReport: { operationId: string; fileId: string; attemptId: string; status: "acknowledged" | "not_completed" | "unconfirmed" } | undefined;
+  let reportRecovery: CardDisplayRecovery | undefined;
   let displayedDepth: number | undefined;
   let uploadJob: { startingRevision: number; progress: SettingsUploadProgress | undefined } | undefined;
   const node = element("div", "settings-card");
@@ -90,12 +93,115 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
     controls.append(primary);
     return controls;
   }
+  async function reportDownload(): Promise<void> {
+    if (!transport || !pendingReport || disposed) return;
+    const report = pendingReport; reportRecovery = undefined;
+    transport.setFileTransferActive(true);
+    try {
+      await transport.act({ action: "settings_report_download", ...report }, true);
+      if (pendingReport === report) pendingReport = undefined;
+    } catch {
+      if (!disposed && pendingReport === report) reportRecovery = {
+        message: "The download response could not be recorded. Check status to record the same response without downloading again.",
+        retry: () => { if (pendingReport === report) void reportDownload(); }
+      };
+    }
+    finally { if (!disposed) { transport.setFileTransferActive(!!downloadJob); render(); changed?.(); } }
+  }
+  function maybeDeliverDownload(): void {
+    const job = downloadJob;
+    if (!transport || disposed || !job || job.phase !== "waiting" || state.download?.availability !== "available" ||
+        state.download.currentAttemptId !== job.attemptId || !state.file) return;
+    job.phase = "sending";
+    const file = { operationId: state.operationId, ...state.file, attemptId: job.attemptId };
+    void downloadSettingsFile(file, transport, (status) => {
+      if (downloadJob !== job || disposed) return;
+      downloadStatus = status; render(); changed?.();
+    }, () => !disposed && downloadJob === job && document.visibilityState !== "hidden" &&
+      state.download?.currentAttemptId === job.attemptId && state.download.availability === "available").then(async (status) => {
+      if (!disposed && status && ["acknowledged", "not_completed", "unconfirmed"].includes(status)) {
+        pendingReport = { operationId: file.operationId, fileId: file.fileId, attemptId: file.attemptId,
+          status: status as "acknowledged" | "not_completed" | "unconfirmed" };
+        await reportDownload();
+      }
+    }).finally(() => {
+      if (downloadJob === job) { downloadJob = undefined; fileWork = false; }
+      if (!disposed) { transport?.setFileTransferActive(!!downloadJob); render(); changed?.(); }
+    });
+  }
+  function beginDownload(retry: boolean): void {
+    if (!transport || !act || disposed || downloadJob || fileWork) return;
+    const attemptId = crypto.randomUUID(), job = { attemptId, phase: "admitting" as "admitting" | "waiting" | "sending" };
+    const input = retry && state.file && state.download
+      ? { action: "settings_retry_download", operationId: state.operationId, fileId: state.file.fileId,
+        previousAttemptId: state.download.currentAttemptId, attemptId }
+      : { action: "settings_download_backup", operationId: state.operationId, attemptId };
+    downloadJob = job; fileWork = true; downloadStatus = undefined; pendingReport = undefined; reportRecovery = undefined;
+    render(); changed?.();
+    if (retry) transport.setFileTransferActive(true);
+    void transport.act(input, retry).then(() => {
+      if (disposed || downloadJob !== job) return;
+      job.phase = "waiting"; transport?.setFileTransferActive(true); render(); changed?.(); maybeDeliverDownload();
+    }).catch(() => {
+      if (downloadJob === job) { downloadJob = undefined; fileWork = false; }
+      if (!disposed) { transport?.setFileTransferActive(false); render(); changed?.(); }
+    });
+  }
+  function downloadControl(label: string, actionName: string, handler: () => void, blocked = false): HTMLButtonElement {
+    const control = button(label, handler, "secondary"); control.dataset.cardAction = actionName;
+    if (actionName !== "settings_download_backup") control.dataset.settingsFileAction = "true";
+    if (blocked) control.dataset.settingsLocalBlocked = "true";
+    control.disabled = blocked; return control;
+  }
+  function renderDownload(content: HTMLElement): void {
+    const delivery = state.download;
+    const file = state.draft?.kind === "download_backup" ? state.file : undefined;
+    const title = delivery?.endReason === "acknowledged" ? "Download requested" : delivery?.endReason === "cancelled" ? "Download cancelled"
+      : delivery?.endReason ? "Download ended" : downloadJob ? delivery?.availability === "available" ? "Downloading backup…" : "Preparing backup…"
+      : delivery?.hostReport === "not_completed" ? "Download not completed" : delivery?.hostReport === "unconfirmed" ? "Download unconfirmed" : "Backup ready";
+    content.append(element("h2", undefined, title));
+    if (delivery?.endReason === "acknowledged") content.append(element("p", "ui-note", "The app accepted the download request. This does not confirm that the file was saved or where it was saved."));
+    else if (delivery?.endReason === "cancelled") content.append(element("p", "ui-note", "No further download will be sent from this request. This does not close a save dialog or delete a file already saved by the app."));
+    else if (delivery?.endReason) content.append(element("p", "ui-note", delivery.endReason === "expired"
+      ? "The time to download this backup has ended. Open a new Settings card to download the current records."
+      : "This backup can no longer be downloaded. Open a new Settings card to try again."));
+    else if (delivery?.hostReport === "not_completed") content.append(element("p", "ui-note", "The app did not complete the download request. It did not report whether it was cancelled, refused or failed."));
+    else if (delivery?.hostReport === "unconfirmed" || delivery?.previousUnconfirmed ||
+        !downloadJob && !pendingReport && delivery?.availability === "available" && !delivery.hostReport && downloadStatus !== "backup_unverified") {
+      content.append(element("p", "ui-note", "The previous download could not be confirmed." +
+        (act && delivery?.allowedFileActions.includes("settings_retry_download") ? " Retrying may save another copy if the app already handled it." : "")));
+    }
+    if (downloadStatus === "backup_unverified") content.append(element("p", "ui-note", "The backup could not be read or checked. Nothing was sent to the app for download."));
+    if (file?.sealed) {
+      content.append(row("Suggested file name", file.displayName), row("File size", `${file.totalSize.toLocaleString("en-US")} bytes`));
+      if (file.totalSize > SETTINGS_IMPORT_MAX_SIZE) content.append(element("p", "ui-note", "This backup exceeds the 16 MiB restore limit."));
+    }
+    if (act && transport && delivery?.allowedFileActions.includes("settings_retry_download")) {
+      content.append(downloadControl("Retry download", "settings_retry_download", () => beginDownload(true), !!downloadJob || !!pendingReport));
+    }
+    if (act && transport && state.file && delivery?.allowedFileActions.includes("settings_cancel_download")) {
+      content.append(downloadControl("Cancel download", "settings_cancel_download", () => {
+        if (!transport || disposed || !state.file || !state.download) return;
+        downloadJob = undefined; fileWork = false; downloadStatus = undefined;
+        const input = { action: "settings_cancel_download", operationId: state.operationId, fileId: state.file.fileId, attemptId: state.download.currentAttemptId };
+        transport.setFileTransferActive(true);
+        void transport.act(input, true).catch(() => {}).finally(() => {
+          if (!disposed) { transport?.setFileTransferActive(false); render(); changed?.(); }
+        });
+      }));
+    }
+    if (state.temporaryFileCleanup === "pending" || state.temporaryFileCleanup === "failed") {
+      content.append(element("p", "ui-error", "Temporary-file cleanup has not been confirmed. Use Check status to check the same request."));
+    }
+    if (!act) content.append(element("p", "ui-note", "To download a backup, ask in chat to open a new Settings card."));
+    else if (delivery?.availability === "ended") content.append(element("p", "ui-note", "To download the current records again, ask in chat to open a new Settings card."));
+  }
   function details(content: HTMLElement, location: Page, impact: WalletRecoveryImpact | undefined, operation: SettingsDraft | undefined): void {
     const detail = accordion("Details");
     if (state.facts) detail.body.append(row("Version", state.facts.server.version));
     detail.body.append(row("Settings request ID", mono(state.operationId)));
-    if (operation && state.file) detail.body.append(row("File SHA-256", mono(state.file.sha256)));
-    if (operation && ["export_local_data", "import_local_data", "reset_local_data"].includes(operation.kind)) {
+    if (operation && operation.kind === state.draft?.kind && state.file) detail.body.append(row("File SHA-256", mono(state.file.sha256)));
+    if (operation && ["export_local_data", "download_backup", "import_local_data", "reset_local_data"].includes(operation.kind)) {
       detail.body.append(element("p", "ui-note", "Local backups do not contain wallet keys, wallet connections, wallet approvals, access granted to cards, transaction bytes or signatures."));
     }
     if (operation?.kind === "import_local_data" && state.preparation?.preview) {
@@ -139,10 +245,11 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
     const readyRestore = state.draft?.kind === "import_local_data" && state.restoreCheck?.status === "can_restore";
     // The displayed step owns both its content and its navigation. Stored
     // preparation can remain valid while restoration is temporarily blocked.
-    const step = state.result ? "result" : busy ? "progress" : route.kind === "section" ? "section"
+    const admittingDownload = downloadJob?.phase === "admitting";
+    const step = admittingDownload ? "progress" : state.result ? "result" : busy ? "progress" : route.kind === "section" ? "section"
       : state.phase === "prepared" && (state.draft?.kind !== "import_local_data" || readyRestore) ? "confirmation" : "input";
     const page = route.kind === "section" ? route.page : pageFor(route.operation);
-    const operation = step === "section" ? undefined : state.draft;
+    const operation: SettingsDraft | undefined = admittingDownload ? { kind: "download_backup" } : step === "section" ? undefined : state.draft;
     const location = operation ? pageFor(operation.kind) : page;
     const impact = operation?.kind === "restart_wallet_service" && state.preparation?.impact
       ? walletRecoveryImpactSchema.parse(state.preparation.impact) : undefined;
@@ -173,11 +280,13 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
     }
     const path = ["Settings", ...(location === "overview" ? [] : [pageLabels[location]]),
       ...(operation ? [operationLabels[operation.kind]] : []),
-      ...(step === "result" ? ["Result"] : step === "progress" ? [checking ? "Checking backup" : "Applying change"]
+      ...(step === "result" ? ["Result"] : step === "progress" ? [operation?.kind === "download_backup" ? "Downloading" : checking ? "Checking backup" : "Applying change"]
         : step === "confirmation" ? ["Confirm"] : [])];
     const position = element("span", "settings-location", path.join(" / ")); position.setAttribute("aria-current", "page");
     toolbar.append(position); content.append(toolbar);
-    if (step === "result" && state.result) {
+    if (operation?.kind === "download_backup") {
+      renderDownload(content);
+    } else if (step === "result" && state.result) {
       content.append(element("p", state.result.outcome === "failed" ? "ui-error" : "ui-note", state.result.message));
       const result = object(state.result.details);
       if (typeof result.storedValue === "string") {
@@ -197,7 +306,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
         if (state.file) {
           content.append(row("File size", `${state.file.totalSize.toLocaleString("en-US")} bytes`));
           if (state.file.totalSize > SETTINGS_IMPORT_MAX_SIZE) content.append(element("p", "ui-note", "This backup exceeds the 16 MiB restore limit. The entire backup was saved, but this installation cannot restore a file this large."));
-          if (act && transport?.canDownload()) {
+          if (act && transport) {
             const control = button("Download this backup", () => {
               if (disposed || !transport || !state.file || fileWork) return;
               fileWork = true; control.disabled = true;
@@ -207,9 +316,8 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
             }, "secondary");
             control.dataset.settingsDownload = "true"; control.disabled = fileWork;
             content.append(control);
-          } else content.append(element("p", "ui-note", "This app does not support downloading from this card. Find the backup using the folder and file name above."));
+          }
           if (downloadStatus) content.append(element("p", "ui-note", {
-            unsupported: "This app does not support downloads. Find the backup using the folder and file name above.",
             pending: "Checking the backup before downloading…",
             backup_unverified: "The backup file could not be read or checked. Nothing was sent to the app for download. Check the folder shown above, or open a new Settings card to create another backup.",
             acknowledged: "The app received the download request. This does not confirm that the file was saved or where it was saved.",
@@ -376,7 +484,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
       } else if (page === "records") {
         content.append(element("p", "ui-note", recordScope));
         if (act) content.append(
-          choice("Backup", "Save the current local records and Sui network settings in a backup file.", select("Back up local records", { kind: "export_local_data" })),
+          choice("Backup", "Download the current local records and Sui network settings as one backup file.", downloadControl("Download backup", "settings_download_backup", () => beginDownload(false))),
           choice("Restore", "Choose a Sui MCP backup. It will be checked automatically before you confirm the restore.", select("Restore local records", { kind: "import_local_data" })),
           choice("Reset", "Review the local records and stored settings to delete. This does not cancel transactions on Sui.", select("Reset local data", { kind: "reset_local_data" }, true)));
       } else if (page === "troubleshooting") {
@@ -427,6 +535,13 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
   return { node, update(next: CardSnapshot, nextContext: CardViewContext) {
     const data = settingsViewSchema.parse(next.data);
     if (data.operationId !== state.operationId) return false;
+    if (pendingReport && data.file?.fileId === pendingReport.fileId && data.download?.currentAttemptId === pendingReport.attemptId &&
+        data.download.hostReport === pendingReport.status) {
+      pendingReport = undefined; reportRecovery = undefined;
+    }
+    if (pendingReport && (!data.download?.allowedFileActions.includes("settings_report_download") || data.file?.fileId !== pendingReport.fileId)) {
+      pendingReport = undefined; reportRecovery = undefined;
+    }
     // A stored input/progress revision also distinguishes an explicit same-kind
     // reselection before a file ID exists. Unchanged fact reads keep the error.
     if (fileNotice && (data.result || next.revision !== fileNotice.revision || next.cardId !== fileNotice.cardId || data.operationId !== fileNotice.operationId ||
@@ -442,8 +557,10 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
         progress?.sha256 && data.file && data.file.sha256 !== progress.sha256)) uploadJob = undefined;
     state = data; currentSnapshot = next; transport = nextContext.settings; changed = nextContext.onDisplayChange;
     commandProgress = nextContext.settingsCommandProgress;
-    render(sameSnapshot); return true;
-  }, dispose() { disposed = true; uploadJob = undefined; fileNotice = undefined; } };
+    render(sameSnapshot); maybeDeliverDownload(); return true;
+  }, displayRecovery() {
+    return pendingReport ? reportRecovery : undefined;
+  }, dispose() { disposed = true; uploadJob = undefined; fileNotice = undefined; downloadJob = undefined; pendingReport = undefined; } };
 }
 export const settingsRenderer = { title: "Settings", controls: (snapshot, act, _display, _wallet, context) => view(snapshot, act, context),
   result: (snapshot, _display, act, _wallet, context) => view(snapshot, act, context)

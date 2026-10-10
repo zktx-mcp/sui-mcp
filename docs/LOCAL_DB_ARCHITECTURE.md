@@ -106,7 +106,7 @@ The following live session tables hold runtime session state in the shared datab
 - `live_transaction_materials`: locally built unsigned transaction bytes stored as a BLOB behind a redacted handle, with a TTL; retained for the admitted request. Terminal request cleanup removes only material still owned by that revision, preserving newer preparation. Owner replacement deletes old private material while retaining immutable review and chain-result evidence.
 - `live_wallet_connections`: verified connection facts, private topic and callback state.
 - `live_read_cards`: public card state with private permission hash, scope, operation and CAS revision.
-- `settings_operations`: one draft/upload/preparation/admission/result identity per Settings card, with owner/data epoch, user-data revision, fingerprint and SDK supersession/checkpoint facts.
+- `settings_operations`: one draft/upload/preparation/admission/result identity per Settings card, with owner/data epoch, user-data revision, fingerprint and SDK supersession/checkpoint facts. A download stores its typed snapshot lifetime and per-attempt delivery reports in private `preparation_json`, separately from the immutable result. Updating delivery never reserializes a terminal `result_json`.
 - `settings_files`: private file identity, original operation, upload/export role, generated paths, lengths/hash, chunk reservation and seal/invalidation/cleanup state. `cleanup_operation_id` separately names the operation responsible for cleanup; replacement can transfer that responsibility without changing the file identity, public path or input eligibility.
 - `settings_control`: current data epoch/user-data revision, one final-operation slot, one file-I/O reservation and the SDK input block owner. These are semantic state/authority facts, not release-version counters.
 
@@ -155,20 +155,39 @@ to that operation returns to sealed; other preparations return to draft. Old
 confirmations cannot apply. Backup checking and final I/O still verify physical content;
 a manifest alone is not proof of a valid file.
 
-Private staging files survive as cleanup journal entries when their old cards
-are invalidated. Uploads remain unusable. Reset/import assume responsibility
-for unfinished staging cleanup of both uploads and exports; public backup
-files remain unchanged. `temporaryFileCleanup` combines physical staging cleanup
-with settlement of that operation's ended I/O reservation. Physical cleanup alone
-does not mean settlement is complete.
-An explicit same-result status read may finish its cleanup or verify an
-existing published export, never regenerate a backup, reapply data or replace
-an SDK run. Unrelated cleanup/storage failure does not erase a known result.
-Files/permissions/SDK credentials/private transaction material are excluded
-from public backups. Clearing the default address does not invalidate
-account-independent coin metadata or disconnect the wallet.
+A `download_backup` admission consumes one card input and captures one local-data
+snapshot in the same SQLite transaction. The export role and exact generated
+`.settings-staging/<fileId>.download` namespace identify its private file; an
+export role or display name alone is insufficient. File bytes are not stored
+in operation JSON or public backups. Physical write, fsync, length and SHA checks
+finish before the snapshot becomes available. `result` is immutable preparation
+evidence; delivery reports have separate typed state and atomic attempt identity.
 
-Non-terminal review session expiry is recorded lazily when the session is read or mutated after its TTL. There is no background expiry worker.
+The fixed thirty-minute transfer period begins at physical readiness, independently
+of the original input expiry. The owner schedules its earliest live transfer
+deadline; current DB time, owner and epoch decide expiry. An abandoned frame does
+not own cleanup. A failed already-due journal cannot create a zero-delay loop or
+cancel another snapshot's future deadline. Status reads and owner recovery can
+retry cleanup. Current-generation access rejects stale callbacks after replacement.
+
+Private staging files survive as cleanup journal entries when cards are
+invalidated. Reset/import invalidate uploads and private downloads and transfer
+cleanup ownership without changing file identity. Existing public backup files
+remain unchanged. Acknowledgment, explicit cancellation, expiry, source failure
+or owner restart ends private retention. Active descriptor reads/writes finish
+before deletion; new ranges and retries are refused once authority ends.
+`temporaryFileCleanup` includes physical cleanup and settlement of the operation's
+ended I/O reservation. Stored results remain readable during pending cleanup,
+including when expiry persistence fails; input remains closed and the failed
+cleanup stays visible. Another operation's reservation is never released.
+
+An explicit same-result read may finish its cleanup or verify an existing
+published export, never regenerate a backup, repeat Host delivery, reapply data
+or replace an SDK run. Files/permissions/SDK credentials/private transaction
+material are excluded from public backups. Clearing the default address does
+not invalidate account-independent coin metadata or disconnect the wallet.
+
+Non-terminal review session expiry is recorded lazily when the session is read or mutated after its TTL. Review-session expiry has no background worker; private download retention uses the separate owner timer described above.
 
 ## Shared local server
 

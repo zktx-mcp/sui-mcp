@@ -6,6 +6,14 @@ facts and forward explicit user selections through scoped app-only tools. They
 never hold transaction bytes/signatures or call a wallet, Sui RPC, Indexer or
 local HTTP endpoint directly. Direct NFT image loading is the display exception.
 
+All six cards use the same product UI and interaction rules across desktop
+Hosts. Equivalent validated data, authority, time, theme and viewport produce
+the same information, labels, controls and recovery flow. Qualified transport
+formats are normalized at the common integration boundary; Host names do not
+select product features or grant authority. Native window chrome and file
+pickers belong to the Host. Actual delivery remains a required integration
+check; a common error screen does not establish working file delivery.
+
 ## Display and review facts
 
 Show what is happening, the relevant asset flow, whether an action is available,
@@ -325,15 +333,40 @@ upload remains available for a new Preview after preparation invalidation;
 explicit file change uses the backend selection action. Validation rejection
 retains the actual current card and a usable correction/selection path.
 
-Results distinguish data application, temporary backup cleanup and optional
-Host download. Incomplete cleanup offers Check status for the same operation.
-Cleanup includes settlement of that operation's ended I/O reservation. A stored
-result remains readable while that settlement is retried; it does not authorize
-releasing another operation's running I/O.
-Download is explicit, reads/verifies the same complete file, and is never
-repeated by a recreated frame. Capability absence, pending, acknowledged,
-not_completed and unconfirmed are distinct; acknowledgment is not proof of a
-save location and isError does not classify cancellation/denial/failure.
+Local records offers Download backup as one explicit action. Snapshot creation
+and verification are internal progress, without a separate creation or
+confirmation page. New downloads use one private temporary snapshot; they do
+not publish a permanent server backup. Other Settings choices do not appear on
+its progress or result page. File delivery uses the standard Host-mediated
+request, without hiding the action according to a Host name or download
+advertisement. Missing card authority still prevents actions.
+
+Results distinguish snapshot preparation, Host-reported delivery, temporary
+cleanup and actual user file storage. Suggested file name is not a confirmed
+save location. Host acknowledgment ends server retention but is not proof of a
+saved file; isError does not classify cancellation, denial or failure. Lost
+responses are unconfirmed. An explicit retry uses the same verified snapshot
+within its fixed transfer period and warns when a prior request may already
+have been handled. Frame recreation and state reads never download again.
+Cancel download ends further transfer and cleans the temporary snapshot; it
+cannot close a Host dialog or delete a saved user file. A new frame needs an
+explicit retry, and a server restart ends the old transfer.
+
+The backend owns a thirty-minute transfer period starting when the snapshot is
+physically ready, separately from the original card-input deadline. Reads and
+retries do not extend it. The View consumes relative remaining time without
+extending a confirmed deadline. Permission, operation, file, attempt and current
+state are checked before delivery. The elapsed time of the authenticated
+pre-delivery read, including a coalesced read, reduces the remaining period; a
+delayed reply cannot grant a fresh transfer period. A corrupt or unavailable snapshot sends no
+bytes to the Host. Existing saved backup results retain their recorded facts;
+their public files are not removed by temporary cleanup.
+
+Incomplete cleanup offers Check status for the same operation. Cleanup includes
+settlement of that operation's ended I/O reservation and waits for its actual
+file reads/writes to end. A stored result remains readable while settlement is
+retried; it does not release another operation's running I/O. Reading a recorded
+Host report resolves a lost reply without sending the file again.
 
 Local-data counts describe the backend state at the time they are read. A later
 replacement warning must not use a stale count, especially zero, as an assurance
