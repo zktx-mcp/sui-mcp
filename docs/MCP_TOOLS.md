@@ -1302,19 +1302,28 @@ input; a new card must receive a new explicit file selection.
 A download's `result.completionScope: "backup_snapshot"` identifies the immutable
 preparation result, not a saved user file. `data.download` separately carries
 `availability` (`preparing`, `available`, `ended`), `currentAttemptId`, an optional
-`hostReport` (`acknowledged`, `not_completed`, `unconfirmed`), `previousUnconfirmed`,
+`hostReport` (`acknowledged`, `not_completed`, `unconfirmed`, `unsupported`), `previousUnconfirmed`,
 `expiresAt`, `remainingMs`, `endReason` and `allowedFileActions`. End reasons are
-`acknowledged`, `cancelled`, `expired`, `server_restarted`, `data_replaced` or
-`source_unavailable`. Replacement revokes the old card rather than preserving
+`acknowledged`, `cancelled`, `expired`, `server_restarted`, `data_replaced`,
+`source_unavailable`, `stored_locally` or `local_save_failed`. Replacement revokes the old card rather than preserving
 its input. The transfer period is thirty minutes from physical readiness;
 reads/retries never extend it or reopen the original business-input deadline.
 Raw per-attempt preparation is not copied into public `preparation`.
 
-New download results contain no server Folder/path. Their file name is a
-suggestion for Host saving. A recorded `export_local_data` result can provide
-`data.backupLocation.directory` and `filename` describing its existing local
-file. Those fields do not identify a Host download destination. Existing user
-files are never deleted by private snapshot cleanup.
+`data.download.localSave`, when present, separates `needs_consent`, `saving`,
+`saved` and `failed`. It may include `currentSaveAttemptId`, `savedAt` and a
+failure reason (`not_published`, `target_conflict`, `source_unavailable` or
+`interrupted`). Uncertain physical results remain `saving`; they do not grant
+another save. `previousUnconfirmed` includes an earlier attempt whose delivery
+absence was not established, including an unreported or not-completed request.
+
+A verified local `saved` result provides `data.backupLocation.directory` and
+`filename` for `<SUI_MCP_DATA_DIR>/backups/<operationId>.json`. Snapshot preparation
+and Host acknowledgment do not provide that local success. A recorded
+`export_local_data` result can also identify its existing file. These fields
+never identify the destination chosen by a Host download dialog. Existing user
+files are never deleted by private snapshot cleanup. Private publication
+identities and source inode/device facts are not public projection fields.
 
 Current `data.facts` uses the same connection selection and qualification rules
 as interaction status, through a fact reader that does not settle another
@@ -1394,7 +1403,7 @@ An environment override continues to take precedence after restart while it
 remains set; storing an endpoint does not modify that environment.
 
 Download creates and verifies one private snapshot with an exclusive generated
-file identity. It does not publish a second permanent backup. Response or result
+file identity. Supported Host delivery does not publish a second permanent backup. Response or result
 storage failure never regenerates that snapshot. `ui.read_settings_file` is
 app-only and binds card/permission, operation, file, offset, verified hash/length
 and the current `attemptId` for a private download. Its ordinary content carries
@@ -1406,11 +1415,29 @@ File continuations also use app-only `ui.act_card`:
 - `settings_retry_download`: `operationId`, `fileId`, `previousAttemptId` and a
   new `attemptId`; atomically advances one attempt on the same live snapshot.
 - `settings_report_download`: `operationId`, `fileId`, `attemptId` and `status`
-  (`acknowledged`, `not_completed`, `unconfirmed`); the same report is idempotent,
+  (`acknowledged`, `not_completed`, `unconfirmed`, `unsupported`); the same report is idempotent,
   and conflicting reports for one attempt are rejected. A late older report
-  cannot change the current attempt or end its retention.
+  cannot change the current attempt or end its retention. `unsupported` requires
+  exactly `failure: {method: "ui/download-file", code: -32601}`; other statuses
+  must omit `failure`. Only the actual download call's method-not-found result
+  supplies that report. It is atomically admitted with the same snapshot's local
+  publication intent when no earlier delivery is possible. A busy shared slot
+  rejects that admission atomically; the View can record the same received
+  report again without another Host call. An older or ended attempt report
+  never admits publication.
 - `settings_cancel_download`: `operationId`, `fileId` and `attemptId`; ends
   further delivery of that snapshot, not a Host dialog or a user-saved file.
+  Cancellation is refused while a local save is in progress or its outcome is
+  uncertain. After a failure recorded as `not_published`, cancellation remains
+  available within the transfer period for the current authorized request.
+- `settings_store_backup`: `operationId`, `fileId`, current `attemptId`, a new
+  `saveAttemptId`, required boolean `allowPossibleCopy`, and optional
+  `previousSaveAttemptId`. It is available only for that snapshot's recorded
+  unsupported result. Possible earlier delivery requires explicit true consent;
+  otherwise false is required. Initial consent has no previous save ID. A retry
+  of a confirmed no-publication failure must name the current failed save ID.
+  IDs and consent are immutable per admission; duplicates do not repeat effects.
+  It accepts no arbitrary path, name or bytes.
 
 These actions validate current owner, epoch, credential and exact file/attempt
 identity independently of terminal business input. Retry/read requires a live
@@ -1420,6 +1447,12 @@ requests cleanup; it does not prove a save location or completed disk storage.
 `isError` does not distinguish cancellation, denial or failure. A lost response
 is unconfirmed and never triggers automatic retransmission. Cleanup failure is
 reported separately and is retried through Check status or owner recovery.
+Local publication closes further Host reads/retries for that snapshot. Its
+final/file-I/O reservations survive the immutable terminal snapshot result.
+New save admissions and retries require the original live period; admitted
+file work settles even if it outlives that period. A process restart verifies
+only an existing target bound to its recorded source identity/content. It never
+publishes a missing target or restores the departed card's action authority.
 A missing or changed source ends that private transfer; a new explicit request
 is required. An existing public backup is verified on the same descriptor used
 for each range and is never truncated or removed by temporary cleanup.

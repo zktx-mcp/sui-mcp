@@ -53,7 +53,8 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
   let fileWork = false, downloadStatus: SettingsDownloadStatus | undefined;
   let commandProgress = context?.settingsCommandProgress;
   let downloadJob: { attemptId: string; phase: "admitting" | "waiting" | "sending" } | undefined;
-  let pendingReport: { operationId: string; fileId: string; attemptId: string; status: "acknowledged" | "not_completed" | "unconfirmed" } | undefined;
+  let pendingReport: { operationId: string; fileId: string; attemptId: string; status: "acknowledged" | "not_completed" | "unconfirmed" | "unsupported";
+    failure?: { method: "ui/download-file"; code: -32601 } } | undefined;
   let reportRecovery: CardDisplayRecovery | undefined;
   let displayedDepth: number | undefined;
   let uploadJob: { startingRevision: number; progress: SettingsUploadProgress | undefined } | undefined;
@@ -110,7 +111,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
   }
   function maybeDeliverDownload(): void {
     const job = downloadJob;
-    if (!transport || disposed || !job || job.phase !== "waiting" || state.download?.availability !== "available" ||
+    if (!transport || disposed || !job || job.phase !== "waiting" || state.download?.availability !== "available" || state.download.localSave ||
         state.download.currentAttemptId !== job.attemptId || !state.file) return;
     job.phase = "sending";
     const file = { operationId: state.operationId, ...state.file, attemptId: job.attemptId };
@@ -119,9 +120,10 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
       downloadStatus = status; render(); changed?.();
     }, () => !disposed && downloadJob === job && document.visibilityState !== "hidden" &&
       state.download?.currentAttemptId === job.attemptId && state.download.availability === "available").then(async (status) => {
-      if (!disposed && status && ["acknowledged", "not_completed", "unconfirmed"].includes(status)) {
+      if (!disposed && status && ["acknowledged", "not_completed", "unconfirmed", "unsupported"].includes(status)) {
         pendingReport = { operationId: file.operationId, fileId: file.fileId, attemptId: file.attemptId,
-          status: status as "acknowledged" | "not_completed" | "unconfirmed" };
+          status: status as "acknowledged" | "not_completed" | "unconfirmed" | "unsupported",
+          ...(status === "unsupported" ? { failure: { method: "ui/download-file" as const, code: -32601 as const } } : {}) };
         await reportDownload();
       }
     }).finally(() => {
@@ -156,6 +158,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
   function renderDownload(content: HTMLElement): void {
     const delivery = state.download;
     const file = state.draft?.kind === "download_backup" ? state.file : undefined;
+    if (!renderLocalSave(content)) {
     const title = delivery?.endReason === "acknowledged" ? "Download requested" : delivery?.endReason === "cancelled" ? "Download cancelled"
       : delivery?.endReason ? "Download ended" : downloadJob ? delivery?.availability === "available" ? "Downloading backup…" : "Preparing backup…"
       : delivery?.hostReport === "not_completed" ? "Download not completed" : delivery?.hostReport === "unconfirmed" ? "Download unconfirmed" : "Backup ready";
@@ -179,6 +182,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
     if (act && transport && delivery?.allowedFileActions.includes("settings_retry_download")) {
       content.append(downloadControl("Retry download", "settings_retry_download", () => beginDownload(true), !!downloadJob || !!pendingReport));
     }
+    }
     if (act && transport && state.file && delivery?.allowedFileActions.includes("settings_cancel_download")) {
       content.append(downloadControl("Cancel download", "settings_cancel_download", () => {
         if (!transport || disposed || !state.file || !state.download) return;
@@ -193,8 +197,46 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
     if (state.temporaryFileCleanup === "pending" || state.temporaryFileCleanup === "failed") {
       content.append(element("p", "ui-error", "Temporary-file cleanup has not been confirmed. Use Check status to check the same request."));
     }
-    if (!act) content.append(element("p", "ui-note", "To download a backup, ask in chat to open a new Settings card."));
+    if (!act && delivery?.localSave?.status !== "saved") content.append(element("p", "ui-note", "To download a backup, ask in chat to open a new Settings card."));
     else if (delivery?.availability === "ended") content.append(element("p", "ui-note", "To download the current records again, ask in chat to open a new Settings card."));
+  }
+  function renderLocalSave(content: HTMLElement): boolean {
+    const delivery = state.download, save = delivery?.localSave, file = state.file;
+    if (!delivery || !save || (save.status !== "saved" && save.status !== "saving" && delivery.endReason && delivery.endReason !== "local_save_failed")) return false;
+    content.append(element("h2", undefined, save.status === "saved" ? "Backup saved" : save.status === "saving" ? "Saving backup…"
+      : save.status === "needs_consent" ? "Save a local copy?" : "Backup not saved"));
+    if (save.status === "saved" && state.backupLocation) {
+      const location = element("div", "settings-backup-location");
+      location.append(row("Folder", element("span", "settings-path", state.backupLocation.directory)),
+        row("File name", element("span", "settings-path", state.backupLocation.filename)));
+      content.append(element("p", "ui-note", "The backup was saved in the Sui MCP backup folder on this computer."), location);
+    } else if (save.status === "saving") content.append(element("p", "ui-note", "Wait while this backup is saved and checked. Use Check status to check the same request."));
+    else if (save.status === "failed") content.append(element("p", "ui-error", save.failure === "target_conflict"
+      ? "The backup location already contains an item or could not be verified. It has not been replaced."
+      : save.failure === "not_published" ? "The backup could not be saved. You can retry saving the same backup."
+      : "The backup could not be verified for saving. Open a new Settings card to try again."));
+    if (save.status !== "saved" && save.status !== "saving" && delivery.previousUnconfirmed) {
+      content.append(element("p", "ui-note", "An earlier request may already have saved this backup. Saving a local copy may leave another copy."));
+    }
+    if (file) {
+      if (save.status !== "saved") content.append(row("Suggested file name", file.displayName));
+      content.append(row("File size", `${file.totalSize.toLocaleString("en-US")} bytes`));
+      if (file.totalSize > SETTINGS_IMPORT_MAX_SIZE) content.append(element("p", "ui-note", "This backup exceeds the 16 MiB restore limit."));
+    }
+    if (act && transport && delivery.allowedFileActions.includes("settings_store_backup")) {
+      content.append(downloadControl(save.status === "needs_consent" ? "Save a local copy" : "Retry save", "settings_store_backup", () => {
+        if (!transport || disposed || fileWork || !state.file || !state.download) return;
+        const prior = state.download.localSave;
+        const input = { action: "settings_store_backup", operationId: state.operationId, fileId: state.file.fileId,
+          attemptId: state.download.currentAttemptId, saveAttemptId: crypto.randomUUID(), allowPossibleCopy: state.download.previousUnconfirmed,
+          ...(prior?.currentSaveAttemptId ? { previousSaveAttemptId: prior.currentSaveAttemptId } : {}) };
+        fileWork = true; transport.setFileTransferActive(true); render(); changed?.();
+        void transport.act(input, true).catch(() => {}).finally(() => {
+          fileWork = false; if (!disposed) { transport?.setFileTransferActive(false); render(); changed?.(); }
+        });
+      }, fileWork));
+    }
+    return true;
   }
   function details(content: HTMLElement, location: Page, impact: WalletRecoveryImpact | undefined, operation: SettingsDraft | undefined): void {
     const detail = accordion("Details");
@@ -322,6 +364,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
             backup_unverified: "The backup file could not be read or checked. Nothing was sent to the app for download. Check the folder shown above, or open a new Settings card to create another backup.",
             acknowledged: "The app received the download request. This does not confirm that the file was saved or where it was saved.",
             not_completed: "The app did not complete the download request. It did not report whether the download was cancelled, refused or failed. The file passed its check before the request.",
+            unsupported: "This app cannot receive this file. The existing backup remains in the folder shown above.",
             unconfirmed: "The download could not be confirmed. You can try Download this backup again; the same file will be checked before it is sent."
           }[downloadStatus]));
         }
@@ -484,7 +527,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
       } else if (page === "records") {
         content.append(element("p", "ui-note", recordScope));
         if (act) content.append(
-          choice("Backup", "Download the current local records and Sui network settings as one backup file.", downloadControl("Download backup", "settings_download_backup", () => beginDownload(false))),
+          choice("Backup", "Download the current local records and Sui network settings as one backup file. If this connection cannot provide downloads, the same file is saved in the Sui MCP backup folder on this computer.", downloadControl("Download backup", "settings_download_backup", () => beginDownload(false))),
           choice("Restore", "Choose a Sui MCP backup. It will be checked automatically before you confirm the restore.", select("Restore local records", { kind: "import_local_data" })),
           choice("Reset", "Review the local records and stored settings to delete. This does not cancel transactions on Sui.", select("Reset local data", { kind: "reset_local_data" }, true)));
       } else if (page === "troubleshooting") {

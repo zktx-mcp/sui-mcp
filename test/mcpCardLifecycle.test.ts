@@ -5057,3 +5057,83 @@ it("offers a same-card status read when another final operation temporarily bloc
     expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
   } finally { release.resolve(); await vi.waitFor(async () => expect((await f.read(other)).snapshot.data).toMatchObject({ result: { outcome: "completed" } })); await app.onteardown?.(); await mcp.close(); await f.close(); }
 });
+
+it.each([
+  { mode: "unsupported", name: "chatgpt", advertised: false },
+  { mode: "unsupported", name: "Claude", advertised: true },
+  { mode: "unsupported", name: "Other standard desktop", advertised: false },
+  { mode: "invalid_params", name: "Other standard desktop", advertised: true },
+  { mode: "lost_response", name: "Other standard desktop", advertised: false },
+  { mode: "not_completed", name: "Other standard desktop", advertised: true },
+  { mode: "extra_response_field", name: "Other standard desktop", advertised: true },
+  { mode: "file_method_error", name: "Other standard desktop", advertised: false }
+])("routes only this download method's non-support to one actual local file ($mode/$name)", async ({ mode, name, advertised }) => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards });
+  const publication = vi.spyOn(f.files, "publishDownload");
+  const control = (label: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === label || node.textContent === label);
+  const app = host(async (request) => {
+    if (mode === "file_method_error" && request.name === CARD_TOOLS.readSettingsFile) throw Object.assign(new Error("Synthetic other method rejection"), { code: -32601 });
+    return mcp.call(request);
+  });
+  app.getHostVersion = () => ({ name }); app.getHostCapabilities = () => advertised ? { downloadFile: {} } : {};
+  app.downloadFile.mockImplementation(async () => {
+    if (mode === "unsupported") throw Object.assign(new Error("Synthetic method not found"), { code: -32601 });
+    if (mode === "invalid_params") throw Object.assign(new Error("Synthetic invalid parameters"), { code: -32602 });
+    if (mode === "lost_response") throw new Error("Synthetic download response lost");
+    if (mode === "not_completed") return { isError: true };
+    return { unsupported: true }; // An unrecognized response field is not a method-not-found error.
+  });
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data;
+    const id = (initial.data as SettingsView).operationId;
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click();
+    expect(root.textContent).toContain("same file is saved in the Sui MCP backup folder"); control("Download backup")!.click();
+    await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(id)?.result?.outcome)).toBe("completed"));
+    await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+    if (mode === "unsupported") {
+      await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(id)?.preparation?.download)).toMatchObject({ localSave: { status: "saved" } }));
+      await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+      await vi.waitFor(() => expect(root.textContent).toContain("Backup saved"));
+      expect(root.textContent).toContain(join(f.wallet.directory, "backups")); expect(root.textContent).toContain(`${id}.json`);
+      const payload = app.downloadFile.mock.calls[0]![0] as { contents: [{ resource: { blob: string } }] };
+      expect(await readFile(join(f.wallet.directory, "backups", `${id}.json`))).toEqual(Buffer.from(payload.contents[0].resource.blob, "base64"));
+      expect(publication).toHaveBeenCalledOnce(); expect(app.downloadFile).toHaveBeenCalledOnce();
+      for (const label of ["Retry download", "Download this backup", "Restore local records", "Cancel download", "Close Settings", "Back to Local records"]) expect(control(label)).toBeUndefined();
+      const reports = app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string })?.action === "settings_report_download");
+      expect(reports).toHaveLength(1); expect(reports[0]![0].arguments.input).toMatchObject({ status: "unsupported", failure: { method: "ui/download-file", code: -32601 } });
+    } else {
+      const message = mode === "file_method_error" ? "Nothing was sent to the app for download" : mode === "not_completed" ? "Download not completed"
+        : mode === "extra_response_field" ? "Download requested" : "Download unconfirmed";
+      await vi.waitFor(() => expect(root.textContent).toContain(message));
+      expect(publication).not.toHaveBeenCalled(); expect(f.wallet.run(() => f.records.get(id)?.preparation?.download)).not.toHaveProperty("localSave");
+      if (mode === "file_method_error") expect(app.downloadFile).not.toHaveBeenCalled();
+    }
+    expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+  } finally { await app.onteardown?.(); await mcp.close(); await f.close(); }
+});
+
+it("shows only a local-copy decision after uncertain delivery, then saves from that explicit same-snapshot action", async () => {
+  const f = await settingsWorkflowFixture(), mcp = await savedWorkflowMcp({ ...f.wallet, cards: f.cards }), app = host(mcp.call);
+  const publication = vi.spyOn(f.files, "publishDownload");
+  const control = (label: string) => root.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === label || node.textContent === label);
+  app.downloadFile.mockRejectedValueOnce(new Error("Synthetic response lost")).mockRejectedValue(Object.assign(new Error("Synthetic method not found"), { code: -32601 }));
+  try {
+    const created = await mcp.create("settings", {}), initial = (created.structuredContent as { data: CardSnapshot }).data, id = (initial.data as SettingsView).operationId;
+    startCard("settings", settingsRenderer); app.ontoolresult!(created);
+    await vi.waitFor(() => expect(control("Local records")?.disabled).toBe(false)); control("Local records")!.click(); control("Download backup")!.click();
+    await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(id)?.result?.outcome)).toBe("completed"));
+    await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+    await vi.waitFor(() => expect(control("Retry download")?.disabled).toBe(false)); control("Retry download")!.click();
+    await vi.waitFor(() => expect(control("Save a local copy")?.disabled).toBe(false));
+    expect(root.textContent).toContain("An earlier request may already have saved this backup");
+    expect(control("Retry download")).toBeUndefined(); expect(publication).not.toHaveBeenCalled();
+    control("Save a local copy")!.click();
+    await vi.waitFor(() => expect(f.wallet.run(() => f.records.get(id)?.preparation?.download)).toMatchObject({ localSave: { status: "saved" } }));
+    await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
+    await vi.waitFor(() => expect(root.textContent).toContain("Backup saved"));
+    expect(publication).toHaveBeenCalledOnce(); expect(app.downloadFile).toHaveBeenCalledTimes(2);
+    const inputs = app.callServerTool.mock.calls.map(([call]) => call.arguments.input as { action?: string; allowPossibleCopy?: boolean } | undefined);
+    expect(inputs.filter((input) => input?.action === "settings_store_backup")).toMatchObject([{ allowPossibleCopy: true }]);
+  } finally { await app.onteardown?.(); await mcp.close(); await f.close(); }
+});

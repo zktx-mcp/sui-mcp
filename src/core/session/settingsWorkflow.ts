@@ -17,6 +17,7 @@ import { SqliteSettingsWorkflowStore, settingsIdentity } from "./sqliteSettingsW
 import { SettingsConflict, settingsDownload, isSettingsDownloadFileAction, type SettingsDownloadFileAction, settingsViewSchema, endpointPreparationSchema, storedRestoreCheckSchema, retainedBackupRejection, permitsBackupRecheck, type RestoreCheck, type SettingsAction, type SettingsDraft, type SettingsFile, type SettingsOperation, type SettingsResult, type SettingsView } from "./settingsOperation.js";
 import type { WalletWorkflow } from "./walletWorkflow.js";
 import type { WalletRuntimeEvent } from "./walletRuntime.js";
+import type { SettingsLocalSaveOutcome } from "./settingsOperation.js";
 
 // One existing product-session length from physical snapshot readiness.
 export const DOWNLOAD_RETRY_WINDOW_MS = DEFAULT_SESSION_TTL_MS;
@@ -30,6 +31,8 @@ export class SettingsWorkflow {
   private closing = false;
   private readonly downloadIO = new Map<string, Set<Promise<unknown>>>();
   private readonly downloadTasks = new Set<Promise<void>>();
+  private readonly localSaveTasks = new Map<string, Promise<void>>();
+  private readonly localSaveResults = new Map<string, { saveAttemptId: string; outcome: SettingsLocalSaveOutcome }>();
   constructor(private readonly options: {
     records: SqliteSettingsWorkflowStore; files: SettingsFileStore; activity: SqliteActivityStore;
     localData: SqliteLocalDataService; preferences: SqlitePreferencesRepository; wallet: WalletWorkflow;
@@ -52,7 +55,14 @@ export class SettingsWorkflow {
     this.records.transaction(() => {
       const downloads = this.records.db.prepare("SELECT operation_id FROM settings_operations WHERE kind='download_backup' AND owner_id!=?")
         .all(this.records.ownerId) as { operation_id: string }[];
-      for (const row of downloads) this.records.endDownload(row.operation_id, "server_restarted");
+      for (const row of downloads) {
+        const operation = this.records.get(row.operation_id)!;
+        if (settingsDownload(operation)?.localSave?.status === "saving") {
+          // Inherit settlement, never the departed card's input permission.
+          // Keep its final/file reservation until the existing artifact is checked.
+          this.records.db.prepare("UPDATE settings_operations SET owner_id=? WHERE operation_id=?").run(this.records.ownerId, operation.operationId);
+        } else this.records.endDownload(row.operation_id, "server_restarted");
+      }
       const rows = this.records.db.prepare("SELECT operation_id FROM settings_operations WHERE owner_id!=? AND phase!='terminal'")
         .all(this.records.ownerId) as { operation_id: string }[];
       for (const row of rows) {
@@ -91,7 +101,11 @@ export class SettingsWorkflow {
       }
     });
   }
-  async cleanupAfterOwnerChange(): Promise<void> { await this.maintainDownloads(); }
+  async cleanupAfterOwnerChange(): Promise<void> {
+    for (const operation of this.records.downloads()) this.observeLocalSave(operation);
+    await Promise.allSettled([...this.localSaveTasks.values()]);
+    await this.maintainDownloads();
+  }
   private maintenance<T>(work: () => Promise<T>): Promise<T> {
     return this.options.runMaintenance ? this.options.runMaintenance(work) : work();
   }
@@ -107,7 +121,7 @@ export class SettingsWorkflow {
     if (this.closing) return;
     const deadlines = this.records.downloads().flatMap((operation) => {
       const download = settingsDownload(operation)!;
-      return !download.endReason && download.expiresAt && (!skipElapsed || Date.parse(download.expiresAt) > this.now().getTime()) ? [Date.parse(download.expiresAt)] : [];
+      return !download.endReason && download.localSave?.status !== "saving" && download.expiresAt && (!skipElapsed || Date.parse(download.expiresAt) > this.now().getTime()) ? [Date.parse(download.expiresAt)] : [];
     });
     if (!deadlines.length) return;
     this.downloadTimer = setTimeout(() => {
@@ -141,6 +155,8 @@ export class SettingsWorkflow {
     this.downloadTimer = undefined;
     await Promise.allSettled([...this.downloadTasks, ...[...this.downloadIO.values()].flatMap((tasks) => [...tasks])]);
     await this.maintenance(async () => {
+      for (const operation of this.records.downloads()) this.observeLocalSave(operation);
+      await Promise.allSettled([...this.localSaveTasks.values()]);
       this.records.transaction(() => { for (const operation of this.records.downloads()) this.records.endDownload(operation.operationId, "server_restarted"); });
       await this.cleanupTemporaryFiles();
     });
@@ -229,8 +245,50 @@ export class SettingsWorkflow {
     this.scheduleDownloadExpiry(); await this.cleanupTemporaryFiles(file.operationId);
   }
   async continueDownload(record: CardRecord, action: SettingsDownloadFileAction): Promise<void> {
-    this.records.continueDownload(record, action);
+    const file = this.records.continueDownload(record, action);
+    if (file) this.runLocalSave(file, true);
     this.scheduleDownloadExpiry(); await this.cleanupTemporaryFiles(action.operationId);
+  }
+  private observeLocalSave(operation: SettingsOperation): void {
+    if (operation.ownerId !== this.records.ownerId || operation.dataEpoch !== this.records.control().data_epoch ||
+        settingsDownload(operation)?.localSave?.status !== "saving" || this.localSaveTasks.has(operation.operationId)) return;
+    const file = operation.fileId && this.records.file(operation.fileId);
+    if (file) this.runLocalSave(file, false);
+  }
+  private runLocalSave(file: SettingsFile, publish: boolean): void {
+    if (this.localSaveTasks.has(file.operationId)) return;
+    const task = this.settleLocalSave(file, publish);
+    this.localSaveTasks.set(file.operationId, task); this.downloadTasks.add(task);
+    void task.catch(() => {}).finally(() => {
+      this.localSaveTasks.delete(file.operationId); this.downloadTasks.delete(task);
+    });
+  }
+  private async settleLocalSave(file: SettingsFile, publish: boolean): Promise<void> {
+    const operation = this.records.get(file.operationId)!, saved = settingsDownload(operation)?.localSave;
+    if (saved?.status !== "saving" || !saved.currentSaveAttemptId) return;
+    const saveAttemptId = saved.currentSaveAttemptId;
+    this.records.localSaveContext(file.operationId, saveAttemptId);
+    let retained = this.localSaveResults.get(file.operationId);
+    if (!retained) {
+      const outcome = await this.trackDownloadIO(file.fileId, async () => {
+        if (publish) {
+          try {
+            return await this.options.files.publishDownload(file, (identity) => {
+              this.options.assertCurrent(); this.records.rememberLocalSaveSource(file.operationId, saveAttemptId, identity);
+            });
+          } catch { this.options.assertCurrent(); }
+        }
+        const current = this.records.localSaveContext(file.operationId, saveAttemptId);
+        return this.options.files.inspectDownloadPublication(file, current.save.sourceIdentity);
+      });
+      this.options.assertCurrent();
+      retained = { saveAttemptId, outcome }; this.localSaveResults.set(file.operationId, retained);
+    }
+    // Retain the ended physical outcome if the DB write fails. A read retries
+    // this same settlement, not link(), a new snapshot, or a Host request.
+    this.records.settleLocalSave(file.operationId, retained.saveAttemptId, retained.outcome);
+    this.localSaveResults.delete(file.operationId);
+    this.scheduleDownloadExpiry(); await this.cleanupTemporaryFiles(file.operationId);
   }
   private now(): Date { return this.records.now(); }
   private withoutPreparation(operation: SettingsOperation): SettingsOperation {
@@ -361,6 +419,7 @@ export class SettingsWorkflow {
   async describe(record: CardRecord): Promise<{ record: CardRecord; data: SettingsView }> {
     this.options.assertCurrent();
     let operation = this.records.forCard(record);
+    this.observeLocalSave(operation);
     let downloadExpiryPending = false;
     if (operation.result) {
       // The result is already committed. A failed release of known-ended I/O
@@ -434,26 +493,30 @@ export class SettingsWorkflow {
       }
     }
     const storedDownload = settingsDownload(operation);
-    const downloadEnd = storedDownload?.endReason ?? (storedDownload?.expiresAt && this.now().getTime() >= Date.parse(storedDownload.expiresAt) ? "expired" : undefined);
+    const localSave = storedDownload?.localSave;
+    const downloadEnd = storedDownload?.endReason ?? (localSave?.status !== "saving" && storedDownload?.expiresAt && this.now().getTime() >= Date.parse(storedDownload.expiresAt) ? "expired" : undefined);
     const currentAttempt = storedDownload?.attempts.find((attempt) => attempt.attemptId === storedDownload.currentAttemptId);
     const currentDownloadOwner = operation.ownerId === this.records.ownerId && operation.dataEpoch === this.records.control().data_epoch && record.ownerId === this.records.ownerId;
     const download: SettingsView["download"] = storedDownload ? {
       availability: downloadEnd ? "ended" : storedDownload.readyAt ? "available" : "preparing",
       currentAttemptId: storedDownload.currentAttemptId,
       ...(currentAttempt?.hostReport ? { hostReport: currentAttempt.hostReport } : {}),
-      previousUnconfirmed: storedDownload.attempts.some((attempt) => attempt.attemptId !== storedDownload.currentAttemptId &&
-        (attempt.hostReport === undefined || attempt.hostReport === "unconfirmed")),
+      previousUnconfirmed: this.records.previousDeliveryPossible(storedDownload),
+      ...(localSave ? { localSave: { status: localSave.status, ...(localSave.currentSaveAttemptId ? { currentSaveAttemptId: localSave.currentSaveAttemptId } : {}),
+        ...(localSave.failure ? { failure: localSave.failure } : {}), ...(localSave.savedAt ? { savedAt: localSave.savedAt } : {}) } } : {}),
       ...(downloadEnd ? { endReason: downloadEnd } : {}),
       ...(storedDownload.expiresAt ? { expiresAt: storedDownload.expiresAt, remainingMs: Math.max(0, Date.parse(storedDownload.expiresAt) - this.now().getTime()) } : {}),
       allowedFileActions: currentDownloadOwner && !this.closing ? [
         ...(storedDownload.readyAt ? ["settings_report_download" as const] : []),
-        ...(!downloadEnd && file && !file.invalidated ?  ["settings_cancel_download" as const,
-          ...(storedDownload.readyAt ? ["settings_retry_download" as const] : [])] : [])] : []
+        ...(!downloadEnd && file && !file.invalidated && localSave?.status !== "saving" ? ["settings_cancel_download" as const,
+          ...(!localSave && storedDownload.readyAt ? ["settings_retry_download" as const] : []),
+          ...(localSave && (localSave.status === "needs_consent" || localSave.status === "failed" && localSave.failure === "not_published") &&
+            this.records.canReserveFileIO(operation.operationId) ? ["settings_store_backup" as const] : [])] : [])] : []
     } : undefined;
     if (storedDownload && !downloadExpiryPending) this.scheduleDownloadExpiry();
     const cleanup = operation.result ? downloadExpiryPending ? "pending" : this.records.temporaryFileCleanup(operation.operationId) : undefined;
-    const backupPath = operation.draft?.kind === "export_local_data" && operation.result?.outcome === "completed"
-      ? operation.result.details?.path : undefined;
+    const backupPath = localSave?.status === "saved" && file ? this.options.files.localBackupPath(file)
+      : operation.draft?.kind === "export_local_data" && operation.result?.outcome === "completed" ? operation.result.details?.path : undefined;
     const data: SettingsView = { kind: "settings", operationId: operation.operationId, phase: operation.phase, allowedActions: allowed,
       observe: !operation.result && (["executing", "stopping", "starting"].includes(operation.phase) || restoreCheck?.status === "checking"),
       ...(restoreCheck ? { restoreCheck } : {}), ...(download ? { download } : {}),

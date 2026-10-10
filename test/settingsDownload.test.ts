@@ -232,3 +232,204 @@ it.each(["settings_retry_download", "settings_report_download", "settings_cancel
       operationId: data.operationId, fileId: data.file!.fileId, offset: 0, attemptId: randomUUID() }, 1))).rejects.toThrow("attempt changed");
     expect((await f.act(current, base)).error).toBeUndefined();
   });
+
+const unsupportedFailure = { method: "ui/download-file", code: -32601 };
+function unsupportedReport(data: SettingsView) {
+  return { action: "settings_report_download", operationId: data.operationId, fileId: data.file!.fileId,
+    attemptId: data.download!.currentAttemptId, status: "unsupported", failure: unsupportedFailure };
+}
+async function localResult(f: Awaited<ReturnType<typeof fixture>>, card: Awaited<ReturnType<typeof f.create>>, status: "saved" | "failed" | "needs_consent") {
+  let current = await f.read(card);
+  await vi.waitFor(async () => { current = await f.read(card); expect(view(current).download?.localSave?.status).toBe(status); });
+  return current;
+}
+
+it("publishes the same verified inode once only after this scoped download is reported unsupported", async () => {
+  const f = await fixture(), publication = vi.spyOn(f.files, "publishDownload"), { card } = await start(f);
+  const current = await ready(f, card), data = view(current), report = unsupportedReport(data);
+  const stage = join(f.wallet.directory, ".settings-staging", `${data.file!.fileId}.download`), bytes = await readFile(stage), identity = await fs.stat(stage);
+  const originalResult = f.wallet.run(() => f.records.db.prepare("SELECT result_json FROM settings_operations WHERE operation_id=?").get(data.operationId));
+  expect((await f.act(current, report)).error).toBeUndefined();
+  const saved = view(await localResult(f, card, "saved")), path = join(f.wallet.directory, "backups", `${data.operationId}.json`);
+  await vi.waitFor(async () => expect(view(await f.read(card)).temporaryFileCleanup).toBe("complete"));
+  expect(await readFile(path)).toEqual(bytes); expect((await fs.stat(path)).ino).toBe(identity.ino);
+  expect(saved.backupLocation).toEqual({ directory: join(f.wallet.directory, "backups"), filename: `${data.operationId}.json` });
+  expect(saved.download).toMatchObject({ availability: "ended", endReason: "stored_locally" });
+  expect(saved.allowedActions).toEqual([]); expect(saved.observe).toBe(false); expect(saved.preparation).toBeUndefined();
+  expect(f.wallet.run(() => f.records.db.prepare("SELECT result_json FROM settings_operations WHERE operation_id=?").get(data.operationId))).toEqual(originalResult);
+  expect((await f.act(current, report)).error).toBeUndefined(); expect(publication).toHaveBeenCalledOnce();
+  expect((await f.act(current, { ...report, failure: { method: "ui/other", code: -32601 } })).error).toBeDefined();
+  expect(await readdir(join(f.wallet.directory, "backups"))).toEqual([`${data.operationId}.json`]);
+  await expect(readFile(stage)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(f.wallet.run(() => f.cards.readSettingsFile({ cardId: card.snapshot.cardId, permission: card.permission,
+    operationId: data.operationId, fileId: data.file!.fileId, attemptId: data.download!.currentAttemptId, offset: 0 }, 1))).rejects.toThrow();
+  const reset = await f.prepare({ kind: "reset_local_data" }); expect((await f.confirm(reset)).error).toBeUndefined();
+  expect(await readFile(path)).toEqual(bytes); expect(publication).toHaveBeenCalledOnce();
+});
+
+it.each(["unconfirmed", "not_completed", "unreported"])("requires explicit local-copy consent after a prior %s attempt and preserves duplicate semantics", async (prior) => {
+  const f = await fixture(), publication = vi.spyOn(f.files, "publishDownload"), { card, input } = await start(f);
+  let current = await ready(f, card); const before = view(current);
+  if (prior !== "unreported") await f.act(current, { ...unsupportedReport(before), status: prior, failure: undefined });
+  const nextId = randomUUID();
+  await f.act(current, { action: "settings_retry_download", operationId: before.operationId, fileId: before.file!.fileId,
+    previousAttemptId: input.attemptId, attemptId: nextId });
+  current = await f.read(card); expect((await f.act(current, unsupportedReport(view(current)))).error).toBeUndefined();
+  const consent = view(await localResult(f, card, "needs_consent"));
+  expect(publication).not.toHaveBeenCalled(); expect(consent.download?.allowedFileActions).not.toContain("settings_retry_download");
+  const save = { action: "settings_store_backup", operationId: consent.operationId, fileId: consent.file!.fileId,
+    attemptId: nextId, saveAttemptId: randomUUID(), allowPossibleCopy: true };
+  expect((await f.act(current, { ...save, allowPossibleCopy: false })).error).toBeDefined();
+  expect((await f.act(current, save)).error).toBeUndefined(); await localResult(f, card, "saved");
+  expect((await f.act(current, save)).error).toBeUndefined();
+  expect((await f.act(current, { ...save, allowPossibleCopy: false })).error).toBeDefined();
+  expect(publication).toHaveBeenCalledOnce();
+  const late = { ...unsupportedReport(before), status: "acknowledged", failure: undefined };
+  if (prior === "unreported") expect((await f.act(current, late)).error).toBeUndefined();
+  expect(view(await f.read(card)).download).toMatchObject({ endReason: "stored_locally", currentAttemptId: nextId });
+});
+
+it.each(["expired", "cancelled"])("records a late unsupported fact after %s without admitting a file effect", async (reason) => {
+  const f = await fixture(), publication = vi.spyOn(f.files, "publishDownload"), { card } = await start(f);
+  const current = await ready(f, card), data = view(current);
+  if (reason === "expired") f.wallet.advance(1_800_000);
+  else await f.act(current, { action: "settings_cancel_download", operationId: data.operationId, fileId: data.file!.fileId, attemptId: data.download!.currentAttemptId });
+  const result = await f.act(current, unsupportedReport(data)); expect(result.error).toBeUndefined();
+  expect(view(result).download).toMatchObject({ endReason: reason, hostReport: "unsupported" });
+  expect(view(result).download?.localSave).toBeUndefined(); expect(publication).not.toHaveBeenCalled();
+});
+
+it.each(["different_inode", "symlink"])("preserves an existing %s target and does not call it this request's saved backup", async (mode) => {
+  const f = await fixture(), { card } = await start(f), current = await ready(f, card), data = view(current);
+  const stage = join(f.wallet.directory, ".settings-staging", `${data.file!.fileId}.download`), bytes = await readFile(stage);
+  await mkdir(join(f.wallet.directory, "backups")); const path = join(f.wallet.directory, "backups", `${data.operationId}.json`);
+  if (mode === "different_inode") await writeFile(path, bytes, { flag: "wx" }); else await fs.symlink(stage, path);
+  const identity = await fs.lstat(path); await f.act(current, unsupportedReport(data));
+  const result = view(await localResult(f, card, "failed"));
+  expect(result.download).toMatchObject({ endReason: "local_save_failed", localSave: { failure: "target_conflict" } });
+  expect(result.backupLocation).toBeUndefined(); expect(result.download?.allowedFileActions).not.toContain("settings_store_backup");
+  expect((await fs.lstat(path)).ino).toBe(identity.ino);
+  if (mode === "different_inode") expect(await readFile(path)).toEqual(bytes);
+});
+
+it("retains an admitted save through the lease deadline and refuses cancellation and data replacement until physical I/O ends", async () => {
+  const f = await fixture(), { card } = await start(f), current = await ready(f, card), data = view(current);
+  const reset = await f.prepare({ kind: "reset_local_data" });
+  const entered = deferred<void>(), release = deferred<void>(), original = fs.link;
+  fs.link = async (...args) => { entered.resolve(); await release.promise; return original(...args); }; syncBuiltinESMExports();
+  try {
+    await f.act(current, unsupportedReport(data)); await entered.promise; f.wallet.advance(1_800_001);
+    const busy = view(await f.read(card)); expect(busy.download).toMatchObject({ availability: "available", localSave: { status: "saving" } });
+    expect(busy.download?.allowedFileActions).not.toContain("settings_cancel_download");
+    expect((await f.act(current, { action: "settings_cancel_download", operationId: data.operationId, fileId: data.file!.fileId, attemptId: data.download!.currentAttemptId })).error).toBeDefined();
+    expect((await f.confirm(reset)).error).toBeDefined();
+    expect(f.wallet.run(() => f.records.control())).toMatchObject({ active_operation_id: data.operationId, file_io_id: data.file!.fileId, data_epoch: 0 });
+    release.resolve(); const saved = view(await localResult(f, card, "saved")); expect(saved.download?.endReason).toBe("stored_locally");
+    expect(saved.download?.expiresAt).toBe(data.download?.expiresAt);
+  } finally { release.resolve(); fs.link = original; syncBuiltinESMExports(); }
+});
+
+it("retries only a proven absent publication using a new save ID and never regenerates its source", async () => {
+  const f = await fixture(), { card } = await start(f), current = await ready(f, card), data = view(current);
+  const original = fs.link, snapshot = vi.spyOn(f.files, "createDownload"), publication = vi.spyOn(f.files, "publishDownload");
+  fs.link = async () => { throw Object.assign(new Error("Synthetic filesystem link refusal"), { code: "EIO" }); }; syncBuiltinESMExports();
+  try {
+    await f.act(current, unsupportedReport(data)); const failed = view(await localResult(f, card, "failed"));
+    expect(failed.download?.localSave?.failure).toBe("not_published"); expect(failed.download?.allowedFileActions).toContain("settings_store_backup");
+    await f.act(current, unsupportedReport(data)); expect(publication).toHaveBeenCalledOnce();
+    fs.link = original; syncBuiltinESMExports();
+    const retry = { action: "settings_store_backup", operationId: data.operationId, fileId: data.file!.fileId, attemptId: data.download!.currentAttemptId,
+      previousSaveAttemptId: failed.download!.localSave!.currentSaveAttemptId, saveAttemptId: randomUUID(), allowPossibleCopy: false };
+    expect((await f.act(current, { ...retry, previousSaveAttemptId: randomUUID() })).error).toBeDefined();
+    expect((await f.act(current, retry)).error).toBeUndefined(); await localResult(f, card, "saved");
+    expect((await f.act(current, retry)).error).toBeUndefined(); expect(publication).toHaveBeenCalledTimes(2); expect(snapshot).not.toHaveBeenCalled();
+  } finally { fs.link = original; syncBuiltinESMExports(); }
+});
+
+it("keeps a linked but unrecorded result unsettled and reuses its physical outcome after DB recovery", async () => {
+  const f = await fixture(), { card } = await start(f), current = await ready(f, card), data = view(current);
+  const publication = vi.spyOn(f.files, "publishDownload");
+  f.wallet.run(() => f.records.db.exec(`CREATE TRIGGER refuse_local_save BEFORE UPDATE OF preparation_json ON settings_operations
+    WHEN NEW.operation_id='${data.operationId}' AND json_extract(NEW.preparation_json,'$.download.localSave.status')='saved'
+    BEGIN SELECT RAISE(ABORT,'synthetic saved-result failure'); END`));
+  try {
+    await f.act(current, unsupportedReport(data)); const target = join(f.wallet.directory, "backups", `${data.operationId}.json`);
+    await vi.waitFor(async () => expect((await readFile(target)).length).toBe(data.file!.totalSize));
+    expect(view(await f.read(card)).download?.localSave?.status).toBe("saving");
+    expect(view(await f.read(card)).download?.allowedFileActions).not.toContain("settings_store_backup");
+    expect(f.wallet.run(() => f.records.control().file_io_id)).toBe(data.file!.fileId);
+    f.wallet.run(() => f.records.db.exec("DROP TRIGGER refuse_local_save"));
+    await localResult(f, card, "saved"); expect(publication).toHaveBeenCalledOnce();
+    expect(await readdir(join(f.wallet.directory, "backups"))).toEqual([`${data.operationId}.json`]);
+  } finally { f.wallet.run(() => f.records.db.exec("DROP TRIGGER IF EXISTS refuse_local_save")); }
+});
+
+it("does not interpret an unreadable destination as absent or retry publication after uncertain physical completion", async () => {
+  const f = await fixture(), { card } = await start(f), current = await ready(f, card), data = view(current);
+  const path = join(f.wallet.directory, "backups", `${data.operationId}.json`), publication = vi.spyOn(f.files, "publishDownload");
+  const original = fs.open;
+  fs.open = async (...args: Parameters<typeof fs.open>) => {
+    if (String(args[0]) === path) throw Object.assign(new Error("Synthetic destination permission denial"), { code: "EACCES" });
+    return original(...args);
+  }; syncBuiltinESMExports();
+  try {
+    await f.act(current, unsupportedReport(data)); await vi.waitFor(async () => expect((await fs.stat(path)).size).toBe(data.file!.totalSize));
+    const pending = view(await f.read(card));
+    expect(pending.download?.localSave?.status).toBe("saving"); expect(pending.backupLocation).toBeUndefined();
+    expect(pending.download?.allowedFileActions).not.toContain("settings_store_backup");
+    expect(f.wallet.run(() => f.records.control().file_io_id)).toBe(data.file!.fileId);
+    fs.open = original; syncBuiltinESMExports(); await localResult(f, card, "saved");
+    expect(publication).toHaveBeenCalledOnce();
+  } finally { fs.open = original; syncBuiltinESMExports(); }
+});
+
+it("preserves the verified local artifact and its result when private unlink fails", async () => {
+  const f = await fixture(), { card } = await start(f), current = await ready(f, card), data = view(current), publication = vi.spyOn(f.files, "publishDownload");
+  const stage = join(f.wallet.directory, ".settings-staging", `${data.file!.fileId}.download`), original = fs.unlink;
+  fs.unlink = async (...args) => { if (String(args[0]) === stage) throw Object.assign(new Error("Synthetic cleanup refusal"), { code: "EACCES" }); return original(...args); }; syncBuiltinESMExports();
+  try {
+    await f.act(current, unsupportedReport(data)); const saved = view(await localResult(f, card, "saved"));
+    await vi.waitFor(async () => expect(view(await f.read(card)).temporaryFileCleanup).toBe("failed"));
+    const path = join(saved.backupLocation!.directory, saved.backupLocation!.filename), bytes = await readFile(path);
+    expect(bytes).toEqual(await readFile(stage)); expect(saved.download?.allowedFileActions).not.toContain("settings_store_backup");
+    fs.unlink = original; syncBuiltinESMExports();
+    await vi.waitFor(async () => expect(view(await f.read(card)).temporaryFileCleanup).toBe("complete"));
+    expect(await readFile(path)).toEqual(bytes); expect(view(await f.read(card)).download?.localSave).toEqual(saved.download?.localSave);
+    expect(publication).toHaveBeenCalledOnce();
+  } finally { fs.unlink = original; syncBuiltinESMExports(); }
+});
+
+it("atomically refuses unsupported-report admission while another file owns the shared slot", async () => {
+  const f = await fixture(), { card } = await start(f), current = await ready(f, card), data = view(current);
+  const entered = deferred<void>(), release = deferred<void>(), create = f.files.createDownload.bind(f.files);
+  vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return create(...args); });
+  const publication = vi.spyOn(f.files, "publishDownload");
+  let other: Awaited<ReturnType<typeof f.create>> | undefined;
+  try {
+    other = (await start(f)).card; await entered.promise;
+    expect((await f.act(current, unsupportedReport(data))).error).toBeDefined();
+    expect(view(await f.read(card)).download).not.toHaveProperty("localSave");
+    expect(view(await f.read(card)).download?.hostReport).toBeUndefined(); expect(publication).not.toHaveBeenCalled();
+    release.resolve(); await ready(f, other);
+    expect((await f.act(current, unsupportedReport(data))).error).toBeUndefined();
+    await localResult(f, card, "saved"); expect(publication).toHaveBeenCalledOnce();
+  } finally { release.resolve(); if (other) await ready(f, other); }
+});
+
+it("awaits an admitted publication and its cleanup before closing without accepting more Settings input", async () => {
+  const f = await fixture(), { card } = await start(f), current = await ready(f, card), data = view(current);
+  const entered = deferred<void>(), release = deferred<void>(), original = fs.link;
+  fs.link = async (...args) => { entered.resolve(); await release.promise; return original(...args); }; syncBuiltinESMExports();
+  let closing: Promise<void> | undefined, closed = false;
+  try {
+    await f.act(current, unsupportedReport(data)); await entered.promise;
+    closing = f.wallet.run(() => f.settings.close()).then(() => { closed = true; });
+    const state = view(await f.read(card)); expect(state.download?.localSave?.status).toBe("saving"); expect(closed).toBe(false);
+    expect((await f.act(current, { action: "settings_cancel_download", operationId: data.operationId, fileId: data.file!.fileId,
+      attemptId: data.download!.currentAttemptId })).error).toBeDefined();
+    release.resolve(); await closing;
+    expect(view(await f.read(card)).download?.endReason).toBe("stored_locally");
+    expect(view(await f.read(card)).temporaryFileCleanup).toBe("complete");
+    expect((await readFile(join(f.wallet.directory, "backups", `${data.operationId}.json`))).length).toBe(data.file!.totalSize);
+  } finally { release.resolve(); await closing; fs.link = original; syncBuiltinESMExports(); }
+});

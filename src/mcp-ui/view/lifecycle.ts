@@ -27,7 +27,7 @@ export type SettingsViewTransport = {
   uploadChunkLimit(operationId: string, fileId: string): number;
   setFileTransferActive(active: boolean): void;
   readFile(input: { operationId: string; fileId: string; offset: number; attemptId?: string | undefined }): Promise<SettingsFileDisplay>;
-  download(filename: string, base64: string, attemptId?: string): Promise<{ isError?: boolean | undefined }>;
+  download(filename: string, base64: string, attemptId?: string): Promise<{ isError?: boolean | undefined; unsupported?: true }>;
 };
 type NonImportSettingsDraft = SettingsDraft & { kind: Exclude<SettingsDraft["kind"], "import_local_data"> };
 export type SettingsCommandProgress =
@@ -327,7 +327,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     const available = current && !ended && !displayError && !displayPending && !reviewPeriodElapsed && !!reference;
     const inputEnabled = available && !commandFlight && !settingsFileTransfer && (!interactive || !(reading && (activeFailure || retryRequired || paused)));
     const automatic = automaticWorkflowActionSchema.safeParse(data?.automaticAction);
-    const observation = !!snapshot && (interactive ? data?.observe === true : snapshot.state === "running");
+    const localSave = settings ? object(download?.localSave) : undefined;
+    const observation = !!snapshot && (interactive ? data?.observe === true || localSave?.status === "saving" : snapshot.state === "running");
     const read = !!cardId && connected && !ended && !reading && visible &&
       (readRequested === "explicit" || confirmation.status !== "read_failed" &&
         (readRequested === "background" || confirmation.status === "needed" && confirmation.automatic));
@@ -346,6 +347,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       else if (confirmation.status === "needed") { if (!confirmation.automatic) recover = "read"; }
       else if (displayError || partialDisplayFailure) recover = "read";
       else if (settings && ["pending", "failed"].includes(String(data?.temporaryFileCleanup))) recover = "read";
+      else if (localSave?.status === "saving" || localSave?.status === "needs_consent" && !permitted.includes("settings_store_backup") ||
+          localSave?.status === "failed" && localSave.failure === "not_published" && !download?.endReason && !permitted.includes("settings_store_backup")) recover = "read";
       else if (settingsInputBlocked) recover = "read";
       else if (!reference) { if (snapshot?.state !== "closed" || displayError) recover = "read"; }
       else if (object(data?.progress)?.status === "unavailable") recover = "read";
@@ -420,7 +423,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   function canSendFileInput(input: Record<string, unknown>): boolean {
     const d = decide();
     return settings && settingsFileTransfer && d.current && !!reference && !commandFlight && !reading && !displayError &&
-      !lifetime.signal.aborted && ["settings_begin_upload", "settings_upload_chunk", "settings_seal_upload", "settings_retry_download", "settings_report_download", "settings_cancel_download"].includes(String(input.action)) && d.permitted.includes(input.action);
+      !lifetime.signal.aborted && ["settings_begin_upload", "settings_upload_chunk", "settings_seal_upload", "settings_retry_download", "settings_report_download", "settings_cancel_download", "settings_store_backup"].includes(String(input.action)) && d.permitted.includes(input.action);
   }
   function updateChrome(d: Decision): void {
     const workflow = object(snapshot?.data);
@@ -819,14 +822,22 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       if (value.cardId !== cardId || value.operationId !== input.operationId || value.fileId !== input.fileId || value.offset !== input.offset || value.attemptId !== input.attemptId) throw new Error("The backup response does not match this card's selected file.");
       return value;
     },
-    download: (filename, base64, attemptId) => {
+    download: async (filename, base64, attemptId) => {
       const data = object(snapshot?.data), download = object(data?.download);
       if (!reference || !decide().current || lifetime.signal.aborted || document.visibilityState === "hidden" ||
-          (download && (download.currentAttemptId !== attemptId || download.availability !== "available" ||
+          (download && (download.currentAttemptId !== attemptId || download.localSave || download.availability !== "available" ||
             downloadEndsAt === undefined || Date.now() >= downloadEndsAt))) throw new Error("This download is no longer available in this card.");
-      return app.downloadFile({ contents: [{ type: "resource", resource: {
-        uri: `file:///${encodeURIComponent(filename)}`, mimeType: "application/json", blob: base64
-      } }] }, { signal: lifetime.signal });
+      try {
+        const response = await app.downloadFile({ contents: [{ type: "resource", resource: {
+          uri: `file:///${encodeURIComponent(filename)}`, mimeType: "application/json", blob: base64
+        } }] }, { signal: lifetime.signal });
+        return { isError: response.isError };
+      } catch (error) {
+        // Only this method response establishes non-support, not a product
+        // guard or the result of a different MCP call.
+        if (error && typeof error === "object" && "code" in error && error.code === -32601) return { unsupported: true };
+        throw error;
+      }
     }
   };
   async function initialize(): Promise<void> {

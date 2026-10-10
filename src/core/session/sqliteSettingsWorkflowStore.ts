@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { SqliteDatabase } from "../activity/sqliteActivityStoreTypes.js";
 import type { CardRecord } from "./cardSession.js";
 import { SqliteCardRecordStore } from "./sqliteCardStore.js";
-import { SettingsConflict, settingsDownload, type SettingsDownload, type SettingsDownloadFileAction, settingsDraftSchema, settingsResultSchema, retainedBackupRejection, type SettingsAction, type SettingsOperation, type SettingsFile, type SettingsResult } from "./settingsOperation.js";
-import { isSettingsDownloadFile, SETTINGS_FILE_CLEANUP_SQL } from "./settingsFileIdentity.js";
+import { SettingsConflict, settingsDownload, storedSettingsDownloadSchema, type SettingsDownload, type SettingsDownloadFileAction, settingsDraftSchema, settingsResultSchema, retainedBackupRejection, type SettingsAction, type SettingsOperation, type SettingsFile, type SettingsResult } from "./settingsOperation.js";
+import { isSettingsDownloadFile, settingsBackupPath, SETTINGS_FILE_CLEANUP_SQL } from "./settingsFileIdentity.js";
+import type { SettingsLocalSave, SettingsLocalSaveOutcome, SettingsPhysicalFileIdentity } from "./settingsOperation.js";
 import { SETTINGS_REUSABLE_UPLOAD_SQL, SETTINGS_RESET_PREPARATION_SQL } from "./settingsPreparationSql.js";
 
 type OperationRow = {
@@ -202,12 +203,13 @@ export class SqliteSettingsWorkflowStore {
   }
   requireDownloadRead(expected: CardRecord, fileId: string, attemptId: string | undefined) {
     const context = this.downloadContext(expected, expected.operationId!, fileId), { operation, download, file } = context;
-    if (!attemptId || attemptId !== download.currentAttemptId || download.endReason || !download.expiresAt ||
+    if (!attemptId || attemptId !== download.currentAttemptId || download.endReason || download.localSave || !download.expiresAt ||
         this.now().getTime() >= Date.parse(download.expiresAt) || !file.sealed || file.invalidated ||
         operation.result?.outcome !== "completed") throw new SettingsConflict("This backup's download period has ended or its attempt changed.");
     return context;
   }
   private writeDownloadState(expected: SettingsOperation, download: SettingsDownload, card: CardRecord): void {
+    storedSettingsDownloadSchema.parse(download);
     this.transaction(() => {
       if (!isDeepStrictEqual(this.get(expected.operationId), expected) || expected.draft?.kind !== "download_backup") {
         throw new SettingsConflict("The download state changed before it could be saved.");
@@ -225,7 +227,7 @@ export class SqliteSettingsWorkflowStore {
     const operation = this.get(id);
     if (!operation) return;
     const download = settingsDownload(operation), card = this.cards.get(operation.cardId);
-    if (!download || !card || download.endReason) return;
+    if (!download || !card || download.endReason || download.localSave?.status === "saving") return;
     if (reason !== "server_restarted" && operation.ownerId !== this.ownerId) throw new SettingsConflict("The download owner changed.");
     const file = operation.fileId ? this.file(operation.fileId) : undefined;
     if (file && isSettingsDownloadFile(file)) this.writeFile({ ...file, invalidated: true, cleanup: "pending" });
@@ -236,7 +238,7 @@ export class SqliteSettingsWorkflowStore {
     let failure: unknown;
     for (const operation of this.downloads(operationId)) {
       const download = settingsDownload(operation)!;
-      if (!download.endReason && download.expiresAt && now >= Date.parse(download.expiresAt)) {
+      if (!download.endReason && download.localSave?.status !== "saving" && download.expiresAt && now >= Date.parse(download.expiresAt)) {
         try { this.transaction(() => this.endDownload(operation.operationId, "expired")); }
         catch (error) { failure ??= error; }
       }
@@ -248,19 +250,36 @@ export class SqliteSettingsWorkflowStore {
       ${operationId === undefined ? "" : "AND operation_id=?"}`)
       .all(this.ownerId, ...(operationId === undefined ? [] : [operationId])) as { operation_id: string }[]).map((row) => this.get(row.operation_id)!);
   }
-  continueDownload(expected: CardRecord, input: SettingsDownloadFileAction): void {
-    this.transaction(() => {
+  continueDownload(expected: CardRecord, input: SettingsDownloadFileAction): SettingsFile | undefined {
+    return this.transaction(() => {
       // Validate the caller's scope before any target reads or expiry writes.
       this.downloadContext(expected, input.operationId, input.fileId);
       this.expireDownloads(input.operationId);
       const { card, operation, file, download } = this.downloadContext(expected, input.operationId, input.fileId);
+      if (input.action === "settings_store_backup") {
+        const save = download.localSave;
+        const duplicate = save?.attempts.find((a) => a.saveAttemptId === input.saveAttemptId);
+        if (duplicate) {
+          if (save!.attemptId !== input.attemptId || duplicate.previousSaveAttemptId !== input.previousSaveAttemptId ||
+              duplicate.allowPossibleCopy !== input.allowPossibleCopy) throw new SettingsConflict("This save does not match the recorded request.");
+          return;
+        }
+        if (!save || save.attemptId !== input.attemptId || download.endReason || !download.expiresAt ||
+            Date.parse(download.expiresAt) <= this.now().getTime() || file.invalidated || !file.sealed ||
+            (save.status === "needs_consent" ? input.previousSaveAttemptId !== undefined :
+              save.status !== "failed" || save.failure !== "not_published" || input.previousSaveAttemptId !== save.currentSaveAttemptId) ||
+            input.allowPossibleCopy !== this.previousDeliveryPossible(download)) throw new SettingsConflict("This backup cannot be saved by that request. Check its current status.");
+        const next = this.admitLocalSave(operation, file, save, input.saveAttemptId, input.allowPossibleCopy, input.previousSaveAttemptId);
+        this.writeDownloadState(operation, { ...download, localSave: next }, card);
+        return file;
+      }
       if (input.action === "settings_retry_download") {
         const duplicate = download.attempts.find((attempt) => attempt.attemptId === input.attemptId);
         if (duplicate) {
           if (duplicate.previousAttemptId !== input.previousAttemptId) throw new SettingsConflict("This retry does not match the recorded download attempt.");
           return;
         }
-        if (download.currentAttemptId !== input.previousAttemptId || download.endReason || !download.expiresAt || !file.sealed ||
+        if (download.currentAttemptId !== input.previousAttemptId || download.endReason || download.localSave || !download.expiresAt || !file.sealed ||
             file.invalidated || operation.result?.outcome !== "completed") throw new SettingsConflict("This backup is no longer available for that retry.");
         const next: SettingsDownload = { ...download, currentAttemptId: input.attemptId,
           attempts: [...download.attempts, { attemptId: input.attemptId, previousAttemptId: input.previousAttemptId, admittedAt: this.now().toISOString() }] };
@@ -271,16 +290,71 @@ export class SqliteSettingsWorkflowStore {
       if (input.action === "settings_report_download") {
         if (!download.readyAt) throw new SettingsConflict("The download snapshot is not ready.");
         if (entry.hostReport) {
-          if (entry.hostReport !== input.status) throw new SettingsConflict("A different result was already reported for this download attempt.");
+          if (entry.hostReport !== input.status || !isDeepStrictEqual(entry.failure, input.failure)) throw new SettingsConflict("A different result was already reported for this download attempt.");
           return;
         }
-        const next: SettingsDownload = { ...download, attempts: download.attempts.map((attempt) => attempt === entry ? { ...attempt, hostReport: input.status } : attempt) };
+        const next: SettingsDownload = { ...download, attempts: download.attempts.map((attempt) => attempt === entry
+          ? { ...attempt, hostReport: input.status, ...(input.failure ? { failure: input.failure } : {}) } : attempt) };
+        let admitted = false;
+        if (input.status === "unsupported" && input.attemptId === download.currentAttemptId && !download.endReason &&
+            download.expiresAt && this.now().getTime() < Date.parse(download.expiresAt) && file.sealed && !file.invalidated) {
+          const save: SettingsLocalSave = { status: "needs_consent", attemptId: input.attemptId, fileId: file.fileId,
+            sha256: file.sha256, totalSize: file.totalSize, destination: settingsBackupPath(operation.operationId), ownerId: this.ownerId, attempts: [] };
+          if (this.previousDeliveryPossible(download)) next.localSave = save;
+          else { next.localSave = this.admitLocalSave(operation, file, save, randomUUID(), false); admitted = true; }
+        }
         this.writeDownloadState(operation, next, card);
         if (input.attemptId === download.currentAttemptId && input.status === "acknowledged" && !download.endReason) this.endDownload(operation.operationId, "acknowledged");
+        return admitted ? file : undefined;
       } else {
         if (input.attemptId !== download.currentAttemptId) throw new SettingsConflict("A different download attempt is current.");
+        if (download.localSave?.status === "saving") throw new SettingsConflict("Saving has already started. Check its result before continuing.");
         this.endDownload(operation.operationId, "cancelled");
       }
+    });
+  }
+  previousDeliveryPossible(download: SettingsDownload): boolean {
+    return download.attempts.some((a) => a.attemptId !== download.currentAttemptId && a.hostReport !== "unsupported");
+  }
+  private admitLocalSave(operation: SettingsOperation, file: SettingsFile, saved: SettingsLocalSave,
+    saveAttemptId: string, allowPossibleCopy: boolean, previousSaveAttemptId?: string): SettingsLocalSave {
+    this.claimFinal(operation.operationId); this.reserveFileIO(file.fileId, operation.operationId);
+    const { failure: _failure, sourceIdentity: _identity, savedAt: _savedAt, ...base } = saved;
+    return { ...base, status: "saving", currentSaveAttemptId: saveAttemptId, attempts: [...saved.attempts,
+      { saveAttemptId, allowPossibleCopy, admittedAt: this.now().toISOString(), ...(previousSaveAttemptId ? { previousSaveAttemptId } : {}) }] };
+  }
+  localSaveContext(id: string, saveAttemptId: string) {
+    const operation = this.get(id), download = operation && settingsDownload(operation), save = download?.localSave;
+    const file = operation?.fileId ? this.file(operation.fileId) : undefined;
+    const card = operation && this.cards.get(operation.cardId);
+    if (!operation || operation.ownerId !== this.ownerId || operation.dataEpoch !== this.control().data_epoch ||
+        !download || !save || !file || !card || save.status !== "saving" || save.currentSaveAttemptId !== saveAttemptId ||
+        save.fileId !== file.fileId || save.sha256 !== file.sha256 || save.totalSize !== file.totalSize ||
+        save.destination !== settingsBackupPath(id) || this.control().active_operation_id !== id || this.control().file_io_id !== file.fileId) {
+      throw new SettingsConflict("The admitted backup save changed before it could be settled.");
+    }
+    return { operation, download, save, file, card };
+  }
+  rememberLocalSaveSource(id: string, saveAttemptId: string, sourceIdentity: SettingsPhysicalFileIdentity): void {
+    this.transaction(() => {
+      const { operation, download, save, card } = this.localSaveContext(id, saveAttemptId);
+      if (save.sourceIdentity && !isDeepStrictEqual(save.sourceIdentity, sourceIdentity)) throw new SettingsConflict("The backup file changed before saving.");
+      this.writeDownloadState(operation, { ...download, localSave: { ...save, sourceIdentity } }, card);
+    });
+  }
+  settleLocalSave(id: string, saveAttemptId: string, outcome: SettingsLocalSaveOutcome): void {
+    this.transaction(() => {
+      const { operation, download, save, file, card } = this.localSaveContext(id, saveAttemptId);
+      const expired = !download.expiresAt || this.now().getTime() >= Date.parse(download.expiresAt);
+      const ended = outcome.status === "saved" ? "stored_locally" : save.ownerId !== this.ownerId ? "server_restarted"
+        : expired ? "expired" : outcome.reason !== "not_published" ? "local_save_failed" : undefined;
+      const localSave: SettingsLocalSave = outcome.status === "saved"
+        ? { ...save, status: "saved", savedAt: this.now().toISOString() }
+        : { ...save, status: "failed", failure: save.ownerId !== this.ownerId && outcome.reason === "not_published" ? "interrupted" : outcome.reason };
+      this.writeDownloadState(operation, { ...download, localSave, ...(ended ? { endReason: ended } : {}) }, card);
+      if (ended) this.writeFile({ ...file, invalidated: true, cleanup: "pending" });
+      this.releaseFileIO(file.fileId);
+      this.db.prepare("UPDATE settings_control SET active_operation_id=NULL WHERE id=1 AND active_operation_id=?").run(id);
     });
   }
   recordDownloadReady(id: string, readyAt: string, retryWindowMs: number): void {

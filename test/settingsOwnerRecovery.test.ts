@@ -1,6 +1,6 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -10,7 +10,7 @@ import { acquireDataDirectoryOwner } from "../src/runtime/shared/ownerLease.js";
 import type { CardResponse } from "../src/core/session/cardSession.js";
 import type { SettingsDraft, SettingsView } from "../src/core/session/settingsOperation.js";
 
-type Event = { event: string; name?: string; message?: string; card: CardResponse & { permission: string }; creations: number;
+type Event = { event: string; name?: string; message?: string; card: CardResponse & { permission: string }; creations: number; publications: number;
   control: { data_epoch: number; active_operation_id: string | null; file_io_id: string | null; wallet_input_blocked: number }; account: { address: string } | null };
 const children: ChildProcess[] = [], directories: string[] = [];
 afterEach(async () => {
@@ -144,5 +144,64 @@ it.each(["stopping", "starting"])("ends an admitted Settings restart as interrup
   const restored = await second.next("read"); expect(view(restored).result?.outcome).toBe("interrupted");
   expect(restored.card.snapshot.reason).toBe("server_restarted"); expect(restored.control).toMatchObject({ active_operation_id: null, wallet_input_blocked: 0 });
   expect(view(restored).result?.message).not.toContain("before this operation was confirmed");
+  await second.kill();
+}, 25000);
+
+it.each(["source_identity_before", "link_before", "link_after", "saved_before", "cleanup_before", "cleanup_after"])(
+  "settles an actually interrupted local save at %s without restoring input or publishing again", async (fault) => {
+    const dir = await directory(), first = await actor(dir, fault);
+    first.send({ command: "prepare", draft: { kind: "download_backup" } }); const created = await first.next("prepared");
+    const id = view(created).operationId;
+    first.send({ command: "confirm" }); await first.next("admitted"); first.send({ command: "unsupported" });
+    const cut = await first.next("boundary"); expect(cut.name).toBe(fault);
+    const db = new Database(join(dir, "activity.sqlite"));
+    let originalResult: unknown, fileId: string;
+    try {
+      const row = db.prepare("SELECT file_id,result_json,preparation_json FROM settings_operations WHERE operation_id=?").get(id) as { file_id: string; result_json: string; preparation_json: string };
+      fileId = row.file_id; originalResult = JSON.parse(row.result_json);
+      const save = JSON.parse(row.preparation_json).download.localSave;
+      expect(save.status).toBe(fault.startsWith("cleanup_") ? "saved" : "saving");
+      if (fault === "source_identity_before") expect(save.sourceIdentity).toBeUndefined(); else expect(save.sourceIdentity).toMatchObject({ device: expect.any(String), inode: expect.any(String) });
+      expect(() => acquireDataDirectoryOwner(join(dir, "activity.sqlite"))).toThrow("runtime owner");
+    } finally { db.close(); }
+    await first.kill();
+    const target = join(dir, "backups", `${id}.json`), shouldExist = !["source_identity_before", "link_before"].includes(fault);
+    const bytes = shouldExist ? await readFile(target) : undefined;
+    const second = await actor(dir);
+    second.send({ command: "read", reference: { cardId: created.card.snapshot.cardId, permission: created.card.permission } });
+    const recovered = await second.next("read"), current = view(recovered);
+    expect(current.result).toEqual(originalResult); expect(current.allowedActions).toEqual([]); expect(current.download?.allowedFileActions).toEqual([]);
+    expect(recovered.creations).toBe(0); expect(recovered.publications).toBe(0);
+    expect(recovered.control).toMatchObject({ active_operation_id: null, file_io_id: null });
+    expect(current.temporaryFileCleanup).toBe("complete");
+    await expect(readFile(join(dir, ".settings-staging", `${fileId!}.download`))).rejects.toMatchObject({ code: "ENOENT" });
+    if (shouldExist) {
+      expect(current.download).toMatchObject({ endReason: "stored_locally", localSave: { status: "saved" } });
+      expect(current.backupLocation).toEqual({ directory: join(dir, "backups"), filename: `${id}.json` });
+      expect(await readFile(target)).toEqual(bytes);
+    } else {
+      expect(current.download).toMatchObject({ endReason: "server_restarted", localSave: { status: "failed", failure: "interrupted" } });
+      expect(current.backupLocation).toBeUndefined(); await expect(readFile(target)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    await second.kill();
+  }, 25000);
+
+it.each(["different_inode", "missing_source", "changed_bytes"])("refuses to adopt an interrupted publication with %s evidence", async (change) => {
+  const dir = await directory(), first = await actor(dir, "link_after");
+  first.send({ command: "prepare", draft: { kind: "download_backup" } }); const created = await first.next("prepared"), id = view(created).operationId;
+  first.send({ command: "confirm" }); await first.next("admitted"); first.send({ command: "unsupported" });
+  await first.next("boundary"); await first.kill();
+  const db = new Database(join(dir, "activity.sqlite"));
+  const record = db.prepare("SELECT file_id FROM settings_operations WHERE operation_id=?").get(id) as { file_id: string }; db.close();
+  const target = join(dir, "backups", `${id}.json`), original = await readFile(target);
+  if (change === "different_inode") { await unlink(target); await writeFile(target, original, { flag: "wx" }); }
+  else if (change === "missing_source") await unlink(join(dir, ".settings-staging", `${record.file_id}.download`));
+  else await writeFile(target, Buffer.alloc(original.length, 1));
+  const expected = await readFile(target), second = await actor(dir);
+  second.send({ command: "read", reference: { cardId: created.card.snapshot.cardId, permission: created.card.permission } });
+  const recovered = await second.next("read");
+  expect(view(recovered).download?.localSave).toMatchObject({ status: "failed", failure: change === "different_inode" ? "target_conflict" : "source_unavailable" });
+  expect(view(recovered).backupLocation).toBeUndefined(); expect(view(recovered).download?.allowedFileActions).toEqual([]);
+  expect(recovered.creations).toBe(0); expect(recovered.publications).toBe(0); expect(await readFile(target)).toEqual(expected);
   await second.kill();
 }, 25000);

@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, link, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import { isSettingsDownloadFile } from "./settingsFileIdentity.js";
-import { SettingsConflict, type SettingsFile } from "./settingsOperation.js";
+import { isSettingsDownloadFile, settingsBackupPath } from "./settingsFileIdentity.js";
+import { SettingsConflict, type SettingsFile, type SettingsPhysicalFileIdentity, type SettingsLocalSaveOutcome } from "./settingsOperation.js";
 
 export class SettingsDownloadPathExists extends SettingsConflict {}
+function fileCode(error: unknown, code: string): boolean {
+  return !!error && typeof error === "object" && "code" in error && error.code === code;
+}
 
 export function settingsFileDigest(data: Uint8Array): string { return createHash("sha256").update(data).digest("hex"); }
 export function decodeSettingsChunk(value: string): Buffer {
@@ -48,6 +51,77 @@ export class SettingsFileStore {
     return join(this.directory("backups"), `${file.operationId}.json`);
   }
   exportPath(file: SettingsFile): string { return this.finalPath(file); }
+  localBackupPath(file: SettingsFile): string {
+    this.assertId(file.operationId);
+    if (!isSettingsDownloadFile(file)) throw new SettingsConflict("This request does not own a download snapshot.");
+    return join(this.dataDirectory, settingsBackupPath(file.operationId));
+  }
+  private async verifiedIdentity(handle: FileHandle, path: string, file: SettingsFile): Promise<SettingsPhysicalFileIdentity> {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.size !== BigInt(file.totalSize)) throw new SettingsConflict("The backup file size changed.");
+    const hash = createHash("sha256");
+    for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) hash.update(chunk as Buffer);
+    const after = await handle.stat({ bigint: true }), atPath = await lstat(path, { bigint: true });
+    if (!atPath.isFile() || atPath.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino ||
+        after.dev !== atPath.dev || after.ino !== atPath.ino || after.size !== before.size || atPath.size !== before.size ||
+        hash.digest("hex") !== file.sha256) throw new SettingsConflict("The backup file changed while it was checked.");
+    return { device: before.dev.toString(), inode: before.ino.toString() };
+  }
+  private sameFile(left: SettingsPhysicalFileIdentity, right: SettingsPhysicalFileIdentity): boolean {
+    return left.device === right.device && left.inode === right.inode;
+  }
+  private async downloadSourceIdentity(file: SettingsFile): Promise<SettingsPhysicalFileIdentity> {
+    const directory = await lstat(this.directory("staging"));
+    if (!directory.isDirectory() || directory.isSymbolicLink()) throw new SettingsConflict("The backup staging directory changed.");
+    const path = this.stagingPath(file), handle = await this.handle(path, constants.O_RDONLY);
+    try { return await this.verifiedIdentity(handle, path, file); }
+    finally { await handle.close(); }
+  }
+  async publishDownload(file: SettingsFile, rememberSource: (identity: SettingsPhysicalFileIdentity) => void): Promise<SettingsLocalSaveOutcome> {
+    if (!isSettingsDownloadFile(file) || !file.sealed || file.invalidated) throw new SettingsConflict("The snapshot is not ready to save.");
+    await this.prepareDirectory("backups");
+    const source = this.stagingPath(file), destination = this.localBackupPath(file);
+    // Persist the verified source identity before the only effect. Recovery
+    // verifies this same inode; it never creates a missing destination.
+    const identity = await this.downloadSourceIdentity(file);
+    rememberSource(identity);
+    try { await link(source, destination); }
+    catch (error) {
+      if (fileCode(error, "EEXIST")) return { status: "failed", reason: "target_conflict" };
+      throw error;
+    }
+    return this.inspectDownloadPublication(file, identity);
+  }
+  async inspectDownloadPublication(file: SettingsFile, sourceIdentity: SettingsPhysicalFileIdentity | undefined): Promise<SettingsLocalSaveOutcome> {
+    if (!isSettingsDownloadFile(file)) throw new SettingsConflict("The selected file is not a download snapshot.");
+    const path = this.localBackupPath(file);
+    let target: FileHandle;
+    try {
+      const directory = await lstat(this.directory("backups"));
+      if (!directory.isDirectory() || directory.isSymbolicLink()) return { status: "failed", reason: "target_conflict" };
+      target = await this.handle(path, constants.O_RDONLY);
+    } catch (error) {
+      if (fileCode(error, "ENOENT")) {
+        try { await this.downloadSourceIdentity(file); return { status: "failed", reason: "not_published" }; }
+        catch (sourceError) {
+          if (sourceError instanceof SettingsConflict || fileCode(sourceError, "ENOENT") || fileCode(sourceError, "ELOOP")) return { status: "failed", reason: "source_unavailable" };
+          throw sourceError;
+        }
+      }
+      if (error instanceof SettingsConflict || fileCode(error, "ELOOP")) return { status: "failed", reason: "target_conflict" };
+      throw error; // Unreadable is not absent; keep the admitted save unsettled.
+    }
+    try {
+      if (!sourceIdentity) return { status: "failed", reason: "target_conflict" };
+      const actualTarget = await this.verifiedIdentity(target, path, file);
+      if (!this.sameFile(sourceIdentity, actualTarget)) return { status: "failed", reason: "target_conflict" };
+      const actualSource = await this.downloadSourceIdentity(file);
+      return this.sameFile(sourceIdentity, actualSource) ? { status: "saved" } : { status: "failed", reason: "source_unavailable" };
+    } catch (error) {
+      if (error instanceof SettingsConflict || fileCode(error, "ENOENT") || fileCode(error, "ELOOP")) return { status: "failed", reason: "source_unavailable" };
+      throw error;
+    } finally { await target.close(); }
+  }
   private async handle(path: string, flags: number) {
     const file = await open(path, flags | constants.O_NOFOLLOW, 0o600);
     try {

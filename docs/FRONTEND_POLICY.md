@@ -335,11 +335,27 @@ retains the actual current card and a usable correction/selection path.
 
 Local records offers Download backup as one explicit action. Snapshot creation
 and verification are internal progress, without a separate creation or
-confirmation page. New downloads use one private temporary snapshot; they do
-not publish a permanent server backup. Other Settings choices do not appear on
+confirmation page. New downloads use one private temporary snapshot. A supported
+download does not publish a permanent server backup. Other Settings choices do not appear on
 its progress or result page. File delivery uses the standard Host-mediated
 request, without hiding the action according to a Host name or download
 advertisement. Missing card authority still prevents actions.
+
+If that actual `ui/download-file` request returns method-not-found (-32601),
+the same snapshot is saved once in the Sui MCP backup folder. The initial choice
+explains this conditional destination. A verified local result shows Backup
+saved with a readable, selectable Folder and File name. It offers no second
+download action. Missing advertisement, cancellation, denial, invalid parameters,
+timeouts and errors from other methods do not select this path. Application
+names do not select either path.
+
+An earlier possibly handled attempt requires Save a local copy before local
+saving, with a warning that another copy may exist. A local save in progress
+offers status observation, not another save, Host retry or cancellation. A
+confirmed failure with no publication can offer Retry save within the original
+period; an uncertain result offers only Check status. State, authority, expiry,
+navigation and controls use the same current projection. Recorded saving and
+temporary cleanup remain separate facts, including when cleanup fails.
 
 Results distinguish snapshot preparation, Host-reported delivery, temporary
 cleanup and actual user file storage. Suggested file name is not a confirmed
@@ -350,7 +366,9 @@ within its fixed transfer period and warns when a prior request may already
 have been handled. Frame recreation and state reads never download again.
 Cancel download ends further transfer and cleans the temporary snapshot; it
 cannot close a Host dialog or delete a saved user file. A new frame needs an
-explicit retry, and a server restart ends the old transfer.
+explicit retry, and a server restart ends the old transfer. An already-admitted
+local save may be settled by verifying its existing artifact after restart;
+recovery never creates a missing backup or restores old input permission.
 
 The backend owns a thirty-minute transfer period starting when the snapshot is
 physically ready, separately from the original card-input deadline. Reads and
@@ -359,7 +377,9 @@ extending a confirmed deadline. Permission, operation, file, attempt and current
 state are checked before delivery. The elapsed time of the authenticated
 pre-delivery read, including a coalesced read, reduces the remaining period; a
 delayed reply cannot grant a fresh transfer period. A corrupt or unavailable snapshot sends no
-bytes to the Host. Existing saved backup results retain their recorded facts;
+bytes to the Host. A local save admitted before the deadline finishes its file work and result
+settlement; the verified final backup is not subject to the private-file TTL.
+Existing saved backup results retain their recorded facts;
 their public files are not removed by temporary cleanup.
 
 Incomplete cleanup offers Check status for the same operation. Cleanup includes

@@ -489,14 +489,20 @@ For local settings, local records or connection-service recovery, call `settings
 For a backup, use the exact label Download backup in Local records. It prepares
 and verifies the snapshot internally and asks the app to save it in one user
 action. Do not instruct a separate Create backup step or confuse Download backup
-with Restore local records. Do not claim a server folder is the user's download
-destination. Suggested file name and Host acknowledgment do not establish where
+with Restore local records. If the actual download function is unsupported,
+the same file is saved once in the Sui MCP backup folder. Use the verified
+Backup saved result's Folder and File name for that local artifact. Do not
+describe that folder as the Host download destination. Suggested file name and Host acknowledgment do not establish where
 or whether a file was saved. Retry download is explicit and may create another
 copy after an unconfirmed earlier request. It uses the same snapshot only during
 its fixed transfer period; a new request after expiry or server restart captures
 current records. Cancel download does not delete a file already saved by the app.
-Use the same product instructions across desktop apps; observed delivery failure
-is a fact to report, not a reason to invent a different storage workflow.
+Use the same function-based product instructions across desktop apps. Missing
+advertisement is not proof of non-support, and timeout, cancellation or denial
+does not trigger local saving. Save a local copy is the explicit decision after
+an earlier possibly handled request. Retry save follows only a confirmed failure
+with no published file; Check status settles uncertain saving or cleanup without
+another file effect. Report saved-file and cleanup facts separately.
 
 Ordinary MCP tools never apply a Settings change. Do not call `ui.act_card` or `ui.read_settings_file` as model work. Never request/paste raw backup bytes or card permissions in chat. Clear default address only changes read context, not wallet connections or admitted transactions. Endpoint changes require quitting/reopening all apps; a connection-service restart does not apply them. Report operation result, temporary-file cleanup and Host download acknowledgment as separate facts. A saved result is not proof that the Host saved a downloaded file. For restore validation refusal, let the user correct input or choose another file and prepare a new confirmation; reading or returning to a frame never applies it.
 

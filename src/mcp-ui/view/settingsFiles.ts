@@ -60,7 +60,7 @@ export async function uploadSettingsFile(file: File, transport: SettingsViewTran
   } finally { transport.setFileTransferActive(false); }
 }
 
-export type SettingsDownloadStatus = "pending" | "backup_unverified" | "acknowledged" | "not_completed" | "unconfirmed";
+export type SettingsDownloadStatus = "pending" | "backup_unverified" | "acknowledged" | "not_completed" | "unconfirmed" | "unsupported";
 export async function downloadSettingsFile(file: { operationId: string; fileId: string; displayName: string; totalSize: number; sha256: string; attemptId?: string },
   transport: SettingsViewTransport, status: (value: SettingsDownloadStatus) => void, active: () => boolean): Promise<SettingsDownloadStatus | undefined> {
   status("pending");
@@ -86,7 +86,7 @@ export async function downloadSettingsFile(file: { operationId: string; fileId: 
       const current = settingsViewSchema.parse(read.snapshot.data);
       if (!active() || current.operationId !== file.operationId || current.file?.fileId !== file.fileId ||
           current.file.sha256 !== file.sha256 || current.file.totalSize !== file.totalSize ||
-          current.download?.currentAttemptId !== file.attemptId || current.download.availability !== "available" ||
+          current.download?.currentAttemptId !== file.attemptId || current.download.localSave || current.download.availability !== "available" ||
           !current.download.remainingMs) return;
       // The remaining period was computed before the reply arrived. Include
       // the original read's elapsed time even when this call joined its flight.
@@ -100,7 +100,7 @@ export async function downloadSettingsFile(file: { operationId: string; fileId: 
   try {
     if (!active()) return;
     const response = await (file.attemptId ? transport.download(file.displayName, settingsBase64(data), file.attemptId) : transport.download(file.displayName, settingsBase64(data)));
-    const outcome = response.isError === true ? "not_completed" : "acknowledged";
+    const outcome = response.unsupported === true ? "unsupported" : response.isError === true ? "not_completed" : "acknowledged";
     if (active()) status(outcome);
     return outcome;
   } catch { if (active()) status("unconfirmed"); return "unconfirmed"; }

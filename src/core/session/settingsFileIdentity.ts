@@ -5,6 +5,7 @@ import type { SettingsFile } from "./settingsOperation.js";
 export function settingsDownloadPath(fileId: string): string {
   return `.settings-staging/${fileId}.download`;
 }
+export function settingsBackupPath(operationId: string): string { return `backups/${operationId}.json`; }
 export function isSettingsDownloadFile(file: Pick<SettingsFile, "role" | "fileId" | "relativePath">): boolean {
   return file.role === "export" && file.relativePath === settingsDownloadPath(file.fileId);
 }

@@ -159,9 +159,35 @@ A `download_backup` admission consumes one card input and captures one local-dat
 snapshot in the same SQLite transaction. The export role and exact generated
 `.settings-staging/<fileId>.download` namespace identify its private file; an
 export role or display name alone is insufficient. File bytes are not stored
-in operation JSON or public backups. Physical write, fsync, length and SHA checks
+in operation JSON or nested in exported local data. Physical write, fsync, length and SHA checks
 finish before the snapshot becomes available. `result` is immutable preparation
 evidence; delivery reports have separate typed state and atomic attempt identity.
+
+An exact unsupported download report can atomically reserve final/file I/O and
+admit local publication of that same snapshot. An earlier possibly handled
+attempt instead records a pending local-copy decision. Explicit consent/retry
+uses a distinct save-attempt identity and compare-and-set predecessor, without
+creating another snapshot. Application names and absent capability advertisement
+do not authorize this effect.
+
+The private `download.localSave` journal in `preparation_json` records its source
+manifest, fixed `backups/<operationId>.json` destination, attempt/consent and
+physical source device/inode as decimal strings. The verified source identity
+is committed before exclusive same-volume hard-link publication. The source and
+target must name the recorded file and pass size/SHA checks before `saved` is
+committed. Existing destinations are never overwritten or removed. Private
+unlink follows that result and actual descriptor closure; the final file has
+no automatic expiry. Historical export path validation remains distinct from
+the private `.download` row identity. No table, column or schema version changes.
+
+Unknown file effects remain `saving`, retaining their source and reservations.
+A failed DB result write retains the ended physical outcome for settlement.
+A missing target is distinct from one that could not be read. Only a verified
+absent target with a valid source permits an explicit retry within the original
+period. Recovery after owner exit verifies an existing source-bound target only;
+an absent or mismatching artifact is not regenerated. The new owner inherits
+settlement responsibility without restoring the old card's action permission.
+A committed saved result remains a past fact when its private file is gone.
 
 The fixed thirty-minute transfer period begins at physical readiness, independently
 of the original input expiry. The owner schedules its earliest live transfer
@@ -174,7 +200,10 @@ Private staging files survive as cleanup journal entries when cards are
 invalidated. Reset/import invalidate uploads and private downloads and transfer
 cleanup ownership without changing file identity. Existing public backup files
 remain unchanged. Acknowledgment, explicit cancellation, expiry, source failure
-or owner restart ends private retention. Active descriptor reads/writes finish
+or owner restart ends private retention, except that an already-admitted local
+publication retains the evidence needed to settle its result first. Its final
+reservation blocks competing Settings application and data replacement until
+physical I/O and result settlement end. Active descriptor reads/writes finish
 before deletion; new ranges and retries are refused once authority ends.
 `temporaryFileCleanup` includes physical cleanup and settlement of the operation's
 ended I/O reservation. Stored results remain readable during pending cleanup,

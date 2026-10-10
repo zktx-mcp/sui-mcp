@@ -31,7 +31,24 @@ const [directory, fault = "none"] = process.argv.slice(2);
 if (!directory) throw new Error("A private test directory is required");
 const send = (value: unknown) => process.send?.(value);
 const hold = async (name: string) => { send({ event: "boundary", name }); await new Promise<void>(() => {}); };
-let creations = 0;
+let creations = 0, publications = 0;
+const originalLink = fs.link, originalUnlink = fs.unlink, originalLstat = fs.lstat;
+fs.link = async (...args) => {
+  publications++;
+  if (fault === "link_before") await hold(fault);
+  await originalLink(...args);
+  if (fault === "link_after") await hold(fault);
+};
+fs.unlink = async (...args) => {
+  if (String(args[0]).endsWith(".download") && fault === "cleanup_before") await hold(fault);
+  await originalUnlink(...args);
+  if (String(args[0]).endsWith(".download") && fault === "cleanup_after") await hold(fault);
+};
+fs.lstat = (async (...args: Parameters<typeof fs.lstat>) => {
+  const result = await originalLstat(...args);
+  if (String(args[0]).endsWith(".download") && fault === "source_identity_before") await hold(fault);
+  return result;
+}) as typeof fs.lstat;
 const originalOpen = fs.open;
 fs.open = async (...args: Parameters<typeof fs.open>) => {
   const downloadWrite = String(args[0]).endsWith(".download") && typeof args[1] === "number" && (args[1] & (constants.O_RDWR | constants.O_WRONLY));
@@ -87,6 +104,14 @@ const settings = new SettingsWorkflow({ records, files, activity, preferences, l
   readFacts: async () => records.transaction(() => ({ server: { name: "sui-mcp", version: SERVER_VERSION, network: "mainnet" },
     localSettings: local.getLocalSettingsSync((key) => preferences.getLocalSettingSync(key)), counts: localData.getDataCountsSync(),
     assetReadAccount: { status: "address_required" }, walletAvailability: wallet.walletAvailability() })) });
+if (fault === "saved_before") {
+  const inspect = files.inspectDownloadPublication.bind(files);
+  files.inspectDownloadPublication = async (...args) => {
+    const result = await inspect(...args);
+    if (result.status === "saved") await hold(fault);
+    return result;
+  };
+}
 settings.recoverOwner(); await wallet.start();
 const cards = createReadCardStore({ ownerId, records: activity.createCardRecordStore(), workflow: wallet, settings, assertCurrent: access.assertCurrent,
   readService: { summarizeAccountInventory: unexpected }, publicChainReceiptReader: unexpected, chart: createDeepbookUsdcChartService() });
@@ -105,7 +130,7 @@ if (fault === "result_after") access.run(() => records.db.exec(`CREATE TRIGGER r
     SELECT 1 FROM settings_files f JOIN settings_operations o ON o.operation_id=coalesce(f.cleanup_operation_id,f.operation_id)
     WHERE f.file_id=OLD.file_io_id AND o.phase='terminal')
   BEGIN SELECT RAISE(ABORT,'finished cleanup release refused'); END`));
-process.on("message", (message: { command: "prepare" | "confirm" | "read" | "stop" | "historical_export"; draft?: SettingsDraft; reference?: { cardId: string; permission: string } }) => {
+process.on("message", (message: { command: "prepare" | "confirm" | "unsupported" | "read" | "stop" | "historical_export"; draft?: SettingsDraft; reference?: { cardId: string; permission: string } }) => {
   void access.run(async () => {
     if (message.command === "historical_export") {
       // Historical input to today's recovery reader: an old-format current-DB
@@ -168,10 +193,18 @@ process.on("message", (message: { command: "prepare" | "confirm" | "read" | "sto
           await new Promise<void>((resolve) => setImmediate(resolve));
         }
       }
+    } else if (message.command === "unsupported") {
+      while (data().download?.availability !== "available") {
+        card = { ...await cards.read({ cardId: card.snapshot.cardId, permission: card.permission }), permission: card.permission };
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      await act({ action: "settings_report_download", operationId: data().operationId, fileId: data().file!.fileId,
+        attemptId: data().download!.currentAttemptId, status: "unsupported", failure: { method: "ui/download-file", code: -32601 } });
+      send({ event: "reported", card });
     } else if (message.command === "read") {
       const reference = message.reference ?? { cardId: card.snapshot.cardId, permission: card.permission };
       card = { ...await cards.read(reference), permission: reference.permission };
-      send({ event: "read", card, creations, control: records.control(), account: activity.getActiveAccountSync() ?? null });
+      send({ event: "read", card, creations, publications, control: records.control(), account: activity.getActiveAccountSync() ?? null });
     } else {
       wallet.stop(); cards.stop(); await settings.close(); await runtime.close(); activity.close(); access.close(); lease.close(); process.exit(0);
     }

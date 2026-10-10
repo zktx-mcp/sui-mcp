@@ -27,28 +27,64 @@ export const settingsDraftSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.enum(["clear_read_address", "export_local_data", "download_backup", "import_local_data", "reset_local_data", "restart_wallet_service"]) }).strict()
 ]);
 export type SettingsDraft = z.infer<typeof settingsDraftSchema>;
-export const settingsDownloadReportSchema = z.enum(["acknowledged", "not_completed", "unconfirmed"]);
-export const settingsDownloadEndSchema = z.enum(["acknowledged", "cancelled", "expired", "server_restarted", "data_replaced", "source_unavailable"]);
+export const settingsDownloadReportSchema = z.enum(["acknowledged", "not_completed", "unconfirmed", "unsupported"]);
+export const settingsDownloadFailureSchema = z.object({ method: z.literal("ui/download-file"), code: z.literal(-32601) }).strict();
+export const settingsDownloadEndSchema = z.enum(["acknowledged", "cancelled", "expired", "server_restarted", "data_replaced", "source_unavailable", "stored_locally", "local_save_failed"]);
+export const settingsFileIdentitySchema = z.object({ device: z.string().regex(/^\d+$/), inode: z.string().regex(/^\d+$/) }).strict();
+export type SettingsPhysicalFileIdentity = z.infer<typeof settingsFileIdentitySchema>;
+const localSaveFailure = z.enum(["not_published", "target_conflict", "source_unavailable", "interrupted"]);
+export type SettingsLocalSaveOutcome = { status: "saved" } | { status: "failed"; reason: z.infer<typeof localSaveFailure> };
+const storedLocalSaveSchema = z.object({ status: z.enum(["needs_consent", "saving", "saved", "failed"]),
+  attemptId: identity, fileId: identity, sha256, totalSize: size, destination: z.string(), ownerId: z.string().min(1),
+  currentSaveAttemptId: identity.optional(),
+  attempts: z.array(z.object({ saveAttemptId: identity, previousSaveAttemptId: identity.optional(),
+    admittedAt: z.string().datetime(), allowPossibleCopy: z.boolean() }).strict()),
+  sourceIdentity: settingsFileIdentitySchema.optional(), savedAt: z.string().datetime().optional(), failure: localSaveFailure.optional()
+}).strict().superRefine((value, context) => {
+  if (value.status === "needs_consent" ? value.attempts.length !== 0 || value.currentSaveAttemptId !== undefined :
+      !value.currentSaveAttemptId || !value.attempts.some((a) => a.saveAttemptId === value.currentSaveAttemptId)) {
+    context.addIssue({ code: "custom", message: "A local save must identify its admitted attempt." });
+  }
+  if (new Set(value.attempts.map((a) => a.saveAttemptId)).size !== value.attempts.length ||
+      (value.status === "saved") !== (value.savedAt !== undefined) || value.status === "saved" && !value.sourceIdentity ||
+      (value.status === "failed") !== (value.failure !== undefined)) {
+    context.addIssue({ code: "custom", message: "Local save evidence must match its state." });
+  }
+});
+export type SettingsLocalSave = z.infer<typeof storedLocalSaveSchema>;
 export const storedSettingsDownloadSchema = z.object({
   currentAttemptId: identity,
   attempts: z.array(z.object({ attemptId: identity, admittedAt: z.string().datetime(), previousAttemptId: identity.optional(),
-    hostReport: settingsDownloadReportSchema.optional() }).strict()).min(1),
-  readyAt: z.string().datetime().optional(), expiresAt: z.string().datetime().optional(), endReason: settingsDownloadEndSchema.optional()
+    hostReport: settingsDownloadReportSchema.optional(), failure: settingsDownloadFailureSchema.optional() }).strict()).min(1),
+  readyAt: z.string().datetime().optional(), expiresAt: z.string().datetime().optional(), endReason: settingsDownloadEndSchema.optional(),
+  localSave: storedLocalSaveSchema.optional()
 }).strict().superRefine((value, context) => {
   if (new Set(value.attempts.map((attempt) => attempt.attemptId)).size !== value.attempts.length ||
       !value.attempts.some((attempt) => attempt.attemptId === value.currentAttemptId) ||
       (value.readyAt === undefined) !== (value.expiresAt === undefined)) {
     context.addIssue({ code: "custom", message: "Download attempts and lifetime must identify one stored snapshot." });
   }
+  if (value.endReason === "stored_locally" && value.localSave?.status !== "saved" ||
+      value.endReason === "local_save_failed" && value.localSave?.status !== "failed" ||
+      value.attempts.some((a) => (a.hostReport === "unsupported") !== (a.failure !== undefined)) ||
+      value.localSave && (value.localSave.attemptId !== value.currentAttemptId ||
+        !value.attempts.some((a) => a.attemptId === value.currentAttemptId && a.hostReport === "unsupported") ||
+        value.localSave.status === "saving" && value.endReason !== undefined ||
+        (value.localSave.status === "saved") !== (value.endReason === "stored_locally"))) {
+    context.addIssue({ code: "custom", message: "Local saving requires the current download's unsupported report." });
+  }
 });
 export type SettingsDownload = z.infer<typeof storedSettingsDownloadSchema>;
-export const settingsDownloadFileActionSchema = z.enum(["settings_retry_download", "settings_report_download", "settings_cancel_download"]);
+export const settingsDownloadFileActionSchema = z.enum(["settings_retry_download", "settings_report_download", "settings_cancel_download", "settings_store_backup"]);
 export const settingsActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("settings_download_backup"), operationId: identity, attemptId: identity }).strict(),
   z.object({ action: z.literal("settings_retry_download"), operationId: identity, fileId: identity,
     previousAttemptId: identity, attemptId: identity }).strict(),
   z.object({ action: z.literal("settings_report_download"), operationId: identity, fileId: identity,
-    attemptId: identity, status: settingsDownloadReportSchema }).strict(),
+    attemptId: identity, status: settingsDownloadReportSchema, failure: settingsDownloadFailureSchema.optional() }).strict().refine(
+      (value) => (value.status === "unsupported") === (value.failure !== undefined), "Only unsupported downloads require the exact method failure."),
+  z.object({ action: z.literal("settings_store_backup"), operationId: identity, fileId: identity, attemptId: identity,
+    saveAttemptId: identity, previousSaveAttemptId: identity.optional(), allowPossibleCopy: z.boolean() }).strict(),
   z.object({ action: z.literal("settings_cancel_download"), operationId: identity, fileId: identity, attemptId: identity }).strict(),
   z.object({ action: z.literal("settings_select"), draft: settingsDraftSchema }).strict(),
   z.object({ action: z.literal("settings_prepare"), operationId: identity }).strict(),
@@ -139,6 +175,8 @@ export const settingsViewSchema = z.object({
   download: z.object({ availability: z.enum(["preparing", "available", "ended"]), currentAttemptId: identity,
     hostReport: settingsDownloadReportSchema.optional(), previousUnconfirmed: z.boolean(),
     endReason: settingsDownloadEndSchema.optional(), expiresAt: z.string().datetime().optional(), remainingMs: size.optional(),
+    localSave: z.object({ status: z.enum(["needs_consent", "saving", "saved", "failed"]), currentSaveAttemptId: identity.optional(),
+      failure: localSaveFailure.optional(), savedAt: z.string().datetime().optional() }).strict().optional(),
     allowedFileActions: z.array(settingsDownloadFileActionSchema) }).strict().optional(),
   restoreCheck: restoreCheckSchema.optional(),
   backupLocation: z.object({ directory: z.string().min(1), filename: z.string().min(1) }).strict().optional(),
@@ -179,8 +217,12 @@ export const settingsViewSchema = z.object({
       (value.phase === "prepared" || value.allowedActions.includes("settings_prepare"))) {
     context.addIssue({ code: "custom", message: "A rejected backup requires an explicit new selection." });
   }
-  if (value.backupLocation && (value.draft?.kind !== "export_local_data" || value.result?.outcome !== "completed")) {
+  if (value.backupLocation && !(value.result?.outcome === "completed" && (value.draft?.kind === "export_local_data" ||
+      value.draft?.kind === "download_backup" && value.download?.localSave?.status === "saved" && value.download.endReason === "stored_locally"))) {
     context.addIssue({ code: "custom", message: "A backup location requires its recorded successful export." });
+  }
+  if (value.download?.localSave?.status === "saved" && !value.backupLocation) {
+    context.addIssue({ code: "custom", message: "A saved backup must identify its verified location." });
   }
   if (value.draft?.kind === "export_local_data" && value.result?.outcome === "completed" &&
       typeof value.result.details?.path === "string" && !value.backupLocation) {
@@ -206,7 +248,12 @@ export const settingsViewSchema = z.object({
 });
 
 export function settingsDownload(operation: SettingsOperation): SettingsDownload | undefined {
-  return operation.draft?.kind === "download_backup" ? storedSettingsDownloadSchema.parse(operation.preparation?.download) : undefined;
+  if (operation.draft?.kind !== "download_backup") return undefined;
+  const download = storedSettingsDownloadSchema.parse(operation.preparation?.download), save = download.localSave;
+  if (save && (save.fileId !== operation.fileId || save.destination !== `backups/${operation.operationId}.json`)) {
+    throw new SettingsConflict("The local save does not identify this request's backup.");
+  }
+  return download;
 }
 export type SettingsDownloadFileAction = Extract<SettingsAction, { action: z.infer<typeof settingsDownloadFileActionSchema> }>;
 export function isSettingsDownloadFileAction(action: SettingsAction): action is SettingsDownloadFileAction {
