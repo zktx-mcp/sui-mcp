@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MCP_RESOURCES } from "../src/mcp/resources.js";
 import { unnegatedClaims } from "./helpers/documentClaims.js";
+import { SERVER_INSTRUCTIONS } from "../src/mcp/serverInfo.js";
 
 function read(path: string): string {
   return readFileSync(join(process.cwd(), path), "utf8");
@@ -39,6 +40,19 @@ function goldenScenarioFiles(): string[] {
 }
 
 describe("documentation responsibility boundaries", () => {
+  it("distinguishes request/card/file bounds in the API and links them from concise injected guidance", () => {
+    const api = requiredBlock(read("docs/MCP_TOOLS.md"), "The local stdio gateway", "## Read-Only Tools");
+    expect(api).toMatch(/request body must fit within 4 MiB/);
+    expect(api).toMatch(/entire MCP JSON-RPC\s+envelope and metadata/);
+    expect(api).toMatch(/rejected before tool or card\s+dispatch/);
+    expect(api).toMatch(/not an unsupported function, wallet\s+rejection or unconfirmed file delivery/);
+    expect(api).toMatch(/Card calls also have a 64 KiB envelope budget/);
+    expect(api).toMatch(/Ordinary MCP calls do not inherit\s+that smaller card limit/);
+    expect(api).toMatch(/Restore files may contain up to 16 MiB and are sent in\s+separate messages/);
+    expect(api).toMatch(/4 MiB request limit is not a\s+backup-file limit/);
+    expect(SERVER_INSTRUCTIONS).toContain("suimcp://docs/mcp-tools");
+  });
+
   it("keeps runtime resource metadata aligned with README documentation map wording", () => {
     expect(MCP_RESOURCES.map((resource) => [resource.uri, resource.description])).toEqual([
       [

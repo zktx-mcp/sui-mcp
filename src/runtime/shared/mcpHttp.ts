@@ -40,8 +40,9 @@ export function createInternalMcpHandler(createServer: () => McpServer) {
           close: () => transport.close()
         };
         transport.onmessage = (message, extra) => {
-          // Preserve ordinary stdio MCP input contracts. The existing HTTP/UI
-          // body limit applies to card calls, including their JSON-RPC envelope.
+          // The SDK enforces its 4 MiB HTTP body limit before this callback.
+          // Card calls additionally have a 64 KiB JSON-RPC envelope budget;
+          // ordinary MCP calls do not inherit that smaller card limit.
           if (isJSONRPCRequest(message) && message.method === "tools/call" &&
               Object.values(CARD_TOOLS).some((name) => name === message.params?.name) &&
               Buffer.byteLength(JSON.stringify(message)) > MAX_JSON_BODY_BYTES) {

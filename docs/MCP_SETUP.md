@@ -24,6 +24,11 @@ the package identity when switching installations.
 - stdio: standard input/output, the local transport used by MCP clients to talk to this server.
 - `@zktx.io`: the npm package scope. `zktx-mcp` is the GitHub organization. Sui MCP is the product; `sui-mcp` is the MCP server name and executable command.
 
+Each MCP request, including its envelope and metadata, must fit within the
+internal transport's 4 MiB request-body limit. Card messages have a separate
+64 KiB budget; Restore uploads keep their 16 MiB file limit by sending smaller
+messages. See [MCP Tools](MCP_TOOLS.md) for request and error semantics.
+
 ## Requirements
 
 - Node.js 22+. Node 22 or 24 LTS is recommended.

@@ -60,7 +60,7 @@ export const SERVER_INSTRUCTIONS = [
   "For USD-denominated payment coverage, balance total, or shortfall questions, call read.get_server_status, then read.list_settlement_asset_groups, then read.preview_intent_evidence. Use toolAvailability.requiredToolsAvailable and responseSummary.doNotCallQuoteToolsForThisQuestion; do not call wallet inventory or quote tools unless user asks a separate inventory or conversion question. For parity, use read.summarize_settlement_asset_group_parity. If toolAvailability cannot be used, say the current MCP server build cannot support the answer.",
   "The active account context is read-only, not login, custody or signing permission. Implicit asset reads require session.get_interaction_status.assetReadAccount: available. Otherwise ask for an address only if the tool accepts account; connected-only tools require connection/account selection or wallet recovery.",
   "Unsupported: other chains, autonomous trading, alerts, investment advice, arbitrary Move/package calls, P&L/tax.",
-  "One wallet connection at a time; guidance: suimcp://docs/agent-behavior."
+  "One wallet connection at a time; docs: suimcp://docs/agent-behavior, suimcp://docs/mcp-tools."
 ].join("\n");
 
 export const IMPLEMENTED_TOOLS = [

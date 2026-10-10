@@ -95,6 +95,19 @@ it("enforces the actual authenticated wire limit before Settings dispatch, inclu
       input: { ...input, chunkBase64: "A".repeat(65536) } } }))).rejects.toMatchObject({ code: -32600,
         data: { code: "settings_payload_too_large", maximumMessageSize: 65536 } });
     expect(f.act).toHaveBeenCalledTimes(count);
+    // SDK 1.31.0's complete HTTP-body guard runs before the smaller card
+    // envelope guard. Neither error may admit a file write or wallet request.
+    f.setSize(4 * 1024 * 1024 + 1);
+    await expect(f.actCard(input)).rejects.toMatchObject({ code: 413,
+      message: expect.stringContaining("Payload Too Large") });
+    expect(Buffer.byteLength(f.bodies.at(-1)!)).toBe(4 * 1024 * 1024 + 1);
+    await expect(f.wallet.run(() => f.stdio.callTool({ name: CARD_TOOLS.act, arguments: { ...f.reference, revision, input },
+      _meta: { hostWrapping: "x".repeat(4 * 1024 * 1024) } }))).rejects.toMatchObject({ code: 413,
+        message: expect.stringContaining("Payload Too Large") });
+    expect(f.act).toHaveBeenCalledTimes(count);
+    expect(f.wallet.run(() => f.records.file(fileId))).toMatchObject({ receivedSize: 3, sealed: false });
+    expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+    await expect(f.readCard()).resolves.toMatchObject({ revision });
   } finally { await f.close(); }
 });
 

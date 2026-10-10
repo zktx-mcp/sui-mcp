@@ -16,8 +16,76 @@ import { z } from "zod";
 import { startSharedStdio } from "../src/runtime/shared/stdio.js";
 import { registerMcpPrompts } from "../src/mcp/prompts.js";
 import { ADAPTER_PROMPT_SURFACES } from "../src/adapters/adapterPromptSurfaces.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { createAuthenticatedFetch } from "../src/runtime/shared/authenticatedFetch.js";
+import { INTERNAL_MCP_PATH } from "../src/runtime/shared/control.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 const logger = { info() {}, warn() {}, error() {} };
+it("enforces the complete SDK request-body bound before dispatch and preserves the stdio connection after rejection", async () => {
+  // The adopted SDK 1.31.0 transport contract is 4 MiB per body, including
+  // UTF-8 metadata. It is independent of the 64 KiB card-message budget.
+  const maximum = 4 * 1024 * 1024;
+  const control: ControlIdentity = { key: randomBytes(32).toString("base64url"), databaseId: "1".repeat(64), configurationId: "2".repeat(64) };
+  const admitted: string[] = [];
+  const handler = createInternalMcpHandler(() => {
+    const server = new McpServer({ name: "request-size-fixture", version: "1" });
+    server.registerTool("fixture.consume", { inputSchema: { text: z.string() } }, async ({ text }) => {
+      admitted.push(text); return { content: [{ type: "text", text: "accepted" }] };
+    });
+    return server;
+  });
+  const runtime = await startSharedServer({ port: 0, control, onError() {}, createApplication: async () => ({
+    handleMcp: handler.handle, handleHttp: async (_request, response) => { response.writeHead(404).end(); }, close: handler.close
+  }) });
+  let targetSize: number | undefined;
+  const sizes: number[] = [];
+  const authenticated = createAuthenticatedFetch(runtime.port, control);
+  const http = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${runtime.port}${INTERNAL_MCP_PATH}`), {
+    fetch: async (url, init) => {
+      if (targetSize !== undefined && typeof init?.body === "string") {
+        const message = JSON.parse(init.body);
+        if (message.method === "tools/call") {
+          message.params._meta = { hostWrapping: "資料", padding: "" };
+          const missing = targetSize - Buffer.byteLength(JSON.stringify(message));
+          if (missing < 0) throw new Error("Request-size fixture exceeds its boundary before padding");
+          message.params._meta.padding = "x".repeat(missing);
+          const body = JSON.stringify(message); sizes.push(Buffer.byteLength(body));
+          return authenticated(url, { ...init, body });
+        }
+      }
+      return authenticated(url, init);
+    }
+  });
+  const client = new Client({ name: "request-size-http-client", version: "1" });
+  // Keep the same Transport boundary used by the product gateway; the SDK's
+  // optional sessionId accessor is wider than exactOptionalPropertyTypes.
+  const connection: Transport = { start: () => http.start(), send: (message, options) => http.send(message, options),
+    close: () => http.close(), setProtocolVersion: (version) => http.setProtocolVersion(version) };
+  http.onmessage = (message) => connection.onmessage?.(message);
+  http.onerror = (error) => connection.onerror?.(error); http.onclose = () => connection.onclose?.();
+  const [peer, upstream] = InMemoryTransport.createLinkedPair();
+  const proxy = await startSharedStdio({ stdio: upstream, port: runtime.port, control, onError() {} });
+  const stdio = new Client({ name: "request-size-stdio-client", version: "1" });
+  try {
+    await client.connect(connection); await stdio.connect(peer);
+    for (const size of [maximum - 1, maximum]) {
+      targetSize = size;
+      expect((await client.callTool({ name: "fixture.consume", arguments: { text: String(size) } })).isError).not.toBe(true);
+    }
+    targetSize = maximum + 1;
+    await expect(client.callTool({ name: "fixture.consume", arguments: { text: "must-not-be-admitted" } }))
+      .rejects.toMatchObject({ code: 413, message: expect.stringContaining("Payload Too Large") });
+    expect(sizes).toEqual([maximum - 1, maximum, maximum + 1]);
+    await expect(stdio.callTool({ name: "fixture.consume", arguments: { text: "must-not-be-admitted" },
+      _meta: { hostWrapping: "資料" + "x".repeat(maximum) } }))
+      .rejects.toMatchObject({ code: 413, message: expect.stringContaining("Payload Too Large") });
+    expect(admitted).toEqual([String(maximum - 1), String(maximum)]);
+    expect((await stdio.callTool({ name: "fixture.consume", arguments: { text: "after-rejection" } })).isError).not.toBe(true);
+    expect(admitted).toEqual([String(maximum - 1), String(maximum), "after-rejection"]);
+  } finally { await stdio.close(); await proxy.close(); await client.close(); await runtime.close(); }
+});
+
 it("preserves a valid external proposal larger than the card/HTTP body limit over authenticated MCP", async () => {
   const control: ControlIdentity = { key: randomBytes(32).toString("base64url"), databaseId: "1".repeat(64), configurationId: "2".repeat(64) };
   const f = await walletWorkflowFixture();

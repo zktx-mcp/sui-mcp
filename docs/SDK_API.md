@@ -8,13 +8,19 @@ in the card dependency notices described below.
 ## Package Versions
 
 - `@modelcontextprotocol/ext-apps`: `1.7.5`
-- `@modelcontextprotocol/sdk`: `1.29.0`
+- `@modelcontextprotocol/sdk`: `1.31.0`
 - `@mysten/sui`: `2.17.0`
 - `@mysten/deepbook-v3`: `1.3.6`
 - `@walletconnect/sign-client`, `@walletconnect/types`, `@walletconnect/utils`: `2.23.10`
 - `qrcode`: `1.5.4`
 - `@zktx.io/ptb-model`: `0.5.0`
 - `mermaid`: `11.16.1`
+- `katex`: `0.18.2`, pinned by an override scoped to `mermaid@11.16.1`
+
+Mermaid and its KaTeX dependency are build dependencies for the embedded card
+resources, not Node server runtime dependencies. Their versions are fixed by
+the source-checkout lockfile and included in the generated HTML. Installed npm
+dependencies do not apply a dependency package's own overrides.
 
 ## Bundled Transaction Diagrams
 
@@ -34,7 +40,7 @@ dependency update requires rebuilding and distributing the card resources.
 
 ## MCP Apps
 
-`@modelcontextprotocol/ext-apps` is pinned to `1.7.5`, with MCP SDK `1.29.0`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
+`@modelcontextprotocol/ext-apps` is pinned to `1.7.5`, with MCP SDK `1.31.0`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
 
 Settings completes a selected upload's verification and restore preparation on
 the backend. The card renders the stored `restoreCheck` result and collects one
@@ -50,7 +56,7 @@ progress describes communication only; it cannot grant restoration authority.
 Recorded backup locations use backend-native folder and file-name fields;
 optional `App.downloadFile` delivery remains separate from local publication.
 
-The shared server uses the pinned MCP SDK Streamable HTTP transport behind authenticated loopback access. Stdio clients forward tool, resource and prompt requests with their original client identity and capabilities. Ordinary MCP input schemas remain unchanged by the transport; the 64 KiB card/HTTP input limit includes the card call envelope.
+The shared server uses the pinned MCP SDK Streamable HTTP transport behind authenticated loopback access. Stdio clients forward tool, resource and prompt requests with their original client identity and capabilities. SDK 1.31.0 limits each internal HTTP request body to 4 MiB, including its complete MCP JSON-RPC envelope and metadata. Oversized bodies are refused before tool or card dispatch. Card calls additionally have a 64 KiB envelope budget; ordinary MCP calls do not inherit that smaller limit. Restore uploads retain their 16 MiB file limit and are split into messages within the card budget. The SDK's internal HTTP batch guard does not expose a stdio batch feature.
 
 ## WalletConnect Runtime
 

@@ -34,9 +34,12 @@ Implemented surfaces and deliberately sequenced work remain distinct:
   Connect/Review cards for the supported swap adapter, backend WalletConnect
   signing and receipt observation, and internal Settings/file/data controls. Ordinary MCP tools
   create cards or read evidence; they do not authorize signing or execution.
-- Sequenced next: final package and actual Host handoff checks, further analysis
-  views and protocol adapters. External proposal execution requires a separate implementation
-  decision and independent material verification; proposals remain non-signable.
+- Release preparation requires final package verification and actual Host
+  handoff checks at the applicable delivery boundary, reusing valid evidence
+  according to change impact. Planned product work includes further analysis
+  views and protocol adapters. External proposal execution requires a separate
+  implementation decision and independent material verification; proposals
+  remain non-signable.
 
 The evidence layer answers what verified Sui facts support about a user's
 assets and request, and which choices or claims remain unsupported. A reviewed

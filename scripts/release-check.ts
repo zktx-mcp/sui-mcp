@@ -13,6 +13,7 @@ import { acquireDataDirectoryOwner } from "../src/runtime/shared/ownerLease.js";
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
 import { DEFAULT_REQUEST_TIMEOUT_MSEC } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { assertSqliteEngineAvailable } from "../src/core/activity/sqliteActivityStore.js";
 import { MCP_RESOURCES } from "../src/mcp/resources.js";
 import { SERVER_NAME } from "../src/mcp/serverInfo.js";
@@ -206,6 +207,27 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
         identity.data.version !== manifest.version || identity.data.serverName !== SERVER_NAME || identity.data.network !== "mainnet") {
       throw new Error("Installed package identity mismatch.");
     }
+    // A published dependency's overrides are not consumer-root overrides.
+    // The browser renderer is embedded during build and must not bring an
+    // unfixed, unused renderer dependency into the Node runtime installation.
+    const installedTree = JSON.parse(capture("npm", ["ls", "--all", "--omit=dev", "--json"], installDir));
+    const hasBrowserRenderer = (tree: { dependencies?: Record<string, unknown> }): boolean =>
+      Object.entries(tree.dependencies ?? {}).some(([name, dependency]) =>
+        name === "mermaid" || name === "katex" || hasBrowserRenderer(dependency as typeof tree));
+    if (hasBrowserRenderer(installedTree)) throw new Error("Browser renderer libraries must be embedded in cards, not installed as server runtime dependencies.");
+    stage = "MCP request-body rejection and recovery";
+    try {
+      await client.callTool({ name: TOOL_NAMES.readGetServerStatus, arguments: {},
+        _meta: { requestSizeFixture: "x".repeat(4 * 1024 * 1024) } });
+      throw new Error("Installed runtime admitted an oversized MCP request.");
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== 413 ||
+          !("message" in error) || !String(error.message).includes("Payload Too Large")) throw error;
+    }
+    const afterRejection = await client.callTool({ name: TOOL_NAMES.readGetServerStatus, arguments: {} });
+    if (afterRejection.isError || (afterRejection.structuredContent as { ok?: boolean } | undefined)?.ok !== true) {
+      throw new Error("Installed MCP connection did not recover after request-body rejection.");
+    }
     stage = "MCP tools and resources";
     const tools = await client.listTools();
     for (const name of [TOOL_NAMES.readGetServerStatus, TOOL_NAMES.sessionCreateWalletConnection,
@@ -323,7 +345,9 @@ async function main(): Promise<void> {
       capture("npm", ["pack", "--json", "--pack-destination", packDir])
     );
     assertPackContents(packedInfo);
-    await smokeInstallPackedTarball(resolve(packDir, packedInfo.filename));
+    const packedPath = resolve(packDir, packedInfo.filename);
+    process.stderr.write(`Checked package SHA256: ${createHash("sha256").update(readFileSync(packedPath)).digest("hex")}\n`);
+    await smokeInstallPackedTarball(packedPath);
   } finally {
     rmSync(packDir, { recursive: true, force: true });
   }

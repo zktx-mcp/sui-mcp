@@ -8,6 +8,16 @@ It does not own installation steps or user-question playbooks. Installation and 
 
 Tool names use dot prefixes and avoid arbitrary shell, arbitrary Move calls, and private-key handling.
 
+The local stdio gateway forwards each request through authenticated internal
+HTTP. A request body must fit within 4 MiB, including the entire MCP JSON-RPC
+envelope and metadata. An oversized request is rejected before tool or card
+dispatch; this is an input-size error, not an unsupported function, wallet
+rejection or unconfirmed file delivery. Reduce the request before calling again.
+Card calls also have a 64 KiB envelope budget. Ordinary MCP calls do not inherit
+that smaller card limit. Restore files may contain up to 16 MiB and are sent in
+separate messages within the card budget; the 4 MiB request limit is not a
+backup-file limit.
+
 ## Read-Only Tools
 
 | Tool | Status | Purpose |

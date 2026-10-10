@@ -72,7 +72,11 @@ export function createAuthenticatedFetch(port: number, control: ControlIdentity,
     headers.set("host", url.host);
     headers.set("authorization", `Bearer ${control.key}`);
     headers.set(SERVER_INSTANCE_HEADER, channel.identity.instanceId);
-    headers.set("connection", "close");
+    // An early rejection (for example the SDK's body-size guard) must reach
+    // the caller while the request is still being written. Server-side
+    // Connection: close can race that response with EPIPE. This channel is
+    // still destroyed after the response and never reused or replaced.
+    headers.set("connection", "keep-alive");
     const body = init?.body;
     if (body !== undefined && body !== null && typeof body !== "string") { channel.close(); throw new Error("Invalid internal MCP body."); }
     if (typeof body === "string") headers.set("content-length", String(Buffer.byteLength(body)));
