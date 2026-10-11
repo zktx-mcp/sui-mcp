@@ -2,7 +2,8 @@
 
 WalletConnect provides approved Sui mainnet account context and a transport for
 individual wallet requests. It is not login, proof of address ownership, custody, or standing permission to transact. Frontend behavior is defined in
-[Frontend Policy](FRONTEND_POLICY.md); tools are in [MCP Tools](MCP_TOOLS.md).
+[Frontend Policy](https://github.com/zktx-mcp/sui-mcp/blob/main/docs/FRONTEND_POLICY.md)
+in the source repository; tools are in [MCP Tools](MCP_TOOLS.md).
 
 ## Connection and read account
 

@@ -27,7 +27,7 @@ Users can ask ordinary questions:
 - "How much are my USD-denominated assets together?"
 - "What is the shortfall?"
 
-This document describes `@zktx.io/sui-mcp@0.6.0`. Confirm that version is
+This document describes `@zktx.io/sui-mcp@0.6.1`. Confirm that version is
 published before using npm installation commands. For a local build, follow
 [Developer Checkout Setup](docs/MCP_SETUP.md#developer-checkout-setup).
 
@@ -191,20 +191,17 @@ install through your client's registry support or run `npx -y @zktx.io/sui-mcp`.
 For per-client configuration (Claude Code, Claude Desktop, Codex, Cursor) and
 running from a local checkout, see [docs/MCP_SETUP.md](docs/MCP_SETUP.md).
 
-### Package and repository transition
+### Package identity and local data
 
-The package for this release is `@zktx.io/sui-mcp@0.6.0`, and its repository is
-`zktx-mcp/sui-mcp`. The previous package is `@zktx.io/say-ur-intent` (through
-0.4.4). The older `@stelis/say-ur-intent@0.4.0` is also a separate package.
-Existing installations and MCP client registrations do not change names
-automatically. Before switching, confirm the new package with
-`npm view @zktx.io/sui-mcp@0.6.0 version`; renaming the repository does not publish
-an npm package or MCP Registry entry.
+The npm package is `@zktx.io/sui-mcp`, and its repository is
+`zktx-mcp/sui-mcp`. Confirm the requested version is available before changing
+your client registration.
 
 Use the full scoped package name: the unscoped `sui-mcp` package is a different
-project. Keep the MCP registration name `sui-mcp`, without a suffix. This release
-starts with a new local data directory and does not import or
-convert data from the previous package. See the
+project. Keep the MCP registration name `sui-mcp`, without a suffix. Compatible
+updates preserve the current data directory. Incompatible databases and backups
+are rejected without conversion, and files are left in place. Data from a
+different package is not discovered or imported. See the
 [setup guide](docs/MCP_SETUP.md#switching-the-installed-package) for installation
 and shared-server restart instructions.
 
@@ -253,16 +250,19 @@ AI client answer behavior must be mirrored in runtime-facing instructions, resou
 - `docs/WALLET_CONNECTION.md`: Wallet connection reference: active read context, private SDK ownership and user-approved transaction requests.
 - `protocols/deepbook-v3.md`: Protocol reference only; use MCP tool responses and read.list_supported_protocols for current support.
 - `protocols/deepbook-margin.md`: Protocol reference only; no margin MCP read tools or signable actions are exposed in this release.
-- `docs/golden-scenarios/INTENT_EVIDENCE_MATRIX.md`: current-release question, tool-path, and standard-answer matrix for AI client release review.
-- `docs/golden-scenarios/BEHAVIOR_MATRIX.md`: broader behavior scenario matrix for supported and unsupported user prompts.
 - `docs/TRANSACTION_ACTIVITY_LOG.md`: transaction activity evidence, storage, scan, and summary boundaries.
 - `docs/UTILITY_INDEX.md`: manual maintainer and developer utilities. Utility rows are not MCP tools unless they explicitly name an MCP tool, and source-checkout scripts are not packaged product commands.
 - `docs/LOCAL_DB_ARCHITECTURE.md`: local SQLite storage boundaries for maintainers.
 - `docs/SDK_API.md`: pinned SDK API notes and source-verification boundaries.
-- `docs/FRONTEND_POLICY.md`: review-app frontend implementation policy for coding agents.
 - `docs/SIGNABLE_ADAPTER_CONTRACT.md`: wallet-review adapter and PTB visualization contract. It defines the pre-signing review evidence and commitment boundary; wallet signing requires a user card action and approval in the wallet; the backend alone handles bytes.
-- `AGENTS.md`: root repository development contract and non-negotiable product boundaries for coding agents working on this codebase.
-- `docs/AGENT_DEVELOPMENT_POLICY.md`: detailed binding development, review, documentation, source-of-truth, and completion policies for coding agents.
+
+Contributor references live in the source repository and are not installed MCP
+resources or product commands:
+
+- [AGENTS.md](https://github.com/zktx-mcp/sui-mcp/blob/main/AGENTS.md): root repository development contract and non-negotiable product boundaries.
+- [docs/AGENT_DEVELOPMENT_POLICY.md](https://github.com/zktx-mcp/sui-mcp/blob/main/docs/AGENT_DEVELOPMENT_POLICY.md): contributor development and review policy.
+- [docs/FRONTEND_POLICY.md](https://github.com/zktx-mcp/sui-mcp/blob/main/docs/FRONTEND_POLICY.md): card frontend implementation policy.
+- [docs/golden-scenarios/INTENT_EVIDENCE_MATRIX.md](https://github.com/zktx-mcp/sui-mcp/blob/main/docs/golden-scenarios/INTENT_EVIDENCE_MATRIX.md) and [docs/golden-scenarios/BEHAVIOR_MATRIX.md](https://github.com/zktx-mcp/sui-mcp/blob/main/docs/golden-scenarios/BEHAVIOR_MATRIX.md): release-review scenarios; current tool responses define supported evidence.
 
 ## Contract Name Registry
 
@@ -272,7 +272,7 @@ safety, trust, route-quality, or signing-readiness signal, and only registered
 addresses are relabeled.
 
 Two pinned, context-aware registries in
-[`src/core/action/contractNameRegistry.ts`](src/core/action/contractNameRegistry.ts)
+[`src/core/action/contractNameRegistry.ts`](https://github.com/zktx-mcp/sui-mcp/blob/main/src/core/action/contractNameRegistry.ts)
 drive this:
 
 - packages, relabeled only in `<address>::` path position — the DeepBook swap

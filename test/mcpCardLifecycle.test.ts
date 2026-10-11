@@ -1092,10 +1092,11 @@ it.each(["account", "receipt", "chart"] as const)("restores %s through a public 
   }
 });
 
-it.each(["resource_link", "claude_text"] as const)("restores a missing snapshot from a %s without granting input authority", async (format) => {
+it.each(["resource_link", "text_link"] as const)("restores a missing snapshot from a %s without granting input authority", async (format) => {
   const completed = state("account", { state: "closed", reason: "completed", data: {} });
   const uri = CARD_RESOURCE_PREFIX + completed.cardId;
   const app = host(async () => { throw new Error("No input authority"); });
+  app.getHostVersion = () => ({ name: "Unregistered standard desktop" });
   app.readServerResource.mockResolvedValue(savedResource(completed));
   const content: CallToolResult["content"] = format === "resource_link"
     ? [{ type: "resource_link", uri, name: `card_${completed.cardId}` }]
@@ -5136,4 +5137,126 @@ it("shows only a local-copy decision after uncertain delivery, then saves from t
     const inputs = app.callServerTool.mock.calls.map(([call]) => call.arguments.input as { action?: string; allowPossibleCopy?: boolean } | undefined);
     expect(inputs.filter((input) => input?.action === "settings_store_backup")).toMatchObject([{ allowPossibleCopy: true }]);
   } finally { await app.onteardown?.(); await mcp.close(); await f.close(); }
+});
+
+
+it.each([
+  { name: "chatgpt", format: "structured" },
+  { name: "Claude", format: "carrier" },
+  { name: "Arbitrary standard desktop", format: "carrier" },
+  { name: "Renamed desktop", format: "text" },
+  { name: "Outer metadata desktop", format: "outer_permission" }
+])("normalizes one card response flow by format without consulting Host names ($name/$format)", async ({ name, format }) => {
+  const completed = state("receipt", { state: "closed", reason: "completed", revision: 2, data: {}, inputRemainingMs: 0 });
+  const encode = (value: CallToolResult): CallToolResult => {
+    if (format === "structured") return value;
+    if (format === "text") return { content: [{ type: "text", text: JSON.stringify(value.structuredContent) }], _meta: value._meta };
+    if (format === "outer_permission") {
+      const { _meta, ...inner } = value;
+      return { content: [{ type: "text", text: JSON.stringify(inner) }], _meta };
+    }
+    return { content: [{ type: "text", text: JSON.stringify(value) }] };
+  };
+  const app = host(async () => encode(result(completed)));
+  const hostInfo = vi.fn(() => ({ name })); app.getHostVersion = hostInfo;
+  startCard("receipt", renderer); app.ontoolresult!(encode(result(completed, true)));
+  await vi.waitFor(() => expect(root.textContent).toContain("Stored result"));
+  expect(app.callServerTool).toHaveBeenCalledExactlyOnceWith({ name: CARD_TOOLS.read,
+    arguments: { cardId: completed.cardId, permission: "fixture-permission" } }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  expect(app.readServerResource).not.toHaveBeenCalled(); expect(submitButton()).toBeUndefined(); expect(hostInfo).not.toHaveBeenCalled();
+  await app.onteardown!(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each(["permission", "payload", "double_carrier", "multiple_payloads", "malformed_carrier", "error_flag"])(
+  "rejects inconsistent response information before any card read (%s)", async (failure) => {
+    const completed = state("account", { state: "closed", reason: "completed", data: {} });
+    const inner = result(completed, true);
+    let creating: CallToolResult = { content: [{ type: "text", text: JSON.stringify(inner) }] };
+    if (failure === "permission") creating._meta = { [CARD_METADATA_KEY]: { cardId: completed.cardId, permission: "other-permission" } };
+    if (failure === "payload") creating.structuredContent = { ok: true, data: { ...completed, cardId: "other-card" } };
+    if (failure === "double_carrier") creating = { content: [{ type: "text", text: JSON.stringify(creating) }] };
+    if (failure === "multiple_payloads") creating = { content: [
+      { type: "text", text: JSON.stringify({ ok: true, data: completed }) },
+      { type: "text", text: JSON.stringify({ ok: true, data: { ...completed, cardId: "other-card" } }) }
+    ] };
+    if (failure === "malformed_carrier") creating = { content: [{ type: "text", text: JSON.stringify({ ...inner, content: [{ type: "unknown" }] }) }] };
+    if (failure === "error_flag") creating = { ...inner, isError: true };
+    const app = host(async () => { throw new Error("Inconsistent responses must not make a tool call"); });
+    app.getHostVersion = () => ({ name: "Arbitrary standard desktop" });
+    startCard("account", renderer); app.ontoolresult!(creating);
+    await vi.waitFor(() => expect(root.textContent).toContain("inconsistent card response information"));
+    expect(app.callServerTool).not.toHaveBeenCalled(); expect(app.readServerResource).not.toHaveBeenCalled(); expect(submitButton()).toBeUndefined();
+    await app.onteardown!();
+  }
+);
+
+it.each(["payload", "prototype"])("does not promote private metadata from ordinary data or object prototypes (%s)", async (location) => {
+  const completed = state("account", { state: "closed", reason: "completed", data: {} });
+  const reference = { cardId: completed.cardId, permission: "fixture-permission" };
+  const creating: CallToolResult = location === "payload"
+    ? { content: [{ type: "text", text: JSON.stringify({ ok: true, data: { ...completed,
+      data: { content: [], _meta: { [CARD_METADATA_KEY]: reference } } }, _meta: { [CARD_METADATA_KEY]: reference } }) }] }
+    : { ...result(completed), _meta: JSON.parse(JSON.stringify({ ["__proto__"]: { [CARD_METADATA_KEY]: reference } })) };
+  const app = host(async () => { throw new Error("Ordinary data must not grant input authority"); });
+  app.readServerResource.mockResolvedValue(savedResource(completed));
+  startCard("account", renderer); app.ontoolresult!(creating);
+  await vi.waitFor(() => expect(root.textContent).toContain("Stored result"));
+  expect(app.readServerResource).toHaveBeenCalledExactlyOnceWith({ uri: CARD_RESOURCE_PREFIX + completed.cardId }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  expect(app.callServerTool).not.toHaveBeenCalled(); expect(submitButton()).toBeUndefined();
+  await app.onteardown!();
+});
+
+it("merges semantically identical outer and carrier metadata while preserving link identity checks", async () => {
+  const completed = state("account", { state: "closed", reason: "completed", data: {} });
+  const inner = result(completed, true);
+  const app = host(async () => result(completed));
+  startCard("account", renderer); app.ontoolresult!({ content: [{ type: "text", text: JSON.stringify(inner) }],
+    _meta: { [CARD_METADATA_KEY]: { permission: "fixture-permission", cardId: completed.cardId } } });
+  await vi.waitFor(() => expect(root.textContent).toContain("Stored result"));
+  expect(app.callServerTool).toHaveBeenCalledOnce(); await app.onteardown!();
+  root = new Element("main");
+  const invalid = host(async () => { throw new Error("Mismatched text links must not read a card"); });
+  startCard("account", renderer); invalid.ontoolresult!({ content: [{ type: "text", text:
+    `[Resource link: card_${completed.cardId}] ${CARD_RESOURCE_PREFIX}other-card (Saved data for this exact card.)` }] });
+  await vi.waitFor(() => expect(root.textContent).toContain("could not be matched to one card"));
+  expect(invalid.readServerResource).not.toHaveBeenCalled(); expect(invalid.callServerTool).not.toHaveBeenCalled(); await invalid.onteardown!();
+});
+
+
+it("matches an optional undefined property with its omitted JSON fallback without weakening conflicts", async () => {
+  const completed = state("account", { state: "closed", reason: "completed", data: {} });
+  const creating = { ...result({ ...completed, data: { optional: undefined } }, true),
+    content: [{ type: "text" as const, text: JSON.stringify({ ok: true, data: completed }) }] };
+  const app = host(async () => result(completed));
+  startCard("account", renderer); app.ontoolresult!(creating);
+  await vi.waitFor(() => expect(root.textContent).toContain("Stored result"));
+  expect(app.callServerTool).toHaveBeenCalledOnce(); await app.onteardown!();
+});
+
+
+it("rejects a malformed saved text URI even when another creating identity is available", async () => {
+  const completed = state("account", { state: "closed", reason: "completed", data: {} });
+  const app = host(async () => { throw new Error("A conflicting saved link must not be ignored"); });
+  startCard("account", renderer); app.ontoolresult!({ ...result(completed), content: [{ type: "text", text:
+    `[Resource link: card_${completed.cardId}] ${CARD_RESOURCE_PREFIX}${completed.cardId}?other=1 (Saved data for this exact card.)` }] });
+  await vi.waitFor(() => expect(root.textContent).toContain("could not be matched to one card"));
+  expect(app.callServerTool).not.toHaveBeenCalled(); expect(app.readServerResource).not.toHaveBeenCalled(); await app.onteardown!();
+});
+
+
+it.each(["omitted", "null"] as const)("uses JSON omission semantics for outer metadata while rejecting defined invalid values (%s)", async (mode) => {
+  const completed = state("account", { state: "closed", reason: "completed", data: {} });
+  const inner = result(completed, true);
+  const app = host(async () => result(completed));
+  startCard("account", renderer); app.ontoolresult!({ content: [{ type: "text", text: JSON.stringify(inner) }],
+    _meta: { [CARD_METADATA_KEY]: mode === "omitted" ? undefined : null } });
+  if (mode === "omitted") {
+    await vi.waitFor(() => expect(root.textContent).toContain("Stored result"));
+    expect(app.callServerTool).toHaveBeenCalledExactlyOnceWith({ name: CARD_TOOLS.read,
+      arguments: { cardId: completed.cardId, permission: "fixture-permission" } }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  } else {
+    await vi.waitFor(() => expect(root.textContent).toContain("inconsistent card response information"));
+    expect(app.callServerTool).not.toHaveBeenCalled();
+  }
+  expect(app.readServerResource).not.toHaveBeenCalled(); await app.onteardown!();
 });

@@ -94,14 +94,12 @@ planning rationale, or "why we changed this" notes in README, `docs/`,
 `protocols/`, runtime instructions, MCP resources, tool descriptions, or
 user-facing strings. Keep that history in ignored `.WORK` notes.
 
-Two approved exceptions have a limited delivery purpose. README may carry a
-factual package/repository transition notice tied to installation, distinguishing
-planned destinations from completed publication. Reviewed English development
-records may live under `submission/ethglobal-tokyo-2026/`, with translations and
-retrospective summaries labelled as such. That directory is not product guidance,
-is never registered as an MCP resource, and is excluded from npm packages. These
-exceptions do not permit development history in other product/runtime documents
-or change `.WORK`'s role as ignored working material.
+Reviewed English development records may live under
+`submission/ethglobal-tokyo-2026/`, with translations and retrospective summaries
+labelled as such. That directory is not product guidance, is never registered as
+an MCP resource, and is excluded from npm packages. This does not permit
+development history in product/runtime documents or change `.WORK`'s role as
+ignored working material.
 
 If the intended meaning depends on prior chat, hidden context, vague shorthand,
 or local assumptions, rewrite it.

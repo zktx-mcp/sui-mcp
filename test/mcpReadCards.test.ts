@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CallToolResultSchema, type ClientCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -22,7 +23,7 @@ import { receiptForCard } from "../src/mcp-ui/view/receiptData.js";
 const account = `0x${"a".repeat(64)}`;
 const fetchedAt = "2026-09-22T00:00:00.000Z";
 const inventory: AccountInventorySummary = { status: "ok", account, fetchedAt, name: null, balances: [], nfts: [], objectGroups: [], scannedObjects: 0, objectsTruncated: false };
-async function harness(ui: boolean, transaction = cardReceiptTransaction) {
+async function harness(ui: boolean, transaction = cardReceiptTransaction, peer?: { name: string; capabilities: ClientCapabilities }) {
   const directory = mkdtempSync(join(tmpdir(), "say-card-mcp-"));
   const activityStore = new SqliteActivityStore({ databasePath: join(directory, "state.sqlite"), validateAdapterLifecycle: validateSupportedAdapterLifecycle });
   const accountInputs: unknown[] = []; const receiptInputs: unknown[] = [];
@@ -40,10 +41,10 @@ async function harness(ui: boolean, transaction = cardReceiptTransaction) {
   });
   const server = new McpServer({ name: "card-service-fixture", version: "1" });
   registerReadCards(server, { cards: { store: cards }, activityStore, logger: { error: vi.fn() } });
-  const client = new Client({ name: "card-test-client", version: "1" }, { capabilities: ui ? { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } : {} });
+  const client = new Client({ name: peer?.name ?? "card-test-client", version: "1" }, { capabilities: peer?.capabilities ?? (ui ? { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } : {}) });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport); await client.connect(clientTransport);
-  return { client, activityStore, accountInputs, receiptInputs, close: async () => {
+  return { client, cards, activityStore, accountInputs, receiptInputs, close: async () => {
     await client.close(); await server.close(); cards.stop(); activityStore.close(); rmSync(directory, { recursive: true, force: true });
   } };
 }
@@ -154,4 +155,44 @@ describe("MCP read cards, persisted results and private display", () => {
       expect(JSON.stringify(result.content)).toContain("ui_unavailable"); expect(context.accountInputs).toEqual([]);
     } finally { await context.close(); }
   });
+});
+
+
+it.each(["codex-mcp-client", "claude-ai", "Arbitrary standard client"])(
+  "uses the same per-connection UI contract for read-card admission (%s)", async (name) => {
+    for (const advertised of [true, false]) {
+      const context = await harness(false, cardReceiptTransaction, { name,
+        capabilities: advertised ? { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE, "text/html+skybridge"] } } } : {} });
+      try {
+        const create = vi.spyOn(context.cards, "create");
+        const response = CallToolResultSchema.parse(await context.client.callTool({ name: CARD_TOOLS.account, arguments: { account } }));
+        if (advertised) {
+          expect(snapshot(response)).toMatchObject({ kind: "account", input: { account }, state: "closed", reason: "completed" });
+          expect(cardReferenceSchema.parse(response._meta?.[CARD_METADATA_KEY]).cardId).toBe(snapshot(response).cardId);
+          expect(create).toHaveBeenCalledOnce(); expect(context.accountInputs).toHaveLength(1);
+        } else {
+          expect(response.isError).toBe(true);
+          const text = response.content.find((item) => item.type === "text");
+          expect(JSON.parse(text?.type === "text" ? text.text : "null")).toMatchObject({ ok: false, error: { kind: "ui_unavailable" } });
+          expect(response._meta).toBeUndefined(); expect(create).not.toHaveBeenCalled();
+          expect(context.accountInputs).toHaveLength(0); expect(context.receiptInputs).toHaveLength(0);
+        }
+      } finally { await context.close(); }
+    }
+  }
+);
+
+it.each([
+  {}, { mimeTypes: [] }, { mimeTypes: ["text/html+skybridge"] },
+  { mimeTypes: RESOURCE_MIME_TYPE }, { mimeTypes: [RESOURCE_MIME_TYPE, 1] }
+])("rejects absent, nonstandard or malformed UI MIME advertisements before card/source access (%j)", async (ui) => {
+  const context = await harness(false, cardReceiptTransaction, { name: "codex-mcp-client", capabilities: { extensions: { [EXTENSION_ID]: ui } } });
+  try {
+    const create = vi.spyOn(context.cards, "create");
+    const response = CallToolResultSchema.parse(await context.client.callTool({ name: CARD_TOOLS.receipt, arguments: { digest: chainReceiptDigest } }));
+    expect(response.isError).toBe(true); expect(response._meta).toBeUndefined();
+    const text = response.content.find((item) => item.type === "text");
+    expect(JSON.parse(text?.type === "text" ? text.text : "null")).toMatchObject({ error: { kind: "ui_unavailable" } });
+    expect(create).not.toHaveBeenCalled(); expect(context.receiptInputs).toHaveLength(0);
+  } finally { await context.close(); }
 });

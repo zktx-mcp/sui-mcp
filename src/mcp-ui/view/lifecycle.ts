@@ -1,5 +1,5 @@
 import { App } from "@modelcontextprotocol/ext-apps";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { button } from "../../../review-app/src/ui/ui.js";
 import { automaticWorkflowActionSchema, workflowActionSchema, workflowViewSchema, reviewWalletChoices } from "../../core/session/workflowView.js";
 import { settingsViewSchema, type SettingsDraft } from "../../core/session/settingsOperation.js";
@@ -80,20 +80,68 @@ function settingsCommandProgress(basis: CardSnapshot, current: CardSnapshot, inp
       input.action === "settings_seal_upload" && input.fileId !== fileId) return undefined;
   return { kind: "backup_check_response", cardId: current.cardId, operationId: next.operationId, fileId, action: input.action };
 }
-function unwrap(result: unknown, host: string | undefined): Record<string, unknown> {
+function jsonKeys(value: Record<string, unknown>): string[] {
+  return Object.keys(value).filter((key) => value[key] !== undefined);
+}
+function sameJson(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) return Array.isArray(left) && Array.isArray(right) &&
+    left.length === right.length && left.every((value, index) => sameJson(value, right[index]));
+  const a = object(left), b = object(right);
+  if (!a || !b) return false;
+  const keys = jsonKeys(a);
+  return keys.length === jsonKeys(b).length &&
+    keys.every((key) => Object.hasOwn(b, key) && sameJson(a[key], b[key]));
+}
+function unwrap(result: unknown, allowCarrier = true): Record<string, unknown> {
   const record = object(result);
   if (!record) throw new Error("The app did not provide a usable card response.");
-  if (record.structuredContent !== undefined) return record;
+  const inconsistent = () => new Error("The app provided inconsistent card response information.");
+  let payload: Record<string, unknown> | undefined;
+  const acceptPayload = (value: unknown) => {
+    const next = object(value);
+    if (!next || typeof next.ok !== "boolean") throw inconsistent();
+    if (payload && !sameJson(payload, next)) throw inconsistent();
+    payload = next;
+  };
+  if (record.structuredContent !== undefined) acceptPayload(record.structuredContent);
+  let carrier: Record<string, unknown> | undefined, carrierEntry: unknown;
   if (Array.isArray(record.content)) for (const entry of record.content) {
     const text = object(entry);
     if (text?.type !== "text" || typeof text.text !== "string") continue;
     let parsed: Record<string, unknown> | undefined;
     try { parsed = object(JSON.parse(text.text)); } catch { continue; }
-    if (parsed?.ok !== undefined) return { ...record, structuredContent: parsed };
-    // The qualified Codex host wraps the MCP result in a JSON text block.
-    if (host === "chatgpt" && parsed && Array.isArray(parsed.content)) return unwrap(parsed, undefined);
+    if (!parsed) continue;
+    if (parsed.ok !== undefined) acceptPayload(parsed);
+    else if (Array.isArray(parsed.content)) {
+      if (!allowCarrier || carrier) throw inconsistent();
+      const checked = CallToolResultSchema.safeParse(parsed);
+      if (!checked.success) throw inconsistent();
+      carrier = unwrap(checked.data, false);
+      carrierEntry = entry;
+      if (carrier.structuredContent !== undefined) acceptPayload(carrier.structuredContent);
+    }
   }
-  return record;
+  const metadata: Record<string, unknown> = Object.create(null);
+  let hasMetadata = false;
+  for (const value of [record._meta, carrier?._meta]) {
+    if (value === undefined) continue;
+    const next = object(value);
+    if (!next) throw inconsistent();
+    for (const key of jsonKeys(next)) {
+      const item = next[key];
+      if (Object.hasOwn(metadata, key) && !sameJson(metadata[key], item)) throw inconsistent();
+      metadata[key] = item;
+    }
+    hasMetadata = true;
+  }
+  if (record.isError !== undefined && typeof record.isError !== "boolean" ||
+      carrier?.isError !== undefined && record.isError !== undefined && carrier.isError !== record.isError) throw inconsistent();
+  if ((record.isError === true || carrier?.isError === true) && payload?.ok === true) throw inconsistent();
+  return { ...carrier, ...record,
+    ...(carrier ? { content: [...(Array.isArray(record.content) ? record.content.filter((entry) => entry !== carrierEntry) : []),
+      ...(Array.isArray(carrier.content) ? carrier.content : [])] } : {}),
+    ...(payload ? { structuredContent: payload } : {}), ...(hasMetadata ? { _meta: metadata } : {}) };
 }
 function matchingDisplay(snapshot: CardSnapshot | undefined, display: CardReceiptDisplay): boolean {
   const request = object(object(snapshot?.data)?.request);
@@ -102,14 +150,17 @@ function matchingDisplay(snapshot: CardSnapshot | undefined, display: CardReceip
     display.transactionDigest === (snapshot.kind === "receipt" ? snapshot.input.digest : request?.transactionDigest) &&
     (snapshot.kind !== "review" || display.attemptId === request?.attemptId);
 }
-function linkedCardId(result: Record<string, unknown>, host: string | undefined): string | undefined {
+function linkedCardId(result: Record<string, unknown>): string | undefined {
   let id: string | undefined;
   for (const item of Array.isArray(result.content) ? result.content : []) {
     const link = object(item);
     let uri: string | undefined;
     if (link?.type === "resource_link" && typeof link.uri === "string" && link.uri.startsWith(CARD_RESOURCE_PREFIX)) uri = link.uri;
-    if (host === "Claude" && link?.type === "text" && typeof link.text === "string") {
+    if (link?.type === "text" && typeof link.text === "string") {
       const match = /^\[Resource link: card_([A-Za-z0-9_-]+)\] (suimcp:\/\/cards\/([A-Za-z0-9_-]+)) \(Saved data for this exact card\.\)$/.exec(link.text);
+      if (!match && link.text.startsWith("[Resource link:") && link.text.includes(CARD_RESOURCE_PREFIX)) {
+        throw new Error("The saved card links could not be matched to one card.");
+      }
       if (match) {
         if (match[1] !== match[3]) throw new Error("The saved card links could not be matched to one card.");
         uri = match[2];
@@ -720,7 +771,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     publish();
   }
   async function call(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return unwrap(await app.callServerTool({ name, arguments: args }, { signal: lifetime.signal }), app.getHostVersion()?.name);
+    return unwrap(await app.callServerTool({ name, arguments: args }, { signal: lifetime.signal }));
   }
   function targetStillCurrent(input: Record<string, unknown>, before: CardSnapshot, current: CardSnapshot): boolean {
     const parsed = workflowViewSchema.safeParse(current.data);
@@ -844,7 +895,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     if (!connected || creating === undefined || initialized) return;
     initialized = true;
     try {
-      const result = unwrap(creating, app.getHostVersion()?.name);
+      const result = unwrap(creating);
       const meta = object(result._meta);
       if (result._meta !== undefined && !meta) throw new Error("This card cannot accept actions with the access information provided by the app.");
       const rawReference = meta?.[CARD_METADATA_KEY];
@@ -860,7 +911,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
         publish();
         return;
       }
-      const linkedId = linkedCardId(result, app.getHostVersion()?.name);
+      const linkedId = linkedCardId(result);
       const ids = [initial.snapshot?.cardId, reference?.cardId, linkedId].filter((id): id is string => id !== undefined);
       if (!ids.length) throw new Error("Card data is unavailable.");
       if (ids.some((id) => id !== ids[0]) || (initial.snapshot && initial.snapshot.kind !== kind)) {
@@ -884,8 +935,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   app.ontoolresult = (result: CallToolResult) => {
     if (creating === undefined) { creating = result; void initialize(); return; }
     try {
-      const first = responseParts(unwrap(creating, app.getHostVersion()?.name)).snapshot ?? snapshot;
-      const next = responseParts(unwrap(result, app.getHostVersion()?.name)).snapshot;
+      const first = responseParts(unwrap(creating)).snapshot ?? snapshot;
+      const next = responseParts(unwrap(result)).snapshot;
       if (first && next && (first.cardId !== next.cardId || first.kind !== next.kind)) throw new Error("The app returned a different card.");
       // Replayed creating responses do not overwrite the current DB revision.
     } catch {

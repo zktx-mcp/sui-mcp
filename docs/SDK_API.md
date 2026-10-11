@@ -40,6 +40,18 @@ dependency update requires rebuilding and distributing the card resources.
 
 ## MCP Apps
 
+Card support uses the current MCP connection's
+`extensions["io.modelcontextprotocol/ui"].mimeTypes` advertisement. The pinned
+`getUiCapability` and `RESOURCE_MIME_TYPE` exports own extraction and the
+standard MIME identifier. The UI object and its string array are validated;
+client names, versions and unrelated MIME types do not enable cards.
+Capability negotiation does not grant scoped card or transaction authority.
+
+The common View normalizes structured results, their JSON text fallback and a
+single serialized `CallToolResult` carrier validated with the pinned SDK
+schema. Conflicting payloads or private metadata are rejected. Ordinary data
+does not supply input permission, and saved resource links remain read-only.
+
 `@modelcontextprotocol/ext-apps` is pinned to `1.7.5`, with MCP SDK `1.31.0`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
 
 Settings completes a selected upload's verification and restore preparation on

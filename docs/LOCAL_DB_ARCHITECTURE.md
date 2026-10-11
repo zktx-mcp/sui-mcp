@@ -178,7 +178,7 @@ target must name the recorded file and pass size/SHA checks before `saved` is
 committed. Existing destinations are never overwritten or removed. Private
 unlink follows that result and actual descriptor closure; the final file has
 no automatic expiry. Historical export path validation remains distinct from
-the private `.download` row identity. No table, column or schema version changes.
+the private `.download` row identity.
 
 Unknown file effects remain `saving`, retaining their source and reservations.
 A failed DB result write retains the ended physical outcome for settlement.
@@ -476,7 +476,7 @@ The runtime accepts one current SQLite structure, checked against its table, col
 
 A current backup carries `format`, `network`, `exportedAt` and its product data. It has no numeric schema version. Import rejects a different format, unknown or missing fields, invalid references or invalid raw quantities. Missing settings or activity arrays are not filled from defaults. Supported `function_scan` provenance remains part of the current format. Validation failure leaves current data intact.
 
-New installations do not inherit older local review records, activity scans, known/active accounts or stored endpoints. Users configure the required context again; environment overrides retain their existing precedence. Empty local history does not imply an absence of on-chain transactions. Existing DB and backup files are not deleted by startup.
+With a new empty data directory, users configure account context and endpoints; environment overrides retain their existing precedence. Empty local history does not imply an absence of on-chain transactions. Existing DB and backup files are not deleted by startup.
 
 ## Boundaries
 
@@ -496,7 +496,7 @@ Ownership and simulation private artifacts use their v2 evidence formats to
 bind transaction funding to the stored material. They cover real coin objects,
 address withdrawals, gas reservations, and their observed balance/epoch facts.
 They are deeply copied and revalidated before admission, and are excluded from
-public backup. They introduce no table, column, or DB format migration.
+public backup.
 
 Old private evidence is not upgraded into funding proof. Existing owner recovery
 removes private material; a new review recomputes it. Historical public reviews,

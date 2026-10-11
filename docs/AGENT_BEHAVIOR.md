@@ -4,7 +4,7 @@ This document is the MCP-exposed answer playbook for AI clients. It owns user-qu
 
 It does not define tool schemas or field contracts. Use `docs/MCP_TOOLS.md` for the MCP API reference, response fields, statuses, and follow-up fields.
 
-It is not the contributor rulebook and it is not enforcement. Development rules live in `AGENTS.md` and `docs/AGENT_DEVELOPMENT_POLICY.md`. Hard product boundaries live in code, schemas, allowlists, mainnet guards, and the local review layer.
+It is not the contributor rulebook and it is not enforcement. Development rules live in `AGENTS.md` and `docs/AGENT_DEVELOPMENT_POLICY.md` in the [source repository](https://github.com/zktx-mcp/sui-mcp). They are not installed MCP resources. Hard product boundaries live in code, schemas, allowlists, mainnet guards, and the local review layer.
 
 ## Support Matrix
 
@@ -552,7 +552,3 @@ Avoid unqualified words such as best, recommended, guaranteed, or safe. Prefer: 
 ## Language
 
 This reference document stays in English. Reply in the user's language. Translate response patterns as needed, but keep SDK names, tool names, object IDs, package IDs, and token symbols in their original form.
-
-## Golden Scenarios
-
-Detailed expected response classes live in `docs/golden-scenarios/BEHAVIOR_MATRIX.md`. They are documentation for release review, not automated cross-client results.

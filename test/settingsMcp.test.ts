@@ -14,20 +14,20 @@ import { CARD_METADATA_KEY, CARD_RESOURCE_PREFIX, CARD_TOOLS, SETTINGS_FILE_META
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
 import type { SettingsView } from "../src/core/session/settingsOperation.js";
 import type { SettingsFileDisplay } from "../src/mcp-ui/contracts.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ClientCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import { settingsWorkflowFixture } from "./fixtures/settingsWorkflow.js";
 import { deferred } from "./fixtures/walletWorkflow.js";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-async function fixture(ui = true, options: Parameters<typeof settingsWorkflowFixture>[0] = {}) {
+async function fixture(ui = true, options: Parameters<typeof settingsWorkflowFixture>[0] = {}, clientOptions?: { name: string; capabilities: ClientCapabilities }) {
   const f = await settingsWorkflowFixture(options);
   const server = new McpServer({ name: "settings-fixture", version: "1" });
   const deps = { cards: { store: f.cards }, activityStore: f.wallet.activity, workflow: f.wallet.workflow,
     localSettings: f.localSettings, sessions: f.wallet.sessions, logger: f.wallet.logger };
   registerReadCards(server, deps);
   registerSettingsTools(server, deps);
-  const client = new Client({ name: "settings-ui-fixture", version: "1" }, { capabilities: ui ? { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } : {} });
+  const client = new Client({ name: clientOptions?.name ?? "settings-ui-fixture", version: "1" }, { capabilities: clientOptions?.capabilities ?? (ui ? { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } : {}) });
   const [transport, peer] = InMemoryTransport.createLinkedPair();
   const outgoing: unknown[] = [];
   const send = peer.send.bind(peer);
@@ -264,3 +264,24 @@ it("transfers backup bytes only in UI metadata and keeps every actual serialized
   expect((await f.call(CARD_TOOLS.readSettingsFile, { ...target, permission: "wrong", offset: 0 })).isError).toBe(true);
   expect((await f.call(CARD_TOOLS.readSettingsFile, { ...target, operationId: "00000000-0000-4000-8000-000000000000", offset: 0 })).isError).toBe(true);
 });
+
+
+it.each(["codex-mcp-client", "claude-ai", "Arbitrary standard client"])(
+  "keeps Settings card authority tied to UI capability rather than client name (%s)", async (name) => {
+    for (const advertised of [true, false]) {
+      const f = await fixture(false, {}, { name, capabilities: advertised ? { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } : {} });
+      const create = vi.spyOn(f.cards, "create");
+      const response = await f.call(TOOL_NAMES.settingsCreateLocalSettingsSession, {});
+      if (advertised) {
+        expect(card(response)).toMatchObject({ kind: "settings", state: "ready", data: { phase: "draft" } });
+        expect(response._meta?.[CARD_METADATA_KEY]).toMatchObject({ cardId: card(response).cardId, permission: expect.any(String) });
+        expect(create).toHaveBeenCalledOnce();
+      } else {
+        expect(packet(response)).toMatchObject({ ok: false, error: { kind: "ui_unavailable" } });
+        expect(response._meta).toBeUndefined(); expect(create).not.toHaveBeenCalled();
+      }
+      expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+      expect(f.wallet.connect).not.toHaveBeenCalled();
+    }
+  }
+);

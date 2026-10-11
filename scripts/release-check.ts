@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -27,7 +27,7 @@ type PackInfo = {
   files: PackFile[];
 };
 
-const manifest = JSON.parse(readFileSync("package.json", "utf8")) as { name: string; version: string; mcpName: string };
+const manifest = JSON.parse(readFileSync("package.json", "utf8")) as { name: string; version: string; mcpName: string; files: string[] };
 
 const requiredFiles = [
   "package.json",
@@ -41,6 +41,7 @@ const requiredFiles = [
   ...["account", "receipt", "chart", "connect", "review", "settings"].flatMap((kind) => [`dist/mcp-app/${kind}.html`, `dist/mcp-app/${kind}.notices.txt`]),
   "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt",
   "docs/UTILITY_INDEX.md",
+  ...manifest.files.filter((path) => path.endsWith(".md")),
   ...MCP_RESOURCES.map((resource) => resource.path)
 ] as const;
 
@@ -51,6 +52,10 @@ const forbiddenPrefixes = [
   "scripts/",
   "registry/generated/",
   "submission/",
+  "AGENTS.md",
+  "docs/AGENT_DEVELOPMENT_POLICY.md",
+  "docs/FRONTEND_POLICY.md",
+  "docs/golden-scenarios/",
   "dist/review-app/",
   "dist/review-server/settingsApi.",
   "dist/review-server/html.",
@@ -345,6 +350,16 @@ async function main(): Promise<void> {
       capture("npm", ["pack", "--json", "--pack-destination", packDir])
     );
     assertPackContents(packedInfo);
+    const paths = new Set(packedInfo.files.map((file) => file.path));
+    for (const file of paths) {
+      if (!file.endsWith(".md")) continue;
+      for (const match of readFileSync(file, "utf8").matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+        const target = match[1]!.trim().replace(/^<|>$/g, "").split("#")[0]!;
+        if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target)) continue;
+        const path = relative(process.cwd(), resolve(dirname(file), decodeURIComponent(target))).replaceAll("\\", "/");
+        if (!paths.has(path)) throw new Error(`Packed documentation link has no shipped target: ${file} -> ${target}`);
+      }
+    }
     const packedPath = resolve(packDir, packedInfo.filename);
     process.stderr.write(`Checked package SHA256: ${createHash("sha256").update(readFileSync(packedPath)).digest("hex")}\n`);
     await smokeInstallPackedTarball(packedPath);

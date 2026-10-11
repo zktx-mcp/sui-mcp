@@ -18,6 +18,21 @@ that smaller card limit. Restore files may contain up to 16 MiB and are sent in
 separate messages within the card budget; the 4 MiB request limit is not a
 backup-file limit.
 
+Internal cards require the current MCP connection to advertise
+`extensions["io.modelcontextprotocol/ui"].mimeTypes` as a string array containing
+`text/html;profile=mcp-app`. Client names and versions do not select card
+support. An absent, malformed or nonstandard advertisement returns
+`ui_unavailable` without creating a card or issuing its source query; ordinary
+evidence tools remain available. An advertisement enables card delivery, not
+transaction or Settings authorization. Scoped UI permission, stored target and
+revision checks still apply to each input action.
+
+Card responses use structured content or the corresponding JSON text payload.
+A single serialized MCP tool-result carrier and exact saved-card resource links
+are normalized by format. Conflicting payloads, private metadata or card
+identities are rejected. JSON inside ordinary product data and saved links do
+not grant input permission; a saved card is read through its bound resource.
+
 ## Read-Only Tools
 
 | Tool | Status | Purpose |

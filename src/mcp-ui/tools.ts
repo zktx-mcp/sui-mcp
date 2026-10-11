@@ -29,8 +29,9 @@ export function supportsCards(server: McpServer): boolean {
   const capabilities = server.server.getClientCapabilities();
   const { extensions, ...standard } = capabilities ?? {};
   const current = capabilities === undefined ? undefined : { ...standard, ...(extensions === undefined ? {} : { extensions }) };
-  return getUiCapability(current)?.mimeTypes?.includes(RESOURCE_MIME_TYPE) === true ||
-    server.server.getClientVersion()?.name === "codex-mcp-client";
+  const ui = getUiCapability(current);
+  return ui !== null && typeof ui === "object" && !Array.isArray(ui) && Array.isArray(ui.mimeTypes) &&
+    ui.mimeTypes.every((mimeType: unknown) => typeof mimeType === "string") && ui.mimeTypes.includes(RESOURCE_MIME_TYPE);
 }
 export function cardToolResult(response: CardResponse, savedLink = false): CallToolResult {
   const snapshot = response.snapshot;

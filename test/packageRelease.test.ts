@@ -60,6 +60,7 @@ describe("npm release metadata", () => {
 const archive = ["package.json", "README.md", "LICENSE", "dist/runtime/start.js",
   "dist/runtime/walletSdkChild.js", "dist/runtime/walletSdkChildRuntime.js", "dist/runtime/walletSdkProcess.js", "dist/runtime/walletSdkIpc.js", "docs/UTILITY_INDEX.md",
   "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt", ...MCP_RESOURCES.map((resource) => resource.path),
+  "docs/LOCAL_DB_ARCHITECTURE.md", "docs/SDK_API.md", "docs/SIGNABLE_ADAPTER_CONTRACT.md", "docs/TRANSACTION_ACTIVITY_LOG.md",
   ...["account", "receipt", "chart", "connect", "review", "settings"].flatMap((name) => [`dist/mcp-app/${name}.html`, `dist/mcp-app/${name}.notices.txt`])];
 const pack = (paths: string[]) => ({ filename: "fixture.tgz", files: paths.map((path) => ({ path })) });
 
@@ -70,7 +71,8 @@ it("accepts the complete current archive and rejects missing notices, backend li
   }
 });
 
-it.each(["submission/ethglobal-tokyo-2026/plan.md", ".WORK/session.sqlite", "dist/review-app/connect.js", "dist/review-app/settings.js", "dist/core/session/settingsSessions.js"])("rejects the excluded archive path %s", (path) => {
+it.each(["submission/ethglobal-tokyo-2026/plan.md", ".WORK/session.sqlite", "dist/review-app/connect.js", "dist/review-app/settings.js", "dist/core/session/settingsSessions.js",
+  "AGENTS.md", "docs/AGENT_DEVELOPMENT_POLICY.md", "docs/FRONTEND_POLICY.md", "docs/golden-scenarios/BEHAVIOR_MATRIX.md"])("rejects the excluded archive path %s", (path) => {
   expect(() => assertPackContents(pack([...archive, path]))).toThrow(path);
 });
 
