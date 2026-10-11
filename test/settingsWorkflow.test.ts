@@ -740,7 +740,8 @@ it("preserves exact completed Settings and transaction reads while an unrelated 
   db.exec(`CREATE TRIGGER reject_other_result BEFORE UPDATE ON settings_operations WHEN NEW.operation_id='${otherId}' AND NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'unrelated download result refused'); END`);
   await f.download(other);
   await vi.waitFor(async () => expect((await readFile(downloadPath(f, other))).length).toBeGreaterThan(0));
-  await expect(f.read(other)).rejects.toThrow("unrelated download result refused");
+  // Visible bytes do not mean verification and result publication have ended.
+  await vi.waitFor(async () => { await expect(f.read(other)).rejects.toThrow("unrelated download result refused"); });
   const overview = await f.create();
   expect(overview.error).toBeUndefined();
   expect(view(await f.read(overview)).facts).toMatchObject({ walletAvailability: { status: "available" },
@@ -1438,7 +1439,8 @@ it("preserves a physically prepared snapshot across result storage failure witho
   await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
   const path = downloadPath(f, prepared);
   await vi.waitFor(async () => expect((await readFile(path)).length).toBeGreaterThan(0));
-  await expect(f.read(prepared)).rejects.toThrow("export result refused");
+  // Wait for the actual result-storage failure, not just the physical write.
+  await vi.waitFor(async () => { await expect(f.read(prepared)).rejects.toThrow("export result refused"); });
   db.exec("DROP TRIGGER reject_export_result");
   const completed = await f.read(prepared);
   expect(view(completed).result?.outcome).toBe("completed");
