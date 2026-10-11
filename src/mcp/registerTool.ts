@@ -1,20 +1,17 @@
 import type {
   McpServer,
   RegisteredTool,
-  ToolCallback
-} from "@modelcontextprotocol/sdk/server/mcp.js";
-import type {
-  AnySchema,
-  ZodRawShapeCompat
-} from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+  ToolCallback,
+  StandardSchemaWithJSON
+} from "@modelcontextprotocol/server";
+import type { ToolAnnotations } from "@modelcontextprotocol/server";
 import { TOOL_NAMES, assertValidToolName } from "./toolNames.js";
 
 export type SuiMcpToolName = (typeof TOOL_NAMES)[keyof typeof TOOL_NAMES];
 
 export type SuiMcpToolConfig<
-  OutputArgs extends ZodRawShapeCompat | AnySchema,
-  InputArgs extends undefined | ZodRawShapeCompat | AnySchema = undefined
+  OutputArgs extends StandardSchemaWithJSON,
+  InputArgs extends StandardSchemaWithJSON | undefined = undefined
 > = {
   title?: string;
   description?: string;
@@ -41,8 +38,8 @@ function mergedAnnotations(
 }
 
 export function registerSuiMcpTool<
-  OutputArgs extends ZodRawShapeCompat | AnySchema,
-  InputArgs extends undefined | ZodRawShapeCompat | AnySchema = undefined
+  OutputArgs extends StandardSchemaWithJSON,
+  InputArgs extends StandardSchemaWithJSON | undefined = undefined
 >(
   server: McpServer,
   name: SuiMcpToolName,

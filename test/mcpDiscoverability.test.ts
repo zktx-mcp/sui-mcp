@@ -3,8 +3,8 @@ import type { WalletWorkflow } from "../src/core/session/walletWorkflow.js";
 import { walletWorkflowFixture } from "./fixtures/walletWorkflow.js";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { ADAPTER_PROMPT_SURFACES } from "../src/adapters/adapterPromptSurfaces.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { mainnetCoins, type Coin } from "@mysten/deepbook-v3";
 import { describe, expect, it, vi } from "vitest";
 import { validateSupportedAdapterLifecycle } from "../src/adapters/adapterLifecycleValidators.js";
@@ -3053,8 +3053,9 @@ describe("MCP discoverability", () => {
         }
       });
 
-      const rejected = await client.callTool({ name: "account.clear_active_account" });
-      expect(rejected.isError).toBe(true);
+      await expect(client.callTool({ name: "account.clear_active_account" })).rejects.toMatchObject({
+        code: -32602, message: "Tool account.clear_active_account not found"
+      });
       expect(await activityStore.getActiveAccount()).toMatchObject({ address: walletAccount });
 
     } finally {
@@ -3239,8 +3240,9 @@ describe("MCP discoverability", () => {
         error: { kind: "internal_error", details: { message: "Activity store call failed" } }
       });
 
-      const clearResult = await replacementClient.callTool({ name: "account.clear_active_account", arguments: {} });
-      expect(clearResult.isError).toBe(true);
+      await expect(replacementClient.callTool({ name: "account.clear_active_account", arguments: {} })).rejects.toMatchObject({
+        code: -32602, message: "Tool account.clear_active_account not found"
+      });
       expect(clearActiveAccount).not.toHaveBeenCalled();
       expect(logger.error).toHaveBeenCalledWith("activity store call failed", {
         error: "local database unavailable"

@@ -1,5 +1,5 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { completable } from "@modelcontextprotocol/sdk/server/completable.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import { completable } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   actionGroups,
@@ -178,7 +178,8 @@ function registerBareActionPrompt(server: McpServer, action: string, group: read
           role: "user",
           content: {
             type: "text",
-            text: bareActionPromptText(action, group, String(args.intent ?? ""), args.protocol)
+            text: bareActionPromptText(action, group, String(args.intent ?? ""),
+              typeof args.protocol === "string" ? args.protocol : undefined)
           }
         }
       ]

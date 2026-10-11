@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/client";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { expect, it, vi } from "vitest";
 import { startSharedServer } from "../src/runtime/shared/server.js";
@@ -18,8 +18,8 @@ import { TOOL_NAMES } from "../src/mcp/toolNames.js";
 import { uploadSettingsFile } from "../src/mcp-ui/view/settingsFiles.js";
 import type { SettingsViewTransport } from "../src/mcp-ui/view/lifecycle.js";
 import type { SettingsView } from "../src/core/session/settingsOperation.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { CallToolResult } from "@modelcontextprotocol/client";
+import type { Transport } from "@modelcontextprotocol/client";
 
 async function fixture() {
   const f = await settingsWorkflowFixture(), control = { key: randomBytes(32).toString("base64url"), databaseId: "1".repeat(64), configurationId: "2".repeat(64) };
@@ -53,7 +53,13 @@ async function fixture() {
     }
     return authenticated(url, init);
   } });
-  const httpBridge: Transport = { start: () => http.start(), send: (message, options) => http.send(message, options),
+  const httpBridge: Transport = { start: () => http.start(), send: (message, options) => http.send(message, {
+      ...(options?.resumptionToken === undefined ? {} : { resumptionToken: options.resumptionToken }),
+      ...(options?.onresumptiontoken === undefined ? {} : { onresumptiontoken: options.onresumptiontoken }),
+      ...(options?.requestSignal === undefined ? {} : { requestSignal: options.requestSignal }),
+      ...(options?.onRequestStreamEnd === undefined ? {} : { onRequestStreamEnd: options.onRequestStreamEnd }),
+      ...(options?.headers === undefined ? {} : { headers: options.headers })
+    }),
     close: () => http.close(), setProtocolVersion: (version) => http.setProtocolVersion(version) };
   http.onmessage = (message) => httpBridge.onmessage?.(message);
   http.onerror = (error) => httpBridge.onerror?.(error); http.onclose = () => httpBridge.onclose?.();
@@ -95,10 +101,10 @@ it("enforces the actual authenticated wire limit before Settings dispatch, inclu
       input: { ...input, chunkBase64: "A".repeat(65536) } } }))).rejects.toMatchObject({ code: -32600,
         data: { code: "settings_payload_too_large", maximumMessageSize: 65536 } });
     expect(f.act).toHaveBeenCalledTimes(count);
-    // SDK 1.31.0's complete HTTP-body guard runs before the smaller card
+    // SDK 2.3.1's complete HTTP-body guard runs before the smaller card
     // envelope guard. Neither error may admit a file write or wallet request.
     f.setSize(4 * 1024 * 1024 + 1);
-    await expect(f.actCard(input)).rejects.toMatchObject({ code: 413,
+    await expect(f.actCard(input)).rejects.toMatchObject({ status: 413,
       message: expect.stringContaining("Payload Too Large") });
     expect(Buffer.byteLength(f.bodies.at(-1)!)).toBe(4 * 1024 * 1024 + 1);
     await expect(f.wallet.run(() => f.stdio.callTool({ name: CARD_TOOLS.act, arguments: { ...f.reference, revision, input },

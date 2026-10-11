@@ -172,7 +172,7 @@ function humanReadableReviewSummary() {
 
 describe("MCP schemas", () => {
   it("describes the shared okToolResult wrapper, not raw data", () => {
-    const schema = z.object(successOutputSchema({ value: z.string() }));
+    const schema = successOutputSchema({ value: z.string() });
     const result = okToolResult({ value: "ok" });
 
     expect(schema.safeParse(result.structuredContent).success).toBe(true);
@@ -200,8 +200,7 @@ describe("MCP schemas", () => {
   });
 
   it("keeps execution polling guidance in structured data instead of tool descriptions", () => {
-    const schema = z.object(
-      successOutputSchema({
+    const schema = successOutputSchema({
         reviewSessionId: z.string(),
         status: z.enum(["pending"]),
         pollingHint: z.object({
@@ -211,8 +210,7 @@ describe("MCP schemas", () => {
           userActionRequiredStatuses: z.array(z.string()),
           recommendedIntervalSeconds: z.number().int().positive()
         })
-      })
-    );
+      });
 
     expect(
       schema.safeParse({
@@ -616,14 +614,12 @@ describe("MCP schemas", () => {
   });
 
   it("validates action review output with explicit plan and check schemas", () => {
-    const schema = z.object(
-      successOutputSchema({
+    const schema = successOutputSchema({
         reviewSessionId: z.string(),
         reviewUrl: z.string(),
         plans: z.array(actionPlanSchema),
         preliminaryChecks: z.array(reviewCheckSchema)
-      })
-    );
+      });
 
     expect(
       schema.safeParse({

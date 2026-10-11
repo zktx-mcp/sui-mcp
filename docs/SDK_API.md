@@ -7,20 +7,27 @@ in the card dependency notices described below.
 
 ## Package Versions
 
-- `@modelcontextprotocol/ext-apps`: `1.7.5`
-- `@modelcontextprotocol/sdk`: `1.31.0`
-- `@mysten/sui`: `2.17.0`
-- `@mysten/deepbook-v3`: `1.3.6`
-- `@walletconnect/sign-client`, `@walletconnect/types`, `@walletconnect/utils`: `2.23.10`
+- `@modelcontextprotocol/ext-apps`: `2.0.3`
+- `@modelcontextprotocol/client`, `@modelcontextprotocol/core`, `@modelcontextprotocol/server`: `2.3.1`
+- `@modelcontextprotocol/node`: `2.1.1`
+- `@mysten/sui`: `2.35.0`
+- `@mysten/deepbook-v3`: `2.6.4`
+- `@walletconnect/sign-client`, `@walletconnect/types`, `@walletconnect/utils`: `2.26.0`
 - `qrcode`: `1.5.4`
 - `@zktx.io/ptb-model`: `0.5.0`
-- `mermaid`: `11.16.1`
-- `katex`: `0.18.2`, pinned by an override scoped to `mermaid@11.16.1`
+- `mermaid`: `12.1.0`
+- `katex`: `0.19.0`, pinned by an override scoped to `mermaid@12.1.0`
 
 Mermaid and its KaTeX dependency are build dependencies for the embedded card
 resources, not Node server runtime dependencies. Their versions are fixed by
 the source-checkout lockfile and included in the generated HTML. Installed npm
 dependencies do not apply a dependency package's own overrides.
+
+Source builds use TypeScript 7.0.2. The semantic documentation checks use the
+stable TypeScript 6.0.3 compiler API through the development-only
+`typescript-compiler-api` alias; TypeScript 7 does not provide that synchronous
+API. The npm build and typecheck scripts select the TypeScript 7 executable
+explicitly. Neither compiler is an installed server dependency.
 
 ## Bundled Transaction Diagrams
 
@@ -52,7 +59,7 @@ single serialized `CallToolResult` carrier validated with the pinned SDK
 schema. Conflicting payloads or private metadata are rejected. Ordinary data
 does not supply input permission, and saved resource links remain read-only.
 
-`@modelcontextprotocol/ext-apps` is pinned to `1.7.5`, with MCP SDK `1.31.0`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
+`@modelcontextprotocol/ext-apps` is pinned to `2.0.3`, with the MCP client/core/server packages at `2.3.1` and Node transport at `2.1.1`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
 
 Settings completes a selected upload's verification and restore preparation on
 the backend. The card renders the stored `restoreCheck` result and collects one
@@ -68,7 +75,7 @@ progress describes communication only; it cannot grant restoration authority.
 Recorded backup locations use backend-native folder and file-name fields;
 optional `App.downloadFile` delivery remains separate from local publication.
 
-The shared server uses the pinned MCP SDK Streamable HTTP transport behind authenticated loopback access. Stdio clients forward tool, resource and prompt requests with their original client identity and capabilities. SDK 1.31.0 limits each internal HTTP request body to 4 MiB, including its complete MCP JSON-RPC envelope and metadata. Oversized bodies are refused before tool or card dispatch. Card calls additionally have a 64 KiB envelope budget; ordinary MCP calls do not inherit that smaller limit. Restore uploads retain their 16 MiB file limit and are split into messages within the card budget. The SDK's internal HTTP batch guard does not expose a stdio batch feature.
+The shared server uses the pinned MCP SDK Streamable HTTP transport behind authenticated loopback access. Stdio clients forward tool, resource and prompt requests with their original client identity and capabilities. The SDK limits each internal HTTP request body to 4 MiB, including its complete MCP JSON-RPC envelope and metadata. Oversized bodies are refused before tool or card dispatch. Card calls additionally have a 64 KiB envelope budget; ordinary MCP calls do not inherit that smaller limit. Restore uploads retain their 16 MiB file limit and are split into messages within the card budget. The SDK's internal HTTP batch guard does not expose a stdio batch feature. SDK HTTP errors expose the HTTP status separately from their local error code; the stdio forwarding boundary retains that numeric status in the MCP error. Handler cancellation and request identity use `context.mcpReq.signal` and `context.mcpReq.id`. The current private transport uses the SDK's default initialized connection behavior; it does not opt into automatic protocol probes or request retries.
 
 ## WalletConnect Runtime
 
@@ -237,7 +244,7 @@ SDK run cannot satisfy that check or restore submission authority.
 Actual target-wallet acceptance of the serialization is an integration
 requirement, not something inferred from these SDK APIs or a rejected request.
 
-## Funding formats in Sui 2.17.0
+## Funding formats
 
 The pinned Transaction builder first resolves CoinWithBalance intents. With
 SuiGrpcClient, the SDK's gRPC resolver then asks the node to resolve transaction
@@ -246,7 +253,7 @@ SDK path; testing it alone does not establish the runtime's gRPC behavior.
 
 The source of truth for address-balance withdrawal and gas reservation formats
 is Sui mainnet-v1.72.5 `sui-types/src/coin_reservation.rs` and
-`transaction.rs`, together with the installed Sui 2.17.0 source. Its
+`transaction.rs`, together with the installed Sui 2.35.0 BCS and transaction definitions. The derivation of the reservation decoder retains its original source attribution. The SDK’s
 `utils/coin-reservation.ts` helper is not publicly exported. The local read-only
 funding verifier uses the SDK's public BCS, base58 and dynamic-field primitives
 for the documented reservation format; it does not replace SDK coin selection

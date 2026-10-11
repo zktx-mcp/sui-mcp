@@ -1,8 +1,8 @@
 import { registerReadCards } from "../mcp-ui/tools.js";
 import type { CardStore } from "../core/session/cardSessionStore.js";
 import type { WalletWorkflow } from "../core/session/walletWorkflow.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import type { Transport } from "@modelcontextprotocol/server";
 import type { SuiReadService } from "../core/read/readService.js";
 import type { TransactionActivityService } from "../core/activity/transactionActivityService.js";
 import type { ActivityStore } from "../core/activity/activityStore.js";

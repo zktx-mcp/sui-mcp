@@ -10,10 +10,11 @@ import { readPublicChainReceipt } from "../src/core/action/suiChainReceiptReader
 import { cardReceiptTransaction } from "./fixtures/cardReceiptTransaction.js";
 import { chainReceiptDigest } from "./fixtures/chainReceipt.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CallToolResultSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/core";
+import { type CallToolResult } from "@modelcontextprotocol/client";
+import { Client } from "@modelcontextprotocol/client";
+import { McpServer } from "@modelcontextprotocol/server";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { errorToolResult } from "../src/mcp/result.js";
 import { cardToolResult, createWorkflowCard, registerReadCards } from "../src/mcp-ui/tools.js";
@@ -43,6 +44,13 @@ import type { SettingsDraft, SettingsView } from "../src/core/session/settingsOp
 import type { App } from "@modelcontextprotocol/ext-apps";
 import { readFile, writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
+
+function downloadedBytes(payload: Parameters<App["downloadFile"]>[0]): Buffer {
+  expect(payload.contents).toHaveLength(1);
+  const item = payload.contents[0];
+  if (item?.type !== "resource" || !("blob" in item.resource)) throw new Error("Expected one embedded backup blob.");
+  return Buffer.from(item.resource.blob, "base64");
+}
 
 type Host = {
   connect: () => Promise<void>;
@@ -4447,8 +4455,7 @@ it.each(["unadvertised", "acknowledged", "not_completed", "unconfirmed", "change
         await vi.waitFor(() => expect(app.downloadFile).toHaveBeenCalledTimes(before + 1));
       }
       await vi.waitFor(() => expect(root.textContent).toContain("The app accepted the download request."));
-      const sent = app.downloadFile.mock.calls.at(-1)![0] as { contents: [{ resource: { blob: string } }] };
-      expect(Buffer.from(sent.contents[0].resource.blob, "base64")).toEqual(originalBytes);
+      expect(downloadedBytes(app.downloadFile.mock.calls.at(-1)![0])).toEqual(originalBytes);
       if (fragmented) expect(validFragments).toBeGreaterThan(1);
       expect(f.wallet.run(() => f.records.get(operationId)!.result)).toEqual(result);
       expect(f.wallet.run(() => f.records.file(fileId))).toMatchObject({ cleanup: "complete", invalidated: true });
@@ -4922,8 +4929,7 @@ it.each([
     expect(root.textContent).toContain("Suggested file name");
     const requests = app.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.act).map(([call]) => (call.arguments.input as { action: string }).action);
     expect(requests).toEqual(["settings_download_backup", "settings_report_download"]);
-    const download = app.downloadFile.mock.calls[0]![0] as { contents: [{ resource: { blob: string } }] };
-    const bytes = Buffer.from(download.contents[0].resource.blob, "base64"), data = f.wallet.run(() => f.records.get(operationId)!);
+    const bytes = downloadedBytes(app.downloadFile.mock.calls[0]![0]), data = f.wallet.run(() => f.records.get(operationId)!);
     expect(createHash("sha256").update(bytes).digest("hex")).toBe(data.result?.details?.sha256);
     expect(f.wallet.run(() => f.records.file(data.fileId!)?.cleanup)).toBe("complete");
     const calls = app.downloadFile.mock.calls.length;
@@ -5097,8 +5103,7 @@ it.each([
       await vi.advanceTimersByTimeAsync(initial.pollAfterMs);
       await vi.waitFor(() => expect(root.textContent).toContain("Backup saved"));
       expect(root.textContent).toContain(join(f.wallet.directory, "backups")); expect(root.textContent).toContain(`${id}.json`);
-      const payload = app.downloadFile.mock.calls[0]![0] as { contents: [{ resource: { blob: string } }] };
-      expect(await readFile(join(f.wallet.directory, "backups", `${id}.json`))).toEqual(Buffer.from(payload.contents[0].resource.blob, "base64"));
+      expect(await readFile(join(f.wallet.directory, "backups", `${id}.json`))).toEqual(downloadedBytes(app.downloadFile.mock.calls[0]![0]));
       expect(publication).toHaveBeenCalledOnce(); expect(app.downloadFile).toHaveBeenCalledOnce();
       for (const label of ["Retry download", "Download this backup", "Restore local records", "Cancel download", "Close Settings", "Back to Local records"]) expect(control(label)).toBeUndefined();
       const reports = app.callServerTool.mock.calls.filter(([call]) => (call.arguments.input as { action?: string })?.action === "settings_report_download");

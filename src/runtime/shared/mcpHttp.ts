@@ -1,15 +1,15 @@
 import { CARD_TOOLS } from "../../mcp-ui/contracts.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { Transport } from "@modelcontextprotocol/server";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isJSONRPCRequest } from "@modelcontextprotocol/sdk/types.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
+import { isJSONRPCRequest } from "@modelcontextprotocol/server";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { MAX_JSON_BODY_BYTES, sendJson } from "./http.js";
 import { settingsUploadMessageBudget } from "../../core/session/settingsFileProtocol.js";
 
 export function createInternalMcpHandler(createServer: () => McpServer) {
-  const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>();
+  const sessions = new Map<string, { server: McpServer; transport: NodeStreamableHTTPServerTransport }>();
   const connections = new Set<McpServer>();
   return {
     async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -26,7 +26,7 @@ export function createInternalMcpHandler(createServer: () => McpServer) {
       }
       if (request.method !== "POST") { sendJson(response, 400, { error: "mcp_initialize_required" }); return; }
       const server = createServer();
-      const transport = new StreamableHTTPServerTransport({
+      const transport = new NodeStreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
         enableJsonResponse: true,
         onsessioninitialized: (id) => { sessions.set(id, { server, transport }); },
@@ -36,7 +36,7 @@ export function createInternalMcpHandler(createServer: () => McpServer) {
       try {
         const connection: Transport = {
           start: () => transport.start(),
-          send: (message, options) => transport.send(message, options),
+          send: (message, options) => transport.send(message, options?.relatedRequestId === undefined ? undefined : { relatedRequestId: options.relatedRequestId }),
           close: () => transport.close()
         };
         transport.onmessage = (message, extra) => {

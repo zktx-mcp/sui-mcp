@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { activeAccountResponse, activeAccountResponseSchema } from "../../activeAccountResponse.js";
 import { okToolResult } from "../../result.js";
@@ -14,10 +14,10 @@ export function registerAccountTools(server: McpServer, deps: McpServerDeps): vo
       title: "Get active account read context",
       description: "Return the active account address for wallet-account reads. Read context only; not signing authorization.",
       inputSchema: noParamsInputSchema,
-      outputSchema: {
+      outputSchema: z.object({
         ok: z.literal(true),
         data: activeAccountResponseSchema
-      },
+      }),
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
     async () => {

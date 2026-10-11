@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { loadBootConfig } from "./config.js";
 import { createRuntimeApplication } from "./application.js";
 import { createStderrLogger, flushStderr } from "./logger.js";

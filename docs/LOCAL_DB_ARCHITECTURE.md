@@ -43,7 +43,7 @@ The runtime uses the `better-sqlite3` npm package for normal SQLite file semanti
 
 The package targets Node.js `>=22`. Node 22 or 24 LTS is recommended.
 
-`better-sqlite3` is an npm dependency, not a separate product database installation. The pinned version is `12.9.0`. Standard macOS arm64/x64, Linux arm64/x64, and Windows x64 platforms normally use prebuilt binaries; less common platforms such as Windows arm64 can require a native build toolchain. The release check verifies that the driver can be imported, can create an in-memory database, and also works after installing the packed tarball.
+`better-sqlite3` is an npm dependency, not a separate product database installation. The pinned version is `13.0.3`. It includes prebuilt Node-API binaries for macOS, Linux (glibc and musl), and Windows on x64 and arm64. Other platform targets require a compatible native build. The release check verifies that the driver can be imported, can create an in-memory database, and also works after installing the packed tarball.
 
 ## File Location
 

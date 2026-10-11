@@ -1,5 +1,5 @@
 import { TRANSACTION_REQUEST_STATUSES, transactionRequestSchema, transactionRequestStatusSchema } from "../../../core/session/transactionRequest.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   actionPlanSchema,
@@ -151,10 +151,10 @@ export function registerReviewActivitySummaryTools(server: McpServer, deps: McpS
     {
       title: "Get review session detail",
       description: "Return one stored Sui MCP review session with plan, snapshots, transitions, and result.",
-      inputSchema: {
+      inputSchema: z.object({
         reviewSessionId: z.string().min(1),
         account: z.string().min(1).optional()
-      },
+      }),
       outputSchema: successOutputSchema({
         ...reviewActivityCommonOutput,
         session: reviewActivityRowSchema.omit({

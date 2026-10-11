@@ -1,10 +1,11 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { CallToolResultSchema, type ClientCapabilities } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { CallToolResultSchema } from "@modelcontextprotocol/core";
+import { type ClientCapabilities } from "@modelcontextprotocol/client";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { describe, expect, it, vi } from "vitest";
 import { registerReadCards } from "../src/mcp-ui/tools.js";

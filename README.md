@@ -27,7 +27,7 @@ Users can ask ordinary questions:
 - "How much are my USD-denominated assets together?"
 - "What is the shortfall?"
 
-This document describes `@zktx.io/sui-mcp@0.6.1`. Confirm that version is
+This document describes `@zktx.io/sui-mcp@0.6.2`. Confirm that version is
 published before using npm installation commands. For a local build, follow
 [Developer Checkout Setup](docs/MCP_SETUP.md#developer-checkout-setup).
 

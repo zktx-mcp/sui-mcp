@@ -12,7 +12,7 @@ const outputPath = resolve("registry/generated/deepbook-mainnet.json");
 const registry = {
   generatedAt: new Date().toISOString(),
   network: "mainnet",
-  source: "@mysten/deepbook-v3@1.3.6 exported mainnet constants",
+  source: "@mysten/deepbook-v3@2.6.4 exported mainnet constants",
   generator: "scripts/generate-deepbook-registry.ts",
   note:
     "This file is local policy/known metadata, not live liquidity, balances, quotes, or final execution truth.",

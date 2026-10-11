@@ -4,7 +4,7 @@ import { serialize, deserialize } from "node:v8";
 import Database from "better-sqlite3";
 import type { CoreTypes } from "@walletconnect/types";
 
-// Restoration namespaces of pinned SignClient/Core 2.23.10. Request history,
+// Restoration namespaces of pinned SignClient/Core 2.26.0. Request history,
 // pending requests, messages, unacknowledged envelopes and new namespaces are
 // intentionally volatile; they may contain transaction or signature material.
 const persistentKeys = new Set([

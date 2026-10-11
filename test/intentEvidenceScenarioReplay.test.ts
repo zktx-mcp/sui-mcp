@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { mainnetCoins } from "@mysten/deepbook-v3";
 import type { SuiClientTypes } from "@mysten/sui/client";
 import { describe, expect, it } from "vitest";

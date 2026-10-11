@@ -6,9 +6,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 vi.mock("vite", () => ({ build: vi.fn() }));
 import { build } from "vite";
 
-// Independent upstream text: lightweight-charts v5.2.0/NOTICE, not generated output.
+// Independent upstream text: lightweight-charts v5.2.1/NOTICE, not generated output.
 const notice = "TradingView Lightweight Charts™\nCopyright (с) 2025 TradingView, Inc. https://www.tradingview.com/\n";
-const noticePath = "LICENSES/lightweight-charts-5.2.0-NOTICE.txt";
+const noticePath = "LICENSES/lightweight-charts-5.2.1-NOTICE.txt";
 let root: string;
 let chartPackage: string;
 
@@ -19,7 +19,7 @@ beforeEach(async () => {
   await mkdir(chartPackage, { recursive: true });
   await mkdir(join(root, "LICENSES"));
   await writeFile(join(root, "package.json"), JSON.stringify({ version: "fixture" }));
-  await writeFile(join(chartPackage, "package.json"), JSON.stringify({ name: "lightweight-charts", version: "5.2.0" }));
+  await writeFile(join(chartPackage, "package.json"), JSON.stringify({ name: "lightweight-charts", version: "5.2.1" }));
   await writeFile(join(chartPackage, "LICENSE"), "Fixture npm license retained separately.\n");
   await writeFile(join(root, noticePath), notice);
   vi.spyOn(process, "cwd").mockReturnValue(root);

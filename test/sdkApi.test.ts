@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { DeepBookClient, mainnetPackageIds, mainnetPools } from "@mysten/deepbook-v3";
 

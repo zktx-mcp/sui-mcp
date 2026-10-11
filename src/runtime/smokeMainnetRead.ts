@@ -5,8 +5,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { randomInt } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { validateSupportedAdapterLifecycle } from "../adapters/adapterLifecycleValidators.js";
 import { SqliteActivityStore } from "../core/activity/sqliteActivityStore.js";
 import { TransactionActivityService } from "../core/activity/transactionActivityService.js";
@@ -160,7 +160,7 @@ async function main(): Promise<void> {
     const accountBoundSwapReview = await computeSmokeReview({ env: process.env, account: smokeAddress, sessions, computation: reviewDependencies });
     if (accountBoundSwapReview.status === "ok") markCompleted("account_bound_swap_review");
 
-    const wallet = await callSmokeTool(client, TOOL_NAMES.readSummarizeWalletAssets, {});
+    const wallet = await callSmokeTool(client, TOOL_NAMES.readSummarizeWalletAssets, { account: smokeAddress });
     const orderbook = await callSmokeTool(client, TOOL_NAMES.readInspectDeepbookOrderbook, {
       poolKey,
       ticks: 5

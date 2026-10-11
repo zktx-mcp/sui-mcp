@@ -16,7 +16,7 @@ Source-checkout scripts are not packaged product commands, MCP tools, review-tim
 
 | Utility | Command / Tool | Status | Notes |
 | --- | --- | --- | --- |
-| DeepBook registry generation | `npm run generate:deepbook-registry` | Implemented | Generates ignored mainnet metadata from `@mysten/deepbook-v3@1.3.6` constants. |
+| DeepBook registry generation | `npm run generate:deepbook-registry` | Implemented | Generates ignored mainnet metadata from `@mysten/deepbook-v3@2.6.4` constants. |
 | MCP server status | `read.get_server_status` | Implemented | Reports package version, evidence policy version, runtime, `implementedToolsCount`, resources, prompts, and implementation limits. |
 | Supported protocol list | `read.list_supported_protocols` | Implemented | Reports product support levels. |
 | DeepBook pool list | `read.list_deepbook_pools` | Implemented | Reads pinned SDK mainnet pool metadata. |

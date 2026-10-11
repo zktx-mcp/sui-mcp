@@ -41,6 +41,7 @@ export function createSuccessfulReviewTimeSimulationClient(
             digest,
             signatures: [],
             epoch: "1",
+            timestampMs: null, checkpoint: null,
             status: { success: true, error: null },
             balanceChanges: [
               {
@@ -86,7 +87,8 @@ export function createSuccessfulReviewTimeSimulationClient(
             transaction: transactionData,
             bcs: undefined
           },
-          commandResults: undefined
+          commandResults: undefined,
+          gasPaymentMocked: false
         };
       }
     }
@@ -115,6 +117,7 @@ export function createFailedReviewTimeSimulationClient(
             digest,
             signatures: [],
             epoch: "1",
+            timestampMs: null, checkpoint: null,
             status: {
               success: false,
               error: { message, $kind: "Unknown", Unknown: null }
@@ -147,7 +150,8 @@ export function createFailedReviewTimeSimulationClient(
             transaction: transactionData,
             bcs: undefined
           },
-          commandResults: undefined
+          commandResults: undefined,
+          gasPaymentMocked: false
         };
       }
     }

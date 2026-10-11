@@ -1,5 +1,5 @@
 import { PassThrough } from "node:stream";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { expect, it, vi } from "vitest";
 import { RuntimeTermination, runtimeFailureReason, type RuntimeExitCause } from "../src/runtime/runtimeTermination.js";
 import { SuiEndpointError } from "../src/core/suiEndpoint.js";

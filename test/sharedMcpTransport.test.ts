@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/client";
+import { McpServer } from "@modelcontextprotocol/server";
 import { expect, it } from "vitest";
 import { startSharedServer } from "../src/runtime/shared/server.js";
 import { createInternalMcpHandler } from "../src/runtime/shared/mcpHttp.js";
@@ -11,19 +11,19 @@ import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
 import { externalProposalSchema } from "../src/core/proposal/schemas.js";
 import { MAX_JSON_BODY_BYTES } from "../src/runtime/shared/http.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { z } from "zod";
 import { startSharedStdio } from "../src/runtime/shared/stdio.js";
 import { registerMcpPrompts } from "../src/mcp/prompts.js";
 import { ADAPTER_PROMPT_SURFACES } from "../src/adapters/adapterPromptSurfaces.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createAuthenticatedFetch } from "../src/runtime/shared/authenticatedFetch.js";
 import { INTERNAL_MCP_PATH } from "../src/runtime/shared/control.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { Transport } from "@modelcontextprotocol/client";
 
 const logger = { info() {}, warn() {}, error() {} };
 it("enforces the complete SDK request-body bound before dispatch and preserves the stdio connection after rejection", async () => {
-  // The adopted SDK 1.31.0 transport contract is 4 MiB per body, including
+  // The adopted SDK 2.3.1 transport contract is 4 MiB per body, including
   // UTF-8 metadata. It is independent of the 64 KiB card-message budget.
   const maximum = 4 * 1024 * 1024;
   const control: ControlIdentity = { key: randomBytes(32).toString("base64url"), databaseId: "1".repeat(64), configurationId: "2".repeat(64) };
@@ -60,7 +60,13 @@ it("enforces the complete SDK request-body bound before dispatch and preserves t
   const client = new Client({ name: "request-size-http-client", version: "1" });
   // Keep the same Transport boundary used by the product gateway; the SDK's
   // optional sessionId accessor is wider than exactOptionalPropertyTypes.
-  const connection: Transport = { start: () => http.start(), send: (message, options) => http.send(message, options),
+  const connection: Transport = { start: () => http.start(), send: (message, options) => http.send(message, {
+      ...(options?.resumptionToken === undefined ? {} : { resumptionToken: options.resumptionToken }),
+      ...(options?.onresumptiontoken === undefined ? {} : { onresumptiontoken: options.onresumptiontoken }),
+      ...(options?.requestSignal === undefined ? {} : { requestSignal: options.requestSignal }),
+      ...(options?.onRequestStreamEnd === undefined ? {} : { onRequestStreamEnd: options.onRequestStreamEnd }),
+      ...(options?.headers === undefined ? {} : { headers: options.headers })
+    }),
     close: () => http.close(), setProtocolVersion: (version) => http.setProtocolVersion(version) };
   http.onmessage = (message) => connection.onmessage?.(message);
   http.onerror = (error) => connection.onerror?.(error); http.onclose = () => connection.onclose?.();
@@ -75,7 +81,7 @@ it("enforces the complete SDK request-body bound before dispatch and preserves t
     }
     targetSize = maximum + 1;
     await expect(client.callTool({ name: "fixture.consume", arguments: { text: "must-not-be-admitted" } }))
-      .rejects.toMatchObject({ code: 413, message: expect.stringContaining("Payload Too Large") });
+      .rejects.toMatchObject({ status: 413, message: expect.stringContaining("Payload Too Large") });
     expect(sizes).toEqual([maximum - 1, maximum, maximum + 1]);
     await expect(stdio.callTool({ name: "fixture.consume", arguments: { text: "must-not-be-admitted" },
       _meta: { hostWrapping: "資料" + "x".repeat(maximum) } }))

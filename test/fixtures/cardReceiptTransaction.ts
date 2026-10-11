@@ -5,7 +5,7 @@ import { chainReceiptAccount as account, chainReceiptDigest as digest,
 // External SDK response fixture; the reader, projection, DB and MCP consumers
 // remain real. Pure values match the independently specified reader cases.
 export const cardReceiptTransaction = {
-  digest, signatures: ["fixture-signature-never-exposed"], epoch: "42",
+  digest, signatures: ["fixture-signature-never-exposed"], epoch: "42", timestampMs: null, checkpoint: null,
   status: { success: true, error: null },
   balanceChanges: [{ address: account, coinType: "0x2::sui::SUI", amount: "-1000" }],
   effects: {

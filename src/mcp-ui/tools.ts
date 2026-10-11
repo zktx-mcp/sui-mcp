@@ -4,8 +4,8 @@ import { MAX_JSON_BODY_BYTES, settingsJsonSize, settingsRawChunkBudget } from ".
 import { sessionDomainToolError } from "../mcp/toolErrors.js";
 import { accountInputSchema, receiptInputSchema, chartOpenInputSchema } from "../core/read/readCardInputs.js";
 import { readFile } from "node:fs/promises";
-import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/server";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import { getUiCapability, registerAppResource, registerAppTool, RESOURCE_MIME_TYPE, type McpUiAppToolConfig } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
 import type { McpServerDeps } from "../mcp/server.js";
@@ -143,13 +143,13 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
       const metadata = { ...(input.attemptId ? { attemptId: input.attemptId } : {}), cardId: input.cardId, operationId: input.operationId, fileId: input.fileId, offset: input.offset, totalSize: Number.MAX_SAFE_INTEGER,
         sha256: "0".repeat(64), chunkBase64: "" };
       base._meta = { [SETTINGS_FILE_METADATA_KEY]: metadata };
-      const budget = settingsRawChunkBudget({ jsonrpc: "2.0", id: extra.requestId, result: base });
+      const budget = settingsRawChunkBudget({ jsonrpc: "2.0", id: extra.mcpReq.id, result: base });
       if (!budget) throw new CardError("The backup response cannot fit the app's message envelope.");
       const read = await deps.cards.store.readSettingsFile(input, Math.min(input.limit ?? budget, budget));
       const rangeSize = Buffer.from(read.chunkBase64, "base64").length;
       const result = okToolResult({ status: "read", fileId: input.fileId, offset: input.offset, rangeSize });
       result._meta = { [SETTINGS_FILE_METADATA_KEY]: { ...metadata, totalSize: read.file.totalSize, sha256: read.file.sha256, chunkBase64: read.chunkBase64 } };
-      if (settingsJsonSize({ jsonrpc: "2.0", id: extra.requestId, result }) > MAX_JSON_BODY_BYTES) throw new CardError("The backup response exceeds its message limit.");
+      if (settingsJsonSize({ jsonrpc: "2.0", id: extra.mcpReq.id, result }) > MAX_JSON_BODY_BYTES) throw new CardError("The backup response exceeds its message limit.");
       return result;
     } catch {
       return errorToolResult({ kind: "input_invalid", details: { reason: "This backup file could not be read or verified." } });

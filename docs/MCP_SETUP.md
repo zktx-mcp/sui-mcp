@@ -6,7 +6,7 @@ It does not define tool field contracts or response wording. Use `docs/MCP_TOOLS
 
 The README keeps only the short entry path; client-specific setup, restart behavior, and troubleshooting live here.
 
-These instructions target `@zktx.io/sui-mcp@0.6.1`. Package installation requires
+These instructions target `@zktx.io/sui-mcp@0.6.2`. Package installation requires
 that exact version to be published; use the developer checkout instructions when
 it is not available. A repository rename or local build does not publish the
 package. Changing client settings or rebuilding files does not replace an
@@ -130,7 +130,7 @@ per-client configuration below, which give the exact `command` and `args`.
 
 The npm package for this release is `@zktx.io/sui-mcp`. The commands below
 require the requested version to be published; confirm it with
-`npm view @zktx.io/sui-mcp@0.6.1 version` before switching. Both installation
+`npm view @zktx.io/sui-mcp@0.6.2 version` before switching. Both installation
 methods start the same `sui-mcp` stdio MCP server. Use a local checkout when
 working on a version that has not been published.
 
@@ -229,7 +229,7 @@ restart first. A previous wallet pairing can remain in the wallet app; remove
 an unwanted pairing there rather than assuming new local storage disconnected it.
 
 Replace the old registration instead of adding a second one. Use exactly
-`sui-mcp` for the registration name and select `@zktx.io/sui-mcp@0.6.1` in its
+`sui-mcp` for the registration name and select `@zktx.io/sui-mcp@0.6.2` in its
 command arguments. Do not append an environment label, version or numeric
 suffix. Remove obsolete runtime environment overrides. If you set
 `SUI_MCP_DATA_DIR`, choose a new empty directory; never point it at another
@@ -776,7 +776,7 @@ If the user supplied a specific Sui address for `read.summarize_wallet_assets` o
 
 A 404 means the requested package or version could not be retrieved from the
 selected registry. Confirm the exact name and version, for example with
-`npm view @zktx.io/sui-mcp@0.6.1 version --registry=https://registry.npmjs.org`.
+`npm view @zktx.io/sui-mcp@0.6.2 version --registry=https://registry.npmjs.org`.
 A new version may not have been published or become visible yet; a mistyped name
 or an alternate/private registry can also explain the response. Check the
 publication result and registry configuration before retrying. Do not assume

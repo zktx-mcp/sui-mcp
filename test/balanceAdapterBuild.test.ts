@@ -23,7 +23,7 @@ describe("supported adapter builds use real SDK intents and gRPC resolution", ()
     { label: "success", kind: undefined, blockedReason: undefined, message: undefined },
     { label: "Move abort", kind: GrpcTypes.ExecutionError_ExecutionErrorKind.MOVE_ABORT,
       blockedReason: "object_resolution_failed", message: "DeepBook transaction was rejected during build-time simulation. Refresh the review or inspect its selected constraints. Nothing was signed or submitted." },
-    // Sui 2.17.0's grpc/core.ts converts these source kinds to ExecutionError.Unknown.
+    // The pinned Sui SDK's grpc/core.ts converts these source kinds to ExecutionError.Unknown.
     // Build failures must not reconstruct lost classification from their messages.
     { label: "gas failure decoded without its kind", kind: GrpcTypes.ExecutionError_ExecutionErrorKind.INSUFFICIENT_GAS,
       blockedReason: "object_resolution_failed", message: "DeepBook transaction was rejected during build-time simulation. Refresh the review or inspect its selected constraints. Nothing was signed or submitted." },

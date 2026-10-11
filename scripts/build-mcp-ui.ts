@@ -7,11 +7,11 @@ const root = process.cwd();
 const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string };
 
 // The pinned npm archive omits this upstream notice. Its UTF-8 contents, including
-// the final newline, come from https://raw.githubusercontent.com/tradingview/lightweight-charts/v5.2.0/NOTICE.
+// the final newline, come from https://raw.githubusercontent.com/tradingview/lightweight-charts/v5.2.1/NOTICE.
 const chartNotice = {
   packageName: "lightweight-charts",
-  version: "5.2.0",
-  path: "LICENSES/lightweight-charts-5.2.0-NOTICE.txt",
+  version: "5.2.1",
+  path: "LICENSES/lightweight-charts-5.2.1-NOTICE.txt",
   sha256: "f76c6afab94884448f0426e30d6e9d555ca7247894cd3484e477d2f87513036e"
 };
 

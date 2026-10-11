@@ -1,4 +1,4 @@
-@mysten/bcs 2.0.5
+@mysten/utils 0.4.1
 Copyright (c) Mysten Labs, Inc.
 SPDX-License-Identifier: Apache-2.0
 

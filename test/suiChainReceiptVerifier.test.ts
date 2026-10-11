@@ -88,6 +88,7 @@ function transactionFixture(overrides: Partial<SuiClientTypes.Transaction<ChainR
     digest,
     signatures: ["wallet-signature-not-stored"],
     epoch: "42",
+    timestampMs: null, checkpoint: null,
     status: { success: true, error: null },
     balanceChanges: [
       {

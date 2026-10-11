@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { waitForExecutionResult, WAIT_OUTCOMES } from "../../../core/session/wait.js";
 import { reviewStatusResponse } from "../../../core/session/status.js";
@@ -14,7 +14,7 @@ import { reviewStatusResponseShape, waitExecutionInputSchema, readCurrentReview 
 export function registerExecutionResultTools(server: McpServer, deps: McpServerDeps): void {
   server.registerTool(TOOL_NAMES.sessionGetExecutionResult, {
     title: "Get transaction request result", description: "Read one review session's transaction request and any observed chain result.",
-    inputSchema: { reviewSessionId: z.string().min(1) },
+    inputSchema: z.object({ reviewSessionId: z.string().min(1) }),
     outputSchema: successOutputSchema({ ...reviewStatusResponseShape, userAnswerUse: userAnswerUseSchema }),
     annotations: { readOnlyHint: false, openWorldHint: false }
   }, async ({ reviewSessionId }) => {
@@ -32,7 +32,7 @@ export function registerExecutionResultTools(server: McpServer, deps: McpServerD
     annotations: { readOnlyHint: false, openWorldHint: false }
   }, async ({ reviewSessionId, timeoutMs }, extra) => {
     try {
-      const result = await waitForExecutionResult((id) => readCurrentReview(deps, id), reviewSessionId, { timeoutMs, signal: extra.signal });
+      const result = await waitForExecutionResult((id) => readCurrentReview(deps, id), reviewSessionId, { timeoutMs, signal: extra.mcpReq.signal });
       return okToolResult({ waitOutcome: result.waitOutcome, ...reviewStatusResponse(result),
         userAnswerUse: executionResultUserAnswerUse({ hasConnectionConflict: !!result.connectionConflict, reconciliationRequired: !!result.connectionReconciliationRequired, hasRequest: !!result.request, hasExecutionResult: !!result.request?.execution, hasWaitOutcome: true }) });
     } catch (error) { return sessionStoreToolError(error, deps.logger); }

@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   DEEPBOOK_SCALAR_UNIT_SOURCE,
@@ -582,10 +582,10 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
     {
       title: "Summarize wallet assets",
       description: "Snapshot current Sui mainnet coin balances via gRPC listBalances. Not transaction history or receipt proof.",
-      inputSchema: {
+      inputSchema: z.object({
         account: suiAddressStringSchema.optional(),
         cursor: z.string().min(1).optional()
-      },
+      }),
       outputSchema: successOutputSchema({
         account: z.string(),
         status: z.literal("ok"),
@@ -617,10 +617,10 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
     {
       title: "Classify wallet assets",
       description: "Classify current Sui mainnet coin balances. Not transaction history, receipt proof, or P&L.",
-      inputSchema: {
+      inputSchema: z.object({
         account: suiAddressStringSchema.optional(),
         cursor: z.string().min(1).optional()
-      },
+      }),
       outputSchema: successOutputSchema({
         account: z.string(),
         status: z.literal("ok"),
@@ -675,10 +675,10 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
     {
       title: "Summarize settlement asset group parity",
       description: "Summarize USD-denominated asset group parity from direct DeepBook mid-price snapshots. Not settlement selection or fiat cash-out.",
-      inputSchema: {
+      inputSchema: z.object({
         denomination: z.string().min(1),
         referenceAssetSymbol: z.string().min(1).optional()
-      },
+      }),
       outputSchema: successOutputSchema({
         status: z.literal("ok"),
         fetchedAt: fetchedAtSchema,
@@ -750,7 +750,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
     {
       title: "Preview intent evidence",
       description: "Build wallet and DeepBook evidence for a natural-language settlement intent.",
-      inputSchema: {
+      inputSchema: z.object({
         account: suiAddressStringSchema.optional(),
         intentKind: z.enum(["cover_payment_like_amount", "summarize_settlement_asset_group_balance"]),
         denomination: z.string().min(1),
@@ -758,7 +758,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
         targetAssetSymbol: z.string().min(1).optional(),
         targetAssetSelectionSource: z.enum(INTENT_EVIDENCE_TARGET_ASSET_SELECTION_SOURCES).optional(),
         acceptedSourceAssetSymbols: z.array(z.string().min(1)).optional()
-      },
+      }),
       outputSchema: successOutputSchema({
         status: z.literal("ok"),
         account: z.string(),

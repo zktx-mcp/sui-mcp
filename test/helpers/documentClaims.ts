@@ -1,5 +1,5 @@
 import { Lexer, type MarkedToken, type Token } from "marked";
-import ts from "typescript";
+import ts from "typescript-compiler-api";
 
 export type ClaimUnit = {
   file: string;

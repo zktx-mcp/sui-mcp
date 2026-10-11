@@ -1,6 +1,6 @@
 import { cardMetadata, createWorkflowCard, supportsCards } from "../../../mcp-ui/tools.js";
 import { cardSnapshotSchema } from "../../../mcp-ui/contracts.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   INTENT_PLAN_FACTORIES,
@@ -29,9 +29,9 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
     {
       title: "Prepare swap review",
       description: "Create a local swap review session on a supported protocol. Returns an internal review card.",
-      inputSchema: {
+      inputSchema: z.object({
         intent: swapIntentInputSchema
-      },
+      }),
       outputSchema: successOutputSchema({
         reviewSessionId: z.string(),
         card: cardSnapshotSchema,
@@ -109,9 +109,9 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
     {
       title: "Prepare external proposal review",
       description: "Create a local non-signable review session from an untrusted external Sui proposal.",
-      inputSchema: {
+      inputSchema: z.object({
         proposal: externalProposalSchema
-      },
+      }),
       outputSchema: successOutputSchema({
         reviewSessionId: z.string(),
         card: cardSnapshotSchema,

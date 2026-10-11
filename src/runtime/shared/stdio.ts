@@ -1,9 +1,7 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { CallToolRequestSchema, CallToolResultSchema, CompleteRequestSchema, GetPromptRequestSchema, ListPromptsRequestSchema,
-  ListResourceTemplatesRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { Client, ProtocolError, SdkHttpError } from "@modelcontextprotocol/client";
+import { Server } from "@modelcontextprotocol/server";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import type { Transport } from "@modelcontextprotocol/client";
 import { SERVER_INSTRUCTIONS, SERVER_NAME, SERVER_VERSION } from "../../mcp/serverInfo.js";
 import { createAuthenticatedFetch, probeAuthenticatedServer } from "./authenticatedFetch.js";
 import { INTERNAL_MCP_PATH, type ControlIdentity } from "./control.js";
@@ -48,7 +46,22 @@ export async function startSharedStdio(input: {
         fetch: createAuthenticatedFetch(input.port, control, identity.instanceId)
       });
       const transport: Transport = {
-        start: () => http.start(), send: (message, options) => http.send(message, options),
+        start: () => http.start(), send: async (message, options) => {
+          try {
+            await http.send(message, {
+              ...(options?.resumptionToken === undefined ? {} : { resumptionToken: options.resumptionToken }),
+              ...(options?.onresumptiontoken === undefined ? {} : { onresumptiontoken: options.onresumptiontoken }),
+              ...(options?.requestSignal === undefined ? {} : { requestSignal: options.requestSignal }),
+              ...(options?.onRequestStreamEnd === undefined ? {} : { onRequestStreamEnd: options.onRequestStreamEnd }),
+              ...(options?.headers === undefined ? {} : { headers: options.headers })
+            });
+          } catch (error) {
+            // Keep the observed HTTP status on the forwarded MCP error. SDK 2
+            // identifies local HTTP failures with a string code instead.
+            if (error instanceof SdkHttpError) throw new ProtocolError(error.status, error.message);
+            throw error;
+          }
+        },
         setProtocolVersion: (version) => http.setProtocolVersion(version),
         close: async () => { try { await http.terminateSession(); } catch { /* The prior owner may already be gone. */ } await http.close(); }
       };
@@ -65,22 +78,22 @@ export async function startSharedStdio(input: {
     connecting = open;
     try { return await open; } finally { if (connecting === open) connecting = undefined; }
   }
-  server.setRequestHandler(ListToolsRequestSchema, async (request, extra) =>
-    (await owner(extra.signal)).listTools(request.params, { signal: extra.signal }));
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
-    (await owner(extra.signal)).callTool(request.params, CallToolResultSchema, { signal: extra.signal }));
-  server.setRequestHandler(ListResourcesRequestSchema, async (request, extra) =>
-    (await owner(extra.signal)).listResources(request.params, { signal: extra.signal }));
-  server.setRequestHandler(ListResourceTemplatesRequestSchema, async (request, extra) =>
-    (await owner(extra.signal)).listResourceTemplates(request.params, { signal: extra.signal }));
-  server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) =>
-    (await owner(extra.signal)).readResource(request.params, { signal: extra.signal }));
-  server.setRequestHandler(ListPromptsRequestSchema, async (request, extra) =>
-    (await owner(extra.signal)).listPrompts(request.params, { signal: extra.signal }));
-  server.setRequestHandler(GetPromptRequestSchema, async (request, extra) =>
-    (await owner(extra.signal)).getPrompt(request.params, { signal: extra.signal }));
-  server.setRequestHandler(CompleteRequestSchema, async (request, extra) =>
-    (await owner(extra.signal)).complete(request.params, { signal: extra.signal }));
+  server.setRequestHandler("tools/list", async (request, extra) =>
+    (await owner(extra.mcpReq.signal)).listTools(request.params, { signal: extra.mcpReq.signal }));
+  server.setRequestHandler("tools/call", async (request, extra) =>
+    (await owner(extra.mcpReq.signal)).callTool(request.params, { signal: extra.mcpReq.signal }));
+  server.setRequestHandler("resources/list", async (request, extra) =>
+    (await owner(extra.mcpReq.signal)).listResources(request.params, { signal: extra.mcpReq.signal }));
+  server.setRequestHandler("resources/templates/list", async (request, extra) =>
+    (await owner(extra.mcpReq.signal)).listResourceTemplates(request.params, { signal: extra.mcpReq.signal }));
+  server.setRequestHandler("resources/read", async (request, extra) =>
+    (await owner(extra.mcpReq.signal)).readResource(request.params, { signal: extra.mcpReq.signal }));
+  server.setRequestHandler("prompts/list", async (request, extra) =>
+    (await owner(extra.mcpReq.signal)).listPrompts(request.params, { signal: extra.mcpReq.signal }));
+  server.setRequestHandler("prompts/get", async (request, extra) =>
+    (await owner(extra.mcpReq.signal)).getPrompt(request.params, { signal: extra.mcpReq.signal }));
+  server.setRequestHandler("completion/complete", async (request, extra) =>
+    (await owner(extra.mcpReq.signal)).complete(request.params, { signal: extra.mcpReq.signal }));
   server.onerror = input.onError;
   await server.connect(input.stdio);
   return {

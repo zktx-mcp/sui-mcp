@@ -137,7 +137,7 @@ process.stdin.on("end", () => writeFileSync(${JSON.stringify(closingFile)}, "std
 }
 
 it.each([
-  ["initialize_error", "MCP error -32000: Fixture initialization refused"],
+  ["initialize_error", "Fixture initialization refused"],
   ["version_mismatch", "Installed server version mismatch."],
   ["name_mismatch", "Installed server name mismatch."],
   ["package_mismatch", "Installed package identity mismatch."]
@@ -159,6 +159,7 @@ it.each([
     const failure = await result;
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).cause).toMatchObject({ message });
+    if (mode === "initialize_error") expect((failure as Error).cause).toMatchObject({ code: -32000 });
     expect(peer.alive()).toBe(false);
     expect(existsSync(peer.installDir)).toBe(false);
   } finally { await peer.cleanup(); }
@@ -167,7 +168,7 @@ it.each([
 it("remembers a child that closes before initialization finishes", async () => {
   const peer = runtimePeer("early_exit");
   try {
-    await expect(smokeInstalledRuntime(peer.installDir, peer.binPath)).rejects.toMatchObject({ cause: { code: -32000 } });
+    await expect(smokeInstalledRuntime(peer.installDir, peer.binPath)).rejects.toMatchObject({ cause: { code: "CONNECTION_CLOSED" } });
     expect(peer.alive()).toBe(false);
     expect(existsSync(peer.installDir)).toBe(false);
   } finally { await peer.cleanup(); }

@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { mainnetPools } from "@mysten/deepbook-v3";
 import { z } from "zod";
 import { unknownRecordSchema } from "../../../core/action/schemas.js";
@@ -518,10 +518,10 @@ export function registerDeepbookReadTools(server: McpServer, deps: McpServerDeps
     {
       title: "Inspect DeepBook orderbook",
       description: "Return a pinned-SDK DeepBook mainnet orderbook snapshot at fetchedAt. Not a live stream.",
-      inputSchema: {
+      inputSchema: z.object({
         poolKey: z.string().min(1),
         ticks: z.number().int().min(1).max(MAX_DEEPBOOK_ORDERBOOK_TICKS).optional()
-      },
+      }),
       outputSchema: successOutputSchema({
         status: z.literal("ok"),
         poolKey: z.string().optional(),
@@ -556,9 +556,9 @@ export function registerDeepbookReadTools(server: McpServer, deps: McpServerDeps
       title: "Get DeepBook mid price",
       description:
         "Return a DeepBook pool mid-price snapshot. Not price impact, route quality, global market price, fiat cash-out, transaction building, or signing readiness.",
-      inputSchema: {
+      inputSchema: z.object({
         poolKey: z.string().min(1)
-      },
+      }),
       outputSchema: successOutputSchema({
         status: z.literal("ok"),
         poolKey: z.string(),
@@ -593,14 +593,14 @@ export function registerDeepbookReadTools(server: McpServer, deps: McpServerDeps
     {
       title: "Get DeepBook USDC price history",
       description: "Return DeepBookV3 official Indexer USDC candle evidence.",
-      inputSchema: {
+      inputSchema: z.object({
         poolName: z.string().min(1).optional(),
         assetSymbol: z.string().min(1).optional(),
         coinType: z.string().min(1).optional(),
         interval: deepbookOfficialIndexerIntervalSchema.optional(),
         start: fetchedAtSchema,
         end: fetchedAtSchema
-      },
+      }),
       outputSchema: deepbookUsdcPriceHistoryOutputSchema,
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -627,14 +627,14 @@ export function registerDeepbookReadTools(server: McpServer, deps: McpServerDeps
     {
       title: "Get DeepBook USDC price at time",
       description: "Return DeepBookV3 official Indexer USDC candle evidence and representative price from close around a target UTC time.",
-      inputSchema: {
+      inputSchema: z.object({
         poolName: z.string().min(1).optional(),
         assetSymbol: z.string().min(1).optional(),
         coinType: z.string().min(1).optional(),
         interval: deepbookOfficialIndexerIntervalSchema.optional(),
         targetTime: fetchedAtSchema,
         maxDistanceMinutes: z.number().int().positive().optional()
-      },
+      }),
       outputSchema: deepbookUsdcPriceAtTimeOutputSchema,
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -661,11 +661,11 @@ export function registerDeepbookReadTools(server: McpServer, deps: McpServerDeps
     {
       title: "Quote DeepBook action",
       description: "Pinned-SDK DeepBook raw-quantity quote evidence. Not P&L, price impact, route quality, fiat cash-out, external USD lookup, signing data, or execution promise.",
-      inputSchema: {
+      inputSchema: z.object({
         poolKey: z.string().min(1),
         direction: z.enum(["base_to_quote", "quote_to_base"]),
         amountRaw: z.string().regex(/^[1-9]\d*$/)
-      },
+      }),
       outputSchema: successOutputSchema({
         status: z.literal("ok"),
         poolKey: z.string().optional(),
@@ -701,11 +701,11 @@ export function registerDeepbookReadTools(server: McpServer, deps: McpServerDeps
     {
       title: "Quote DeepBook display amount",
       description: "Pinned-SDK DeepBook display-amount quote evidence. Not fiat cash-out, external USD lookup, P&L, price impact, route, final min-out, signing data, or signing readiness.",
-      inputSchema: {
+      inputSchema: z.object({
         poolKey: z.string().min(1),
         direction: z.enum(["base_to_quote", "quote_to_base"]),
         amountDisplay: z.string().min(1)
-      },
+      }),
       outputSchema: successOutputSchema({
         status: z.literal("ok"),
         pool: z.object({
@@ -745,10 +745,10 @@ export function registerDeepbookReadTools(server: McpServer, deps: McpServerDeps
     {
       title: "Summarize DeepBook account inventory",
       description: "Pinned-SDK DeepBook BalanceManager inventory. Display-like facts, not raw amounts or signing readiness.",
-      inputSchema: {
+      inputSchema: z.object({
         poolKey: z.string().min(1).optional(),
         managerAddress: z.string().min(1).optional()
-      },
+      }),
       outputSchema: successOutputSchema({
         account: z.string(),
         status: z.literal("ok"),

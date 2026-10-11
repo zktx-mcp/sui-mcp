@@ -1,6 +1,6 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/client";
+import { McpServer } from "@modelcontextprotocol/server";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
@@ -14,7 +14,7 @@ import { CARD_METADATA_KEY, CARD_RESOURCE_PREFIX, CARD_TOOLS, SETTINGS_FILE_META
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
 import type { SettingsView } from "../src/core/session/settingsOperation.js";
 import type { SettingsFileDisplay } from "../src/mcp-ui/contracts.js";
-import type { CallToolResult, ClientCapabilities } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ClientCapabilities } from "@modelcontextprotocol/client";
 import { settingsWorkflowFixture } from "./fixtures/settingsWorkflow.js";
 import { deferred } from "./fixtures/walletWorkflow.js";
 

@@ -1,11 +1,11 @@
 import type { ActivityStore } from "../src/core/activity/activityStore.js";
 import type { WalletWorkflow } from "../src/core/session/walletWorkflow.js";
 import { walletWorkflowFixture } from "./fixtures/walletWorkflow.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { registerActionTools } from "../src/mcp/tools/action/prepareSuiActionReview.js";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { mainnetCoins } from "@mysten/deepbook-v3";
 import type { SuiClientTypes } from "@mysten/sui/client";
 import { describe, expect, it } from "vitest";

@@ -1,6 +1,6 @@
 import { walletAvailabilitySchema, workflowProgressSchema, walletUnavailable, connectionConflictSchema } from "../../../core/session/walletConnection.js";
 import { walletObservationSchema } from "../../../core/session/walletRuntime.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { activeAccountResponse, activeAccountResponseSchema } from "../../activeAccountResponse.js";
 import type { McpServerDeps } from "../../server.js";
@@ -48,7 +48,7 @@ export function registerSessionStatusTools(server: McpServer, deps: McpServerDep
   });
   server.registerTool(TOOL_NAMES.sessionGetReviewStatus, {
     title: "Get review status", description: "Read one review session, its admitted request and any observed chain result.",
-    inputSchema: { reviewSessionId: z.string().min(1) },
+    inputSchema: z.object({ reviewSessionId: z.string().min(1) }),
     outputSchema: successOutputSchema({ ...reviewStatusResponseShape, userAnswerUse: userAnswerUseSchema }),
     annotations: { readOnlyHint: false, openWorldHint: false }
   }, async ({ reviewSessionId }) => {

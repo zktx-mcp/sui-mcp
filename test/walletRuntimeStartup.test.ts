@@ -7,10 +7,10 @@ import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { WalletCommand, WalletEvent } from "../src/runtime/walletSdkIpc.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { createRuntimeApplication } from "../src/runtime/application.js";
 import { loadBootConfig } from "../src/runtime/config.js";
@@ -53,6 +53,8 @@ function expectReconciliationAnswer(data: { connectionReconciliationRequired?: t
     "last_service_observation_as_live_wallet_app_state", "wallet_unavailability_as_chain_failure_or_lost_stored_result"
   ]));
 }
+
+type StartupToolResult = CallToolResult & { structuredContent?: Record<string, unknown> };
 
 const source = vi.hoisted(() => ({ failure: "", init: vi.fn(), connect: vi.fn(), request: vi.fn(),
   exits: 0, realRelay: "", commands: [] as string[], sessions: [] as WalletSessionObservation[], children: [] as ChildProcess[], leases: [] as Array<Mock<() => void>> }));
@@ -146,7 +148,12 @@ vi.mock("../src/runtime/shared/mcpHttp.js", () => ({ createInternalMcpHandler: (
         const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(b); await client.connect(a);
       }
       const call = (request as unknown as { call: { name: string; arguments: Record<string, unknown> } }).call;
-      (response as unknown as { result: unknown }).result = await client.callTool(call);
+      const result = await client.callTool(call);
+      const structured = result.structuredContent;
+      if (structured !== undefined && (structured === null || typeof structured !== "object" || Array.isArray(structured))) {
+        throw new Error("Sui MCP startup results must have object structured content.");
+      }
+      (response as unknown as { result: unknown }).result = result;
     },
     async close() { await client?.close(); await server?.close(); }
   };
@@ -193,7 +200,7 @@ it.each([
   source.failure = "hold";
   const app = await createRuntimeApplication(boot, { info() {}, warn() {}, error() {} }, ownerId);
   const call = async (name: string, args: Record<string, unknown> = {}) => {
-    const response = {} as { result: CallToolResult };
+    const response = {} as { result: StartupToolResult };
     await app.handleMcp({ call: { name, arguments: args } } as unknown as IncomingMessage, response as unknown as ServerResponse);
     const failure = response.result.content.find((part) => part.type === "text");
     expect(response.result.isError, failure?.type === "text" ? failure.text.replace(/[A-Za-z0-9_-]{30,}/g, "[redacted]") : "No error text").not.toBe(true);
@@ -259,7 +266,7 @@ it("publishes production Settings reconciliation facts from the same current con
   const directory = mkdtempSync(join(tmpdir(), "sui-settings-current-facts-"));
   const app = await createRuntimeApplication(loadBootConfig({ SUI_MCP_DATA_DIR: directory }), { info() {}, warn() {}, error() {} });
   const call = async (name: string, args: Record<string, unknown> = {}) => {
-    const response = {} as { result: CallToolResult };
+    const response = {} as { result: StartupToolResult };
     await app.handleMcp({ call: { name, arguments: args } } as unknown as IncomingMessage, response as unknown as ServerResponse);
     expect(response.result.isError).not.toBe(true); return response.result;
   };
@@ -300,7 +307,7 @@ it("keeps ordinary MCP and Settings diagnosis neutral while an observed ready sn
   const app = await createRuntimeApplication(boot, { info() {}, warn() {}, error() {} });
   const db = new Database(boot.activityDatabasePath);
   const call = async (name: string, args: Record<string, unknown> = {}) => {
-    const response = {} as { result: CallToolResult };
+    const response = {} as { result: StartupToolResult };
     await app.handleMcp({ call: { name, arguments: args } } as unknown as IncomingMessage, response as unknown as ServerResponse);
     expect(response.result.isError).not.toBe(true); expect(response.result.structuredContent!.ok).toBe(true); return response.result;
   };
@@ -335,7 +342,7 @@ it("keeps ordinary MCP and Settings diagnosis neutral while an observed ready sn
     expect(diagnostic.data.facts).toMatchObject({ walletAvailability: { status: "initializing", stage: "state_sync" }, assetReadAccount: { status: "address_required" } });
     expect(diagnostic.data.facts?.connectionReconciliationRequired).toBeUndefined();
     expect(source.commands).toEqual(["init", "init"]);
-    const ownRefused = {} as { result: CallToolResult };
+    const ownRefused = {} as { result: StartupToolResult };
     await app.handleMcp({ call: { name: CARD_TOOLS.read, arguments: reference } } as unknown as IncomingMessage, ownRefused as unknown as ServerResponse);
     expect(ownRefused.result.isError).toBe(true);
     db.exec("DROP TRIGGER refuse_ready_answer");
@@ -362,7 +369,7 @@ it.each([
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const app = await createRuntimeApplication(loadBootConfig({ SUI_MCP_DATA_DIR: directory }), logger);
   const call = async (name: string, args: Record<string, unknown> = {}) => {
-    const response = {} as { result: CallToolResult };
+    const response = {} as { result: StartupToolResult };
     await app.handleMcp({ call: { name, arguments: args } } as unknown as IncomingMessage, response as unknown as ServerResponse);
     return response.result;
   };
@@ -413,7 +420,7 @@ it.each([
 it("uses the same approved project identity for stdio peers regardless of old environment settings", async () => {
   const directory = mkdtempSync(join(tmpdir(), "say-startup-identity-"));
   const controls: ControlIdentity[] = [];
-  const processListeners = new Map(["SIGINT", "SIGTERM"].map((event) => [event, new Set(process.listeners(event))]));
+  const processListeners = new Map((["SIGINT", "SIGTERM"] as const).map((event) => [event, new Set(process.listeners(event))]));
   const inputListeners = new Map(["end", "close"].map((event) => [event, new Set(process.stdin.listeners(event))]));
   // Exercise start.ts and real control-key/identity generation. Only ownership
   // acquisition and the stdio bridge are replaced; no relay or port is opened.
@@ -448,7 +455,7 @@ it("uses the same approved project identity for stdio peers regardless of old en
       for (const listener of process.listeners(event)) if (!before.has(listener)) process.removeListener(event, listener);
     }
     for (const [event, before] of inputListeners) {
-      for (const listener of process.stdin.listeners(event)) if (!before.has(listener)) process.stdin.removeListener(event, listener);
+      for (const listener of process.stdin.listeners(event)) if (!before.has(listener)) process.stdin.removeListener(event, listener as (...args: unknown[]) => void);
     }
     vi.doUnmock("../src/runtime/reviewServerAcquire.js"); vi.doUnmock("../src/runtime/shared/stdio.js"); vi.resetModules();
     rmSync(directory, { recursive: true, force: true });
@@ -468,7 +475,7 @@ it.each(["expired_pairing", "inactive_pairing"] as const)("recovers the initial 
   await seedWalletSdk(directory, kind);
   const app = await createRuntimeApplication(loadBootConfig({ SUI_MCP_DATA_DIR: directory }), { info() {}, warn() {}, error() {} });
   const call = async (name: string, args: Record<string, unknown> = {}) => {
-    const response = {} as { result: CallToolResult };
+    const response = {} as { result: StartupToolResult };
     await app.handleMcp({ call: { name, arguments: args } } as unknown as IncomingMessage, response as unknown as ServerResponse);
     return response.result;
   };
@@ -526,7 +533,7 @@ it("keeps an unrecorded SDK session blocked after Settings restart and Reset wit
   source.realRelay = relay.url; relay.release(); await seedWalletSdk(directory, "session");
   const app = await createRuntimeApplication(loadBootConfig({ SUI_MCP_DATA_DIR: directory }), { info() {}, warn() {}, error() {} });
   const call = async (name: string, args: Record<string, unknown> = {}) => {
-    const response = {} as { result: CallToolResult };
+    const response = {} as { result: StartupToolResult };
     await app.handleMcp({ call: { name, arguments: args } } as unknown as IncomingMessage, response as unknown as ServerResponse);
     return response.result;
   };

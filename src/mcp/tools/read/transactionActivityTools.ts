@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { buildAccountAssetTimeline } from "../../../core/activity/accountAssetTimeline.js";
 import {
@@ -608,10 +608,10 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
     {
       title: "Inspect Sui transaction",
       description: "Lookup one Sui transaction digest. Stores only when sender or balance owner matches a known local wallet.",
-      inputSchema: {
+      inputSchema: z.object({
         digest: transactionDigestSchema,
         account: z.string().min(1).optional()
-      },
+      }),
       outputSchema: successOutputSchema({
         status: z.literal("ok"),
         fetchedAt: fetchedAtSchema,
@@ -698,10 +698,10 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
     {
       title: "Summarize Sui account activity",
       description: "Summarize stored normalized Sui activity facts. Not complete history or P&L.",
-      inputSchema: {
+      inputSchema: z.object({
         ...reviewActivityInputSchema,
         limit: z.number().int().min(1).max(REVIEW_ACTIVITY_LIST_MAX_LIMIT).optional()
-      },
+      }),
       outputSchema: successOutputSchema({
         status: z.literal("ok"),
         dataScope: reviewActivityDataScopeSchema,

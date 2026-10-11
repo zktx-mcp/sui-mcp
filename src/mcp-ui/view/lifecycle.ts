@@ -1,5 +1,6 @@
 import { App } from "@modelcontextprotocol/ext-apps";
-import { CallToolResultSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/core";
+import { type CallToolResult } from "@modelcontextprotocol/client";
 import { button } from "../../../review-app/src/ui/ui.js";
 import { automaticWorkflowActionSchema, workflowActionSchema, workflowViewSchema, reviewWalletChoices } from "../../core/session/workflowView.js";
 import { settingsViewSchema, type SettingsDraft } from "../../core/session/settingsOperation.js";

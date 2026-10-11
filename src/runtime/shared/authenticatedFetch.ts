@@ -2,7 +2,7 @@ import { Agent, request as httpRequest } from "node:http";
 import { connect, type Socket } from "node:net";
 import { randomBytes } from "node:crypto";
 import { Readable } from "node:stream";
-import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { FetchLike } from "@modelcontextprotocol/client";
 import { MAX_JSON_BODY_BYTES } from "./http.js";
 import { IDENTITY_CHALLENGE_HEADER, IDENTITY_PATH, IDENTITY_TIMEOUT_MS, INTERNAL_MCP_PATH,
   SERVER_INSTANCE_HEADER, verifyServerIdentity, type ControlIdentity, type ServerIdentity } from "./control.js";
