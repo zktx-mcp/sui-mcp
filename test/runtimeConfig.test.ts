@@ -14,7 +14,7 @@ import { parseGraphqlUrl, parseGrpcUrl } from "../src/runtime/suiEndpoint.js";
 
 describe("runtime config", () => {
   it("is mainnet-only", () => {
-    expect(() => loadBootConfig({ SUI_NETWORK: "testnet" })).toThrow("mainnet");
+    expect(() => loadBootConfig({ SUI_MCP_NETWORK: "testnet" })).toThrow("mainnet");
   });
 
   it("uses verified mainnet chain identifier and database path in boot config", () => {
@@ -49,12 +49,6 @@ describe("runtime config", () => {
     const selected = loadBootConfig({ SUI_MCP_DATA_DIR: "/new-package-data", SUI_MCP_REVIEW_PORT: "9124" });
     expect(selected.activityDatabasePath).toBe(resolve("/new-package-data", "sui-mcp.sqlite"));
     expect(selected.reviewPort).toBe(9124);
-  });
-
-  it("rejects JSON-RPC configuration", () => {
-    expect(() => loadBootConfig({ SUI_RPC_URL: "https://fullnode.mainnet.sui.io:443" })).toThrow(
-      "JSON-RPC endpoint configuration is not supported"
-    );
   });
 
   it("composes runtime config from local settings when env is absent", () => {

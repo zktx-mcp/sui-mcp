@@ -70,7 +70,7 @@ export async function resolveExplicitOrActiveAccount(
           ...(context?.connectionReconciliationRequired ? { connectionReconciliationRequired: true } : {}),
           followUp: { tool: TOOL_NAMES.sessionGetInteractionStatus,
             answerFields: ["walletAvailability", "connections", "pendingWalletConnections", "assetReadAccount"],
-            reason: `Check current connections and pending operations. Use pendingWalletConnections.items[].cardId with ${TOOL_NAMES.sessionGetWalletConnection} or ${TOOL_NAMES.sessionWaitWalletConnection}. If no operation is pending and the user requests connection or account selection, open ${TOOL_NAMES.sessionCreateWalletConnection}. Only the user may act in that card.` } } }) };
+            reason: `Check current connections and pending operations. Use pendingWalletConnections.items[].cardId with ${TOOL_NAMES.sessionGetWalletConnectionCard} or ${TOOL_NAMES.sessionWaitWalletConnectionCard}. If no operation is pending and the user requests connection or account selection, open ${TOOL_NAMES.sessionOpenWalletConnectionCard}. Only the user may act in that card.` } } }) };
     }
     const message = context?.connectionReconciliationRequired ? CONNECTION_RECONCILIATION_MESSAGE + " Provide a Sui address in chat for this public read." : context?.connectionConflict ? CONNECTION_CONFLICT_MESSAGE + " Provide a Sui address in chat for this public read." : availability.status !== "available"
       ? "The wallet connection cannot be checked. Please provide a Sui address in chat to view its assets."

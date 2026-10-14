@@ -15,7 +15,7 @@ async function sdkFixture() {
       metadata: { name: "Recovery integration", description: "Local fixture", url: "https://example.invalid" },
       spawn: () => {
         const child = fork(new URL("./fixtures/walletSdkChild.ts", import.meta.url), [], { execArgv: ["--import", "tsx"], stdio: ["ignore", "ignore", "ignore", "ipc"],
-          env: { ...process.env, FIXTURE_WALLET_RELAY: relay.url } });
+          env: { ...process.env, SUI_MCP_TEST_WALLET_RELAY: relay.url } });
         const send = child.send.bind(child);
         child.send = ((message: { type: string }, callback: (error: Error | null) => void) => { commands.push(message.type); return send(message, callback); }) as ChildProcess["send"];
         children.push(child); return child;

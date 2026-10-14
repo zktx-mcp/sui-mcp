@@ -7,12 +7,12 @@ import { runWalletSdkChild } from "../../src/runtime/walletSdkChildRuntime.js";
 // This fixture entrypoint is excluded from the build and package. It changes
 // the external relay endpoint. Cleanup-race cases additionally order a real
 // storage read after real relay subscription; no SDK method/state is replaced.
-const relayUrl = process.env.FIXTURE_WALLET_RELAY;
+const relayUrl = process.env.SUI_MCP_TEST_WALLET_RELAY;
 if (!relayUrl || !/^ws:\/\/127\.0\.0\.1:[0-9]+$/.test(relayUrl)) throw new Error("Local fixture relay is required");
 globalThis.fetch = async () => { throw new Error("External HTTP is disabled in the wallet SDK fixture"); };
 runWalletSdkChild(({ projectId, dataDirectory, metadata }) => createWalletConnectTransport({ projectId, dataDirectory, metadata,
   initialize: async (options) => {
-    if (process.env.FIXTURE_WALLET_SUBSCRIBED_READ !== "1") return SignClient.init({ ...options, relayUrl });
+    if (process.env.SUI_MCP_TEST_WALLET_SUBSCRIBED_READ !== "1") return SignClient.init({ ...options, relayUrl });
     const original = options?.storage;
     if (!original) throw new Error("Actual SDK storage is required");
     const subscriptions = await original.getItem<unknown[]>("wc@2:core:0.3//subscription");

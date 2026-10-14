@@ -22,7 +22,7 @@ async function setup(kind?: Parameters<typeof seedWalletSdk>[1]) {
     spawn: () => {
       const child = fork(new URL("./fixtures/walletSdkChild.ts", import.meta.url), [], {
         execArgv: ["--import", "tsx"], stdio: ["ignore", "pipe", "pipe", "ipc"],
-        env: { ...process.env, FIXTURE_WALLET_RELAY: relay.url, FIXTURE_WALLET_SUBSCRIBED_READ: kind && kind !== "session" ? "1" : "0" }
+        env: { ...process.env, SUI_MCP_TEST_WALLET_RELAY: relay.url, SUI_MCP_TEST_WALLET_SUBSCRIBED_READ: kind && kind !== "session" ? "1" : "0" }
       });
       children.push(child); child.stdout?.on("data", (chunk: Buffer) => output.push(chunk.toString()));
       child.stderr?.on("data", (chunk: Buffer) => output.push(chunk.toString()));
@@ -86,7 +86,7 @@ it("interrupts an unresponsive real session disconnect at process exit without r
 it("ends the SDK child and releases its lease when its actual parent is killed", async () => {
   const directory = mkdtempSync(join(tmpdir(), "say-sdk-parent-")), relay = await walletRelay();
   const parent = fork(new URL("./fixtures/walletSdkParent.ts", import.meta.url), [], { execArgv: ["--import", "tsx"],
-    stdio: ["ignore", "ignore", "ignore", "ipc"], env: { ...process.env, FIXTURE_WALLET_DIRECTORY: directory, FIXTURE_WALLET_RELAY: relay.url } });
+    stdio: ["ignore", "ignore", "ignore", "ipc"], env: { ...process.env, SUI_MCP_TEST_WALLET_DIRECTORY: directory, SUI_MCP_TEST_WALLET_RELAY: relay.url } });
   const exited = new Promise<void>((resolve) => parent.once("exit", () => resolve()));
   try {
     const report = await new Promise<{ childPid: number }>((resolve) => parent.once("message", (message) => resolve(message as { childPid: number })));
@@ -107,7 +107,7 @@ it("ends the SDK child and releases its lease when its actual parent is killed",
 it("opens a whole committed SDK storage value after killing its writer during repeated native writes", async () => {
   const directory = mkdtempSync(join(tmpdir(), "say-sdk-write-crash-"));
   const writer = fork(new URL("./fixtures/walletStorageWriter.ts", import.meta.url), [], { execArgv: ["--import", "tsx"],
-    stdio: ["ignore", "ignore", "ignore", "ipc"], env: { ...process.env, FIXTURE_WALLET_DIRECTORY: directory } });
+    stdio: ["ignore", "ignore", "ignore", "ipc"], env: { ...process.env, SUI_MCP_TEST_WALLET_DIRECTORY: directory } });
   const exited = new Promise<void>((resolve) => writer.once("exit", () => resolve()));
   try {
     const report = await new Promise<{ committed: number }>((resolve) => writer.once("message", (message) => resolve(message as { committed: number })));

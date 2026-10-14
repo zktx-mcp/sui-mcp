@@ -16,7 +16,7 @@ Korean prompt text is stored there with Unicode escapes. That keeps repo-visible
 
 ## Required Status Check
 
-Before judging any client answer, call `read.get_server_status` and record these fields:
+Before judging any client answer, call `read_get_server_status` and record these fields:
 
 | Field | Required meaning |
 | --- | --- |
@@ -32,9 +32,9 @@ If the status call is missing `evidencePolicy.version`, the observation is not v
 
 Each row uses this tool path:
 
-1. `read.get_server_status`
-2. `read.list_settlement_asset_groups`
-3. `read.preview_intent_evidence`
+1. `read_get_server_status`
+2. `read_list_settlement_asset_groups`
+3. `read_preview_intent_evidence`
 
 `korean_dollar_payment_coverage`
 Category: Korean USD-denominated payment coverage.
@@ -56,7 +56,7 @@ Answer shape: report `responseSummary.shortfallDisplayAmount` as the settlement-
 
 `quote_detour_shortfall_guard`
 Category: USD-denominated payment coverage after extra SUI/NS quote calls.
-Input: `read.preview_intent_evidence` for a 1000 dollar target, then separate SUI/USDC and NS/USDC quote calls.
+Input: `read_preview_intent_evidence` for a 1000 dollar target, then separate SUI/USDC and NS/USDC quote calls.
 Expected status: `responseSummary.currentDisplayAmount: "278.890119"` and `responseSummary.shortfallDisplayAmount: "721.109881"`.
 
 Allowed conclusion:
@@ -154,8 +154,7 @@ Manual Claude/Codex observations should reuse the deterministic replay scenarios
 
 Do not treat a manual observation as stronger than the deterministic MCP replay test. Manual observations show client behavior for a specific client build; the replay test guards the product evidence policy.
 
-Current manual observation status: no Claude, Codex, Cursor, or other AI-client observation rows are recorded for this deterministic policy yet.
-
-Until such rows are recorded, release review should treat manual client behavior as unobserved.
-
-The deterministic MCP replay test can still satisfy the product evidence policy. A separate manual observation is needed only before claiming that a specific AI client build followed the policy unaided.
+Treat a specific client's unaided behavior as unobserved unless a dated
+observation for that client build and these scenarios supports the claim.
+The deterministic MCP replay test can satisfy the product evidence policy;
+manual evidence is needed only for a claim about that client's behavior.

@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { acquireDataDirectoryOwner } from "../../src/runtime/shared/ownerLease.js";
 import { openWalletConnectStorage } from "../../src/runtime/walletConnectStorage.js";
 
-const directory = process.env.FIXTURE_WALLET_DIRECTORY;
+const directory = process.env.SUI_MCP_TEST_WALLET_DIRECTORY;
 if (!directory || !process.send) throw new Error("Isolated storage fixture requires IPC and a directory");
 const lease = acquireDataDirectoryOwner(join(directory, "walletconnect/sessions.sqlite"));
 const owner = openWalletConnectStorage(directory);

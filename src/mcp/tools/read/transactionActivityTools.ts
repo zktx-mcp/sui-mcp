@@ -226,7 +226,7 @@ const suiTransactionAuditFactSchema = z.object({
   requestedAccountEffect: transactionAccountEffectsSchema.optional(),
   transactionContext: requestedAccountTransactionContextSchema.optional(),
   detailLookup: z.object({
-    tool: z.literal("read.inspect_sui_transaction"),
+    tool: z.literal("read_inspect_sui_transaction"),
     digest: z.string()
   })
 });
@@ -250,7 +250,7 @@ const requestedAccountTransactionFactSchema = z.object({
   requestedAccountEffect: transactionAccountEffectsSchema,
   transactionContext: requestedAccountTransactionContextSchema.optional(),
   detailLookup: z.object({
-    tool: z.literal("read.inspect_sui_transaction"),
+    tool: z.literal("read_inspect_sui_transaction"),
     digest: z.string()
   })
 });
@@ -392,7 +392,7 @@ const externalActivityTransactionRecordSchema = z.object({
   compact: externalActivityTransactionCompactFactsSchema.optional(),
   details: externalActivityTransactionDetailSchema.optional(),
   detailLookup: z.object({
-    tool: z.literal("read.inspect_sui_transaction"),
+    tool: z.literal("read_inspect_sui_transaction"),
     digest: z.string()
   }).optional()
 });

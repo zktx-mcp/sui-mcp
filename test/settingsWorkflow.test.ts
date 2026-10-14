@@ -1215,7 +1215,7 @@ it.each(["grpc", "graphql"] as const)("binds %s set/restore preparation to its a
   const override = endpoint === "grpc" ? "https://override.example:9443" : "https://override.example:9443/graphql";
   const requested = endpoint === "grpc" ? "https://requested.example:8443" : "https://requested.example:8443/graphql";
   const verify = vi.fn(async () => {});
-  const f = await fixture({ verifyEndpoint: verify, env: endpoint === "grpc" ? { SUI_GRPC_URL: override } : { SUI_GRAPHQL_URL: override } });
+  const f = await fixture({ verifyEndpoint: verify, env: endpoint === "grpc" ? { SUI_MCP_GRPC_URL: override } : { SUI_MCP_GRAPHQL_URL: override } });
   const key = endpoint === "grpc" ? "suiGrpcUrl" : "suiGraphqlUrl";
   const defaultValue = endpoint === "grpc" ? DEFAULT_SUI_GRPC_URL : DEFAULT_SUI_GRAPHQL_URL;
   const otherBefore = await f.wallet.run(() => endpoint === "grpc" ? f.preferences.getSuiGraphqlUrl() : f.preferences.getSuiGrpcUrl());

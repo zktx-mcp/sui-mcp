@@ -2,7 +2,6 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { noParamsInputSchema, successOutputSchema } from "../../schemas.js";
 import { okToolResult } from "../../result.js";
-import { MCP_PROMPTS } from "../../prompts.js";
 import { MCP_RESOURCES } from "../../resources.js";
 import {
   EVIDENCE_POLICY,
@@ -24,7 +23,7 @@ export const SUPPORTED_PROTOCOLS = [
   { id: "deepbook-margin", status: "mainnet", support: "protocol_notes_only" }
 ] as const;
 
-export function registerServerStatusTools(server: McpServer): void {
+export function registerServerStatusTools(server: McpServer, registeredPromptNames: readonly string[]): void {
   server.registerTool(
     TOOL_NAMES.readGetServerStatus,
     {
@@ -64,7 +63,7 @@ export function registerServerStatusTools(server: McpServer): void {
           count: z.number().int().nonnegative(),
           names: z.array(z.string())
         }),
-        protocolsTool: z.literal("read.list_supported_protocols"),
+        protocolsTool: z.literal("read_list_supported_protocols"),
         limitations: z.array(z.string())
       }),
       annotations: { readOnlyHint: true, openWorldHint: false }
@@ -96,8 +95,8 @@ export function registerServerStatusTools(server: McpServer): void {
           }))
         },
         prompts: {
-          count: MCP_PROMPTS.length,
-          names: MCP_PROMPTS.map((prompt) => prompt.name)
+          count: registeredPromptNames.length,
+          names: [...registeredPromptNames]
         },
         protocolsTool: TOOL_NAMES.readListSupportedProtocols,
         limitations: [...SERVER_LIMITATIONS]

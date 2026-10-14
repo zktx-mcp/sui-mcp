@@ -17,33 +17,33 @@ Source-checkout scripts are not packaged product commands, MCP tools, review-tim
 | Utility | Command / Tool | Status | Notes |
 | --- | --- | --- | --- |
 | DeepBook registry generation | `npm run generate:deepbook-registry` | Implemented | Generates ignored mainnet metadata from `@mysten/deepbook-v3@2.6.4` constants. |
-| MCP server status | `read.get_server_status` | Implemented | Reports package version, evidence policy version, runtime, `implementedToolsCount`, resources, prompts, and implementation limits. |
-| Supported protocol list | `read.list_supported_protocols` | Implemented | Reports product support levels. |
-| DeepBook pool list | `read.list_deepbook_pools` | Implemented | Reads pinned SDK mainnet pool metadata. |
-| DeepBook token list | `read.list_deepbook_tokens` | Implemented | Reads pinned SDK mainnet token metadata, registry pool references, and decimals derived from pinned scalar values. |
-| Orderbook inspection | `read.inspect_deepbook_orderbook` | Implemented | Uses pinned DeepBook SDK simulation read methods over Sui gRPC with an internal sender placeholder; `ticks` is capped at 50. |
-| DeepBook mid price | `read.get_deepbook_mid_price` | Implemented | Returns pinned SDK pool mid price snapshots. Not a global market price. |
-| DeepBook USDC price history | `read.get_deepbook_usdc_price_history` | Implemented | Reads DeepBookV3 official Indexer USDC candle data for a requested official interval. Not a utility script, live quote, USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
-| DeepBook USDC price at time | `read.get_deepbook_usdc_price_at_time` | Implemented | Selects the DeepBookV3 official Indexer USDC candle for or nearest to one target UTC time. Not a utility script, live quote, USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
-| DeepBook USDC candle chart card | `ui.open_chart` | Implemented | Internal read-only MCP Apps card displaying official DeepBookV3 Indexer USDC-denominated candles through the shared server. Shows the selected pool, requested UTC range and candle limit with the saved result. Not a utility script, live feed, wallet connection, trading interface, fiat USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
-| Quote calculation | `read.quote_deepbook_action` | Implemented | Quotes raw integer DeepBook quantities with pinned SDK transaction builders and raw `u64` simulation return values. |
-| Display amount quote | `read.quote_deepbook_display_amount` | Implemented | Converts explicit source display amounts through pinned DeepBook token units before quoting; returns exact decimal display quote strings plus raw quote evidence. Quote semantics mark payment coverage and shortfall contribution unavailable. |
-| DeepBook account inventory | `read.summarize_deepbook_account_inventory` | Implemented | Reports display-like BalanceManager inventory. Not raw balance or signing readiness. |
-| Wallet asset summary | `read.summarize_wallet_assets` | Implemented | Reads Sui coin balances for an explicit address or the active account with Sui gRPC `client.core.listBalances`; adds verified unit/display data when available; use `cursor` when `hasNextPage` is true. |
-| Wallet asset classification | `read.classify_wallet_assets` | Implemented | Classifies returned coin balances by balanceStatus and roles. Other asset classes are explicit non-inspected boundaries. |
-| Settlement asset group list | `read.list_settlement_asset_groups` | Implemented | Lists supported natural-language settlement asset groups derived from pinned DeepBook mainnet SDK registries. Not live liquidity, route recommendation, fiat cash-out, payment execution, or signing readiness. |
-| Intent evidence preview | `read.preview_intent_evidence` | Implemented | Builds `responseSummary` for USD-denominated coverage, shortfall, or settlement-asset balance total. |
-| Review activity list | `read.list_review_activity` | Implemented | Lists local Sui MCP review evidence for one account; not complete wallet transaction history. |
-| Review funnel summary | `read.summarize_review_funnel` | Implemented | Summarizes local review lifecycle counts, current statuses, sparse-sample warnings, and review timing. |
-| Review session detail | `read.get_review_session_detail` | Implemented | Returns a capped detail view of one stored review session with plan, state snapshots, transitions, and execution evidence. |
-| Sui transaction digest lookup | `read.inspect_sui_transaction` | Implemented | Looks up one Sui transaction digest and stores normalized facts only when the transaction sender or a returned balance-change owner matches a known local wallet. |
-| Sui account activity scan | `read.scan_sui_account_activity` | Implemented | Runs a bounded recent-to-older GraphQL scan with requested-account facts. Not complete history. |
-| Live Sui activity scan summary | `read.summarize_sui_activity_scan` | Implemented | Summarizes a live bounded scan without full details. Not P&L, position inventory, or complete history. |
-| Sui sent-function activity scan | `read.scan_sui_function_activity` | Implemented | Scans bounded sent transactions for one full `package::module::function`. Not global function history. |
-| Live Sui sent-function activity summary | `read.summarize_sui_function_activity_scan` | Implemented | Summarizes bounded sent-function rows. Not P&L, route recommendation, or signing readiness. |
-| Stored Sui activity summary | `read.summarize_sui_account_activity` | Implemented | Summarizes stored normalized Sui activity facts, including stored Move call, balance change, object/event, gas, execution error details, and optional protocol activity labels when evidence is available. |
-| Stored account asset timeline | `read.get_account_asset_timeline` | Implemented | Builds stored local account asset net-flow bars and optional DeepBook USDC token-denominated candle references. Not held balances, complete wallet history, USD value, P&L, cost basis, route advice, transaction building, or signing readiness. |
-| Local settings | `settings.create_local_settings_session`, `settings.get_local_settings` | Implemented | MCP opens an internal Settings card or reads settings. App-only preparation/confirmation owns changes, files and explicit connection-service recovery. Stored endpoints apply after all participating apps restart. |
+| MCP server status | `read_get_server_status` | Implemented | Reports package version, evidence policy version, runtime, `implementedToolsCount`, resources, prompts, and implementation limits. |
+| Supported protocol list | `read_list_supported_protocols` | Implemented | Reports product support levels. |
+| DeepBook pool list | `read_list_deepbook_pools` | Implemented | Reads pinned SDK mainnet pool metadata. |
+| DeepBook token list | `read_list_deepbook_tokens` | Implemented | Reads pinned SDK mainnet token metadata, registry pool references, and decimals derived from pinned scalar values. |
+| Orderbook inspection | `read_inspect_deepbook_orderbook` | Implemented | Uses pinned DeepBook SDK simulation read methods over Sui gRPC with an internal sender placeholder; `ticks` is capped at 50. |
+| DeepBook mid price | `read_get_deepbook_mid_price` | Implemented | Returns pinned SDK pool mid price snapshots. Not a global market price. |
+| DeepBook USDC price history | `read_get_deepbook_usdc_price_history` | Implemented | Reads DeepBookV3 official Indexer USDC candle data for a requested official interval. Not a utility script, live quote, USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
+| DeepBook USDC price at time | `read_get_deepbook_usdc_price_at_time` | Implemented | Selects the DeepBookV3 official Indexer USDC candle for or nearest to one target UTC time. Not a utility script, live quote, USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
+| DeepBook USDC candle chart card | `ui_open_chart` | Implemented | Internal read-only MCP Apps card displaying official DeepBookV3 Indexer USDC-denominated candles through the shared server. Shows the selected pool, requested UTC range and candle limit with the saved result. Not a utility script, live feed, wallet connection, trading interface, fiat USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
+| Quote calculation | `read_quote_deepbook_action` | Implemented | Quotes raw integer DeepBook quantities with pinned SDK transaction builders and raw `u64` simulation return values. |
+| Display amount quote | `read_quote_deepbook_display_amount` | Implemented | Converts explicit source display amounts through pinned DeepBook token units before quoting; returns exact decimal display quote strings plus raw quote evidence. Quote semantics mark payment coverage and shortfall contribution unavailable. |
+| DeepBook account inventory | `read_summarize_deepbook_account_inventory` | Implemented | Reports display-like BalanceManager inventory. Not raw balance or signing readiness. |
+| Wallet asset summary | `read_summarize_wallet_assets` | Implemented | Reads Sui coin balances for an explicit address or the active account with Sui gRPC `client.core.listBalances`; adds verified unit/display data when available; use `cursor` when `hasNextPage` is true. |
+| Wallet asset classification | `read_classify_wallet_assets` | Implemented | Classifies returned coin balances by balanceStatus and roles. Other asset classes are explicit non-inspected boundaries. |
+| Settlement asset group list | `read_list_settlement_asset_groups` | Implemented | Lists supported natural-language settlement asset groups derived from pinned DeepBook mainnet SDK registries. Not live liquidity, route recommendation, fiat cash-out, payment execution, or signing readiness. |
+| Intent evidence preview | `read_preview_intent_evidence` | Implemented | Builds `responseSummary` for USD-denominated coverage, shortfall, or settlement-asset balance total. |
+| Review activity list | `read_list_review_activity` | Implemented | Lists local Sui MCP review evidence for one account; not complete wallet transaction history. |
+| Review funnel summary | `read_summarize_review_funnel` | Implemented | Summarizes local review lifecycle counts, current statuses, sparse-sample warnings, and review timing. |
+| Review session detail | `read_get_review_session_detail` | Implemented | Returns a capped detail view of one stored review session with plan, state snapshots, transitions, and execution evidence. |
+| Sui transaction digest lookup | `read_inspect_sui_transaction` | Implemented | Looks up one Sui transaction digest and stores normalized facts only when the transaction sender or a returned balance-change owner matches a known local wallet. |
+| Sui account activity scan | `read_scan_sui_account_activity` | Implemented | Runs a bounded recent-to-older GraphQL scan with requested-account facts. Not complete history. |
+| Live Sui activity scan summary | `read_summarize_sui_activity_scan` | Implemented | Summarizes a live bounded scan without full details. Not P&L, position inventory, or complete history. |
+| Sui sent-function activity scan | `read_scan_sui_function_activity` | Implemented | Scans bounded sent transactions for one full `package::module::function`. Not global function history. |
+| Live Sui sent-function activity summary | `read_summarize_sui_function_activity_scan` | Implemented | Summarizes bounded sent-function rows. Not P&L, route recommendation, or signing readiness. |
+| Stored Sui activity summary | `read_summarize_sui_account_activity` | Implemented | Summarizes stored normalized Sui activity facts, including stored Move call, balance change, object/event, gas, execution error details, and optional protocol activity labels when evidence is available. |
+| Stored account asset timeline | `read_get_account_asset_timeline` | Implemented | Builds stored local account asset net-flow bars and optional DeepBook USDC token-denominated candle references. Not held balances, complete wallet history, USD value, P&L, cost basis, route advice, transaction building, or signing readiness. |
+| Local settings | `settings_create_local_settings_session`, `settings_get_local_settings` | Implemented | MCP opens an internal Settings card or reads settings. App-only preparation/confirmation owns changes, files and explicit connection-service recovery. Stored endpoints apply after all participating apps restart. |
 | Release package check | `npm run release:check` | Maintainer, source checkout | Verifies metadata, tests/build, tarball assets/licenses and installed MCP/Settings startup. Requires network and loopback access; no wallet pairing, signing or publishing. |
 | Mainnet read smoke | `npm run smoke:mainnet` | Manual | Runs selected mainnet read paths from built `dist/`. Build first. Not part of CI or `release:check`; see notes below. |
 | Sui GraphQL function filter probe | `npm exec -- tsx scripts/sui-graphql-function-filter-probe.ts [--endpoint <mainnet-graphql-url>] [--sample-size <1-50>] [--timeout-ms <ms>]` | Manual, source evidence only | Runs a read-only Sui mainnet GraphQL source-shape probe for function-filter diagnostics; see notes below. |
@@ -58,7 +58,7 @@ installation, local loopback sockets, and reachable Sui mainnet endpoints are
 required. Native SQLite must work both in the checkout and the installed package.
 The source build and tests use Vite, Rolldown and Vitest's common Node ranges; the
 installed package's Node runtime requirement is documented in MCP Setup.
-The runtime uses its built-in endpoints unless `SUI_GRPC_URL` or `SUI_GRAPHQL_URL`
+The runtime uses its built-in endpoints unless `SUI_MCP_GRPC_URL` or `SUI_MCP_GRAPHQL_URL`
 is supplied; the actual mainnet checks remain enabled.
 
 The command checks metadata, types, tests, builds, package contents and licenses,
@@ -105,23 +105,23 @@ original workflow revision, so changes to this gate apply to subsequent releases
 This is a manual maintainer check for a specific mainnet provider. Normal quickstart use does not require Sui endpoint setup. Run it for people operating releases or debugging mainnet read shape.
 
 ```bash
-export SUI_GRPC_URL="https://fullnode.mainnet.sui.io:443"
-export SUI_GRAPHQL_URL="https://graphql.mainnet.sui.io/graphql" # optional override; default is the built-in mainnet GraphQL endpoint
-export SMOKE_SUI_ADDRESS="0x..."
-export SMOKE_DEEPBOOK_POOL_KEY="DEEP_SUI"
-export SMOKE_QUOTE_AMOUNT="1000000000" # raw integer units; for SUI, 1000000000 = 1 SUI
-# Optional: export SMOKE_INSPECT_DIGEST="..."
-# Optional: export SMOKE_INSPECT_RANDOM_LATEST="true"
+export SUI_MCP_GRPC_URL="https://fullnode.mainnet.sui.io:443"
+export SUI_MCP_GRAPHQL_URL="https://graphql.mainnet.sui.io/graphql" # optional override; default is the built-in mainnet GraphQL endpoint
+export SUI_MCP_SMOKE_ADDRESS="0x..."
+export SUI_MCP_SMOKE_DEEPBOOK_POOL_KEY="DEEP_SUI"
+export SUI_MCP_SMOKE_QUOTE_AMOUNT="1000000000" # raw integer units; for SUI, 1000000000 = 1 SUI
+# Optional: export SUI_MCP_SMOKE_INSPECT_DIGEST="..."
+# Optional: export SUI_MCP_SMOKE_INSPECT_RANDOM_LATEST="true"
 npm run build
 npm run smoke:mainnet
 ```
 
-`SUI_GRPC_URL` must be only scheme, host, and explicit port. Do not include credentials, a path, query string, or fragment.
-`SMOKE_SUI_ADDRESS` must be a 32-byte hex Sui address, for example `0x` followed by 64 hex characters.
-`SMOKE_INSPECT_DIGEST` is optional. Use a digest whose sender or returned balance-change owner is `SMOKE_SUI_ADDRESS` to exercise the stored digest-lookup path; otherwise the lookup can still return `ok` with `persistence.stored: false`.
-`SMOKE_INSPECT_RANDOM_LATEST=true` is optional and only used when `SMOKE_INSPECT_DIGEST` is unset. It samples one digest from the latest GraphQL transaction page and calls `read.inspect_sui_transaction` without passing the smoke address. This checks current transaction-read shape without pinning a specific user address or exercising the stored relation path.
+`SUI_MCP_GRPC_URL` must be only scheme, host, and explicit port. Do not include credentials, a path, query string, or fragment.
+`SUI_MCP_SMOKE_ADDRESS` must be a 32-byte hex Sui address, for example `0x` followed by 64 hex characters.
+`SUI_MCP_SMOKE_INSPECT_DIGEST` is optional. Use a digest whose sender or returned balance-change owner is `SUI_MCP_SMOKE_ADDRESS` to exercise the stored digest-lookup path; otherwise the lookup can still return `ok` with `persistence.stored: false`.
+`SUI_MCP_SMOKE_INSPECT_RANDOM_LATEST=true` is optional and only used when `SUI_MCP_SMOKE_INSPECT_DIGEST` is unset. It samples one digest from the latest GraphQL transaction page and calls `read_inspect_sui_transaction` without passing the smoke address. This checks current transaction-read shape without pinning a specific user address or exercising the stored relation path.
 
-DeepBook orderbook and raw-quantity quote reads use an internal mainnet SDK simulation sender placeholder, not a user's wallet. The display-amount quote path is covered by automated tests, not by this smoke script. This smoke script does not exercise account-bound DeepBook transaction-material build or digest binding; that path needs a separate funded-account material-build smoke before smoke results are treated as product-grade proof for that review stage.
+DeepBook orderbook and raw-quantity quote reads use an internal mainnet SDK simulation sender placeholder, not a user's wallet. The display-amount quote path is covered by automated tests, not by this smoke script. Without the complete optional swap input group, the script does not run account-bound transaction-material computation or digest binding. See Optional account-bound review smoke for that explicit path; read-only success is not evidence that it ran.
 
 Wallet and activity reads use an explicitly synthetic active-account context in a temporary SQLite database. The script never creates a wallet connection, a review URL or an HTTP wallet result. Wallet approval is checked separately. This smoke script does not record raw GraphQL payloads, transaction bytes, signatures, raw transaction details, or compact transaction aggregates.
 
@@ -134,10 +134,10 @@ The smoke command calls:
 - wallet assets;
 - DeepBook orderbook;
 - raw-quantity DeepBook quote;
-- `read.scan_sui_account_activity` for `SMOKE_SUI_ADDRESS` with limit 5;
-- `read.summarize_sui_activity_scan` through active account context with limit 5;
-- `read.inspect_sui_transaction` when `SMOKE_INSPECT_DIGEST` is set;
-- sent-function activity tools when `SMOKE_FUNCTION_TARGET` is set to a full `package::module::function`.
+- `read_scan_sui_account_activity` for `SUI_MCP_SMOKE_ADDRESS` with limit 5;
+- `read_summarize_sui_activity_scan` through active account context with limit 5;
+- `read_inspect_sui_transaction` when `SUI_MCP_SMOKE_INSPECT_DIGEST` is set;
+- sent-function activity tools when `SUI_MCP_SMOKE_FUNCTION_TARGET` is set to a full `package::module::function`.
 
 Empty activity pages are valid smoke outcomes. They are recorded with `rowCount: 0` and `emptyAccepted: true`.
 
@@ -145,15 +145,15 @@ The result file records tool names, environment-variable presence, activity stat
 
 It does not store raw GraphQL payloads, transaction bytes, signatures, raw transaction details, or compact transaction aggregates.
 
-Activity scan and summary smoke paths fail if full transaction details or compact transaction aggregates are returned. The optional digest verifies storage only when its sender or returned balance-change owner is `SMOKE_SUI_ADDRESS`.
+Activity scan and summary smoke paths fail if full transaction details or compact transaction aggregates are returned. The optional digest verifies storage only when its sender or returned balance-change owner is `SUI_MCP_SMOKE_ADDRESS`.
 
-If `SMOKE_INSPECT_RANDOM_LATEST=true` is set and no digest is provided, the script samples one latest GraphQL transaction digest and inspects it without an account argument.
+If `SUI_MCP_SMOKE_INSPECT_RANDOM_LATEST=true` is set and no digest is provided, the script samples one latest GraphQL transaction digest and inspects it without an account argument.
 
-This smoke path does not call display-amount quote, DeepBook account inventory,
-account-bound DeepBook transaction-material build, or internal digest binding. A
-funded-account material-build smoke is a separate operator check before this
-read smoke can be used as product-grade proof for the DeepBook review material
-stage.
+The default read path does not call display-amount quote or DeepBook account
+inventory. Account-bound review computation is separate within the same utility
+and runs only for the complete explicit swap input group. Use its recorded
+status and evidence stages rather than treating read-path success as material
+verification or wallet acceptance.
 
 ## Sui GraphQL Function Filter Probe Notes
 
@@ -228,11 +228,11 @@ It is not an MCP tool, not a CI check, not packaged product functionality, not r
 - DeepBook mid-price outputs are pool snapshots. For `SUI_USDC`, the price is USDC per SUI.
 - DeepBook mid prices are not fiat USD cash-out estimates, external market lookups, USDC/USD peg assumptions, effective quote prices, quote-vs-mid slippage, price-impact calculations, venue comparisons, best-route claims, P&L, cost basis, or route recommendations.
 - DeepBook USDC price-history output reads DeepBookV3 official Indexer candle data for the requested official interval. It is MCP tool evidence, not a source-checkout utility, on-demand chain-history scan, live quote, historical mid price, global market price, USD value, user-account history, P&L, cost basis, route recommendation, transaction-building input, or signing-readiness signal.
-- `ui.open_chart` opens an internal read-only DeepBook USDC candle card. The server queries the official Indexer; the view does not fetch it directly. This is not a utility script, persistent price database, auto-refresh feed, live quote, trading interface, fiat USD value, user-account history, P&L, cost basis, route recommendation, transaction-building input or signing-readiness signal.
+- `ui_open_chart` opens an internal read-only DeepBook USDC candle card. The server queries the official Indexer; the view does not fetch it directly. This is not a utility script, persistent price database, auto-refresh feed, live quote, trading interface, fiat USD value, user-account history, P&L, cost basis, route recommendation, transaction-building input or signing-readiness signal.
 - USDC in DeepBook USDC price-history output is a token-denominated quote asset, not fiat USD and not a USDC/USD peg guarantee.
-- `read.quote_deepbook_action` amounts are raw integer quantities that fit the SDK `u64` quote input, not decimal display amounts. Quote responses include `rawQuote.kind: "deepbook_quote_raw_u64"` from simulated raw `u64` return values.
+- `read_quote_deepbook_action` amounts are raw integer quantities that fit the SDK `u64` quote input, not decimal display amounts. Quote responses include `rawQuote.kind: "deepbook_quote_raw_u64"` from simulated raw `u64` return values.
 - `rawQuote.sourceMoveFunction` names the simulated public entrypoint. `rawQuote.returnValueSourceMoveFunction: "pool::get_quantity_out"` names the official Move function that defines the return-value order.
-- `read.quote_deepbook_display_amount` accepts only source-side display input amounts that convert to SDK `u64` quote inputs.
+- `read_quote_deepbook_display_amount` accepts only source-side display input amounts that convert to SDK `u64` quote inputs.
 - Display quote public `quote` fields are exact decimal display strings derived from raw evidence. `rawQuote.directionalOutput.raw` is the direction-specific quote output before slippage policy.
 - Quote `quantitySemantics` marks payment coverage, shortfall contribution, and route-dependent payment support unavailable and points coverage questions back to intent evidence.
 - DeepBook account inventory quantities are display-like SDK `number` values and must not be used as raw amounts, funding sources, route liquidity, withdrawal readiness, transaction-building inputs, signing data, or signing readiness.
@@ -252,10 +252,10 @@ It is not an MCP tool, not a CI check, not packaged product functionality, not r
 - Gas display facts, when returned, use `@mysten/sui MIST_PER_SUI`.
 - Optional protocol activity labels are derived from normalized detail facts and are not a supported-protocol list or wallet position inventory.
 - Sent-function activity tools are sender-scoped only: they report transactions the selected account sent that called one full `package::module::function`, not recipient-only activity, affected-object history, or global function history.
-- `read.summarize_sui_activity_scan` and `read.summarize_sui_function_activity_scan` summarize live bounded scan results. `read.summarize_sui_account_activity` summarizes stored local SQLite facts only.
+- `read_summarize_sui_activity_scan` and `read_summarize_sui_function_activity_scan` summarize live bounded scan results. `read_summarize_sui_account_activity` summarizes stored local SQLite facts only.
 - Sui GraphQL function filter probe output is source-shape evidence for function-filter diagnostics only.
 - Do not treat the probe as a supported function diagnostics surface, complete dApp history, route quality evidence, wallet position inventory, transaction-building input, signing data, or signing readiness.
-- Sui CLI transaction diagnostics can be compared with `read.inspect_sui_transaction` only at the fact category level.
+- Sui CLI transaction diagnostics can be compared with `read_inspect_sui_transaction` only at the fact category level.
 - Comparable categories include digest/status/checkpoint/timestamp, Move call targets, object ids/types, event type strings, raw gas summary, and optional replay/trace-derived debug artifacts.
 - Sui CLI transaction diagnostics are debug cross-check sources, not replacements for MCP normalized transaction facts and not review-time simulation.
 - Sui CLI transaction diagnostics are source-checkout debug utilities only. They must stay allowlisted and read/debug-only.
@@ -266,10 +266,10 @@ It is not an MCP tool, not a CI check, not packaged product functionality, not r
 
 ### Optional account-bound review smoke
 
-Set `SMOKE_SWAP_PROTOCOL`, `SMOKE_SWAP_FROM_SYMBOL`, `SMOKE_SWAP_TO_SYMBOL` and
-`SMOKE_SWAP_AMOUNT_DISPLAY` together to opt into read-only account-bound review
+Set `SUI_MCP_SMOKE_SWAP_PROTOCOL`, `SUI_MCP_SMOKE_SWAP_FROM_SYMBOL`, `SUI_MCP_SMOKE_SWAP_TO_SYMBOL` and
+`SUI_MCP_SMOKE_SWAP_AMOUNT_DISPLAY` together to opt into read-only account-bound review
 computation. Protocol is explicitly `deep`; the smoke does not silently select a protocol.
-A partially configured group is an error. `SMOKE_SWAP_MAX_SLIPPAGE_BPS` keeps the
+A partially configured group is an error. `SUI_MCP_SMOKE_SWAP_MAX_SLIPPAGE_BPS` keeps the
 existing explicit override. The script uses the same runtime review composition,
 material store and evidence validation as the product, and records whether
 transaction review data was emitted. This can involve mainnet simulation but

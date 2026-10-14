@@ -18,7 +18,7 @@ it("ends a held real SDK disconnect on service loss without replay or a card res
       metadata: { name: "Integration fixture", description: "Actual SDK on an isolated relay", url: "https://example.invalid" },
       spawn: () => {
         const child = fork(new URL("./fixtures/walletSdkChild.ts", import.meta.url), [], { execArgv: ["--import", "tsx"],
-          stdio: ["ignore", "ignore", "ignore", "ipc"], env: { ...process.env, FIXTURE_WALLET_RELAY: relay.url } });
+          stdio: ["ignore", "ignore", "ignore", "ipc"], env: { ...process.env, SUI_MCP_TEST_WALLET_RELAY: relay.url } });
         const send = child.send.bind(child);
         child.send = ((message: WalletCommand, callback: (error: Error | null) => void) => {
           commands.push(message.type); return send(message, callback);
@@ -67,7 +67,7 @@ it.each([false, true])("validates real SDK signing across IPC (wrong signer=%s)"
       metadata: { name: "Signing fixture", description: "Independent wallet key", url: "https://example.invalid" },
       spawn: () => {
         const child = fork(new URL("./fixtures/walletSdkChild.ts", import.meta.url), [], { execArgv: ["--import", "tsx"],
-          stdio: ["ignore", "pipe", "pipe", "ipc"], env: { ...process.env, FIXTURE_WALLET_RELAY: relay.url } });
+          stdio: ["ignore", "pipe", "pipe", "ipc"], env: { ...process.env, SUI_MCP_TEST_WALLET_RELAY: relay.url } });
         child.stdout!.on("data", (chunk: Buffer) => output.push(chunk.toString()));
         child.stderr!.on("data", (chunk: Buffer) => output.push(chunk.toString()));
         const send = child.send.bind(child);

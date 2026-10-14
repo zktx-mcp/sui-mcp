@@ -510,6 +510,10 @@ describe("MCP discoverability", () => {
         "swap",
         "swap-deep"
       ]);
+      const status = await client.callTool({ name: TOOL_NAMES.readGetServerStatus });
+      const catalog = (status.structuredContent as { data: { prompts: { count: number; names: string[] } } }).data.prompts;
+      expect(catalog.count).toBe(4);
+      expect([...catalog.names].sort()).toEqual(result.prompts.map((prompt) => prompt.name).sort());
       // Adapter prompt surfaces take exactly one free-text intent argument;
       // the static prompts stay zero-argument. No prompt claims signing
       // support.
@@ -532,7 +536,7 @@ describe("MCP discoverability", () => {
         .map((message) => (message.content.type === "text" ? message.content.text : ""))
         .join("\n");
       expect(surfaceText).toContain('intent: "10 sui to usdc"');
-      expect(surfaceText).toContain("action.prepare_sui_action_review");
+      expect(surfaceText).toContain("action_start_review");
       expect(surfaceText).toContain("never contains signing data, transaction bytes, or signing readiness");
       expect(surfaceText).toContain("request status is separate from server-verified chain execution facts");
 
@@ -635,7 +639,7 @@ describe("MCP discoverability", () => {
           TOOL_NAMES.readPreviewIntentEvidence,
           TOOL_NAMES.settingsCreateLocalSettingsSession,
           TOOL_NAMES.settingsGetLocalSettings,
-          TOOL_NAMES.sessionWaitWalletConnection,
+          TOOL_NAMES.sessionWaitWalletConnectionCard,
           TOOL_NAMES.sessionGetInteractionStatus,
           TOOL_NAMES.sessionWaitExecutionResult,
         ])
@@ -678,9 +682,9 @@ describe("MCP discoverability", () => {
       const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 
       for (const toolName of [
-        TOOL_NAMES.sessionCreateWalletConnection,
-        TOOL_NAMES.sessionGetWalletConnection,
-        TOOL_NAMES.sessionWaitWalletConnection,
+        TOOL_NAMES.sessionOpenWalletConnectionCard,
+        TOOL_NAMES.sessionGetWalletConnectionCard,
+        TOOL_NAMES.sessionWaitWalletConnectionCard,
         TOOL_NAMES.sessionGetInteractionStatus,
         TOOL_NAMES.sessionGetReviewStatus,
         TOOL_NAMES.sessionGetExecutionResult,
@@ -742,7 +746,7 @@ describe("MCP discoverability", () => {
       cards: { store: f.cards }, workflow: f.wallet.workflow });
     try {
       const tools = await client.listTools();
-      const settingsTools = tools.tools.filter((tool) => tool.name.startsWith("settings."));
+      const settingsTools = tools.tools.filter((tool) => tool.name.startsWith("settings_"));
       expect(settingsTools.map((tool) => tool.name).sort()).toEqual([
         TOOL_NAMES.settingsCreateLocalSettingsSession,
         TOOL_NAMES.settingsGetLocalSettings
@@ -783,7 +787,7 @@ describe("MCP discoverability", () => {
   it("reports env-overridden local settings metadata through MCP", async () => {
     const { client, server } = await connectTestClient({
       localSettings: await createDefaultLocalSettings({
-        env: { SUI_GRPC_URL: "https://override.sui.provider:9443" }
+        env: { SUI_MCP_GRPC_URL: "https://override.sui.provider:9443" }
       })
     });
     try {
@@ -1408,7 +1412,7 @@ describe("MCP discoverability", () => {
             canUseForPaymentAnswer: false,
             canUseForShortfallAnswer: false,
             doNotCombineWithPaymentAnswer: true,
-            requiredPaymentAnswerTool: "read.preview_intent_evidence",
+            requiredPaymentAnswerTool: "read_preview_intent_evidence",
             paymentAnswerUseBlockedReason: "quote_output_is_price_reference_not_payment_answer",
             requiredPaymentAnswerField: "responseSummary",
             fiatUsdCashOutAvailable: false,
@@ -2952,7 +2956,7 @@ describe("MCP discoverability", () => {
     const { client, server } = await connectTestClient();
     try {
       const result = await client.callTool({
-        name: TOOL_NAMES.actionPrepareSuiActionReview,
+        name: TOOL_NAMES.actionStartReview,
         arguments: {
           intent: {
             type: "swap",
@@ -3303,7 +3307,7 @@ describe("MCP discoverability", () => {
           arguments: { reviewSessionId: "review", timeoutMs: 1 }
         },
         {
-          name: TOOL_NAMES.actionPrepareSuiActionReview,
+          name: TOOL_NAMES.actionStartReview,
           arguments: {
             intent: {
               type: "swap",
@@ -3315,7 +3319,7 @@ describe("MCP discoverability", () => {
           }
         },
         {
-          name: TOOL_NAMES.actionPrepareExternalProposalReview,
+          name: TOOL_NAMES.actionCreateProposalReview,
           arguments: {
             proposal: {
               type: "payment",

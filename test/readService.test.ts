@@ -405,7 +405,7 @@ describe("SuiReadService", () => {
         ]),
         answerFields: expect.arrayContaining(["balances[].display"]),
         followUp: {
-          tool: "read.preview_intent_evidence",
+          tool: "read_preview_intent_evidence",
           inputFields: ["account"],
           answerFields: ["responseSummary"]
         }
@@ -564,7 +564,7 @@ describe("SuiReadService", () => {
         ]),
         answerFields: expect.arrayContaining(["classifiedAssets[].classification"]),
         followUp: {
-          tool: "read.preview_intent_evidence",
+          tool: "read_preview_intent_evidence",
           inputFields: ["account"],
           answerFields: ["responseSummary"]
         }
@@ -1275,7 +1275,7 @@ describe("SuiReadService", () => {
       canUseForPaymentAnswer: false,
       canUseForShortfallAnswer: false,
       doNotCombineWithPaymentAnswer: true,
-      requiredPaymentAnswerTool: "read.preview_intent_evidence",
+      requiredPaymentAnswerTool: "read_preview_intent_evidence",
       paymentAnswerUseBlockedReason: "quote_output_is_price_reference_not_payment_answer",
       requiredPaymentAnswerField: "responseSummary"
     });
@@ -1287,7 +1287,7 @@ describe("SuiReadService", () => {
       canUseForPaymentAnswer: false,
       canUseForShortfallAnswer: false,
       doNotCombineWithPaymentAnswer: true,
-      requiredPaymentAnswerTool: "read.preview_intent_evidence",
+      requiredPaymentAnswerTool: "read_preview_intent_evidence",
       paymentAnswerUseBlockedReason: "quote_output_is_price_reference_not_payment_answer",
       requiredPaymentAnswerField: "responseSummary"
     });
@@ -2124,7 +2124,7 @@ describe("SuiReadService", () => {
         ]),
         answerFields: expect.arrayContaining(["price", "fetchedAt"]),
         followUp: {
-          tool: "read.preview_intent_evidence",
+          tool: "read_preview_intent_evidence",
           answerFields: ["responseSummary"]
         }
       },
@@ -2576,7 +2576,7 @@ describe("SuiReadService", () => {
         cannotAnswer: expect.arrayContaining(["payment_coverage", "payment_shortfall"]),
         answerFields: expect.arrayContaining(["quote.quoteOut", "rawQuote.directionalOutput"]),
         followUp: {
-          tool: "read.preview_intent_evidence",
+          tool: "read_preview_intent_evidence",
           answerFields: ["responseSummary"]
         }
       },
@@ -2591,7 +2591,7 @@ describe("SuiReadService", () => {
         canUseForPaymentAnswer: false,
         canUseForShortfallAnswer: false,
         doNotCombineWithPaymentAnswer: true,
-        requiredPaymentAnswerTool: "read.preview_intent_evidence",
+        requiredPaymentAnswerTool: "read_preview_intent_evidence",
         paymentAnswerUseBlockedReason: "quote_output_is_price_reference_not_payment_answer",
         requiredPaymentAnswerField: "responseSummary"
       }
@@ -2778,7 +2778,7 @@ describe("SuiReadService", () => {
         cannotAnswer: expect.arrayContaining(["payment_coverage", "payment_shortfall", "final_min_out"]),
         answerFields: expect.arrayContaining(["inputAmount", "quote.quoteOut"]),
         followUp: {
-          tool: "read.preview_intent_evidence",
+          tool: "read_preview_intent_evidence",
           answerFields: ["responseSummary"]
         }
       },
@@ -2822,7 +2822,7 @@ describe("SuiReadService", () => {
         canUseForPaymentAnswer: false,
         canUseForShortfallAnswer: false,
         doNotCombineWithPaymentAnswer: true,
-        requiredPaymentAnswerTool: "read.preview_intent_evidence",
+        requiredPaymentAnswerTool: "read_preview_intent_evidence",
         paymentAnswerUseBlockedReason: "quote_output_is_price_reference_not_payment_answer",
         requiredPaymentAnswerField: "responseSummary",
         fiatUsdCashOutAvailable: false,
@@ -2997,7 +2997,7 @@ describe("SuiReadService", () => {
         preconditionFields: ["detailStatus"],
         answerFields: expect.arrayContaining(["managerAddresses", "detailStatus"]),
         followUp: {
-          tool: "read.summarize_wallet_assets",
+          tool: "read_summarize_wallet_assets",
           answerFields: ["balances"]
         }
       },

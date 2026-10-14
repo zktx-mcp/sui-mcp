@@ -278,8 +278,8 @@ relabeled stream produced by `applyContractNamesToMermaid`
 (`@deepbook/core`; the Sui framework `std`/`sui`/`sui_system`) and well-known
 objects (`SuiSystemState`, `Clock`, `Random`, `DenyList`, `CoinRegistry`,
 `AccumulatorRoot`) while keeping the raw addresses available. These names are a
-display label, not a safety, ownership, or trust signal, and the on-chain Move
-Registry name is not yet verified on chain.
+display label, not a safety, ownership, or trust signal, and the renderer does not perform a fresh Move Registry lookup or verify
+current package identity from a display label.
 
 ## Adapter Registration And Stage Vocabulary
 
@@ -390,7 +390,7 @@ Different gas owners, sponsor withdrawals, unsupported reservation formats, and
 unverified funding remain blocked. Supported adapters still require the same quote,
 amount, ownership, human review, simulation, wallet approval, and digest checks.
 
-New review evidence names `client.transactionExecutionService.simulateTransaction`
-as its provider. The previous `client.core.simulateTransaction` provider remains
-parseable in stored public history; it is not a fallback for new reviews. Returned
-BCS is compared privately and is never added to evidence, cards, backups or logs.
+The current review producer uses `client.transactionExecutionService.simulateTransaction`.
+A stored public record identifies the provider that produced its evidence; reading
+that record does not select a simulation fallback or create new funding proof.
+Returned BCS is compared privately and is never added to evidence, cards, backups or logs.

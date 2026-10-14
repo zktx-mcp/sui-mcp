@@ -109,7 +109,7 @@ process.stdin.on("data", chunk => {
           name: mode === "name_mismatch" ? "fixture" : "sui-mcp",
           version: mode === "version_mismatch" ? "unexpected-fixture-version" : version
         } } };
-    } else if (request.method === "tools/call" && request.params.name === "read.get_server_status") {
+    } else if (request.method === "tools/call" && request.params.name === "read_get_server_status") {
       response = { result: { content: [], structuredContent: { ok: true, data: {
         packageName: "@fixture/other-package", version, serverName: "sui-mcp", network: "mainnet"
       } } } };

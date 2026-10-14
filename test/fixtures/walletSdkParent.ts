@@ -1,7 +1,7 @@
 import { fork } from "node:child_process";
 import { WalletSdkProcess } from "../../src/runtime/walletSdkProcess.js";
 
-const directory = process.env.FIXTURE_WALLET_DIRECTORY;
+const directory = process.env.SUI_MCP_TEST_WALLET_DIRECTORY;
 if (!directory || !process.send) throw new Error("Isolated parent fixture requires IPC and a directory");
 let childPid: number | undefined;
 const runtime = new WalletSdkProcess({ dataDirectory: directory, projectId: "0".repeat(32),

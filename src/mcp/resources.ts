@@ -45,7 +45,7 @@ export const MCP_RESOURCES = [
     name: "deepbook-v3",
     uri: "suimcp://protocols/deepbook-v3",
     title: "DeepBookV3",
-    description: "Protocol reference only; use MCP tool responses and read.list_supported_protocols for current support.",
+    description: "Protocol reference only; use MCP tool responses and read_list_supported_protocols for current support.",
     path: "protocols/deepbook-v3.md"
   },
   {

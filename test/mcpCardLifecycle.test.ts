@@ -532,7 +532,7 @@ it.each(["success", "failure"] as const)("the actual Connect view observes a del
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport); await client.connect(clientTransport);
   const call = (request: { name: string; arguments: Record<string, unknown> }) => f.run(async () => CallToolResultSchema.parse(await client.callTool(request)));
-  const created = await call({ name: TOOL_NAMES.sessionCreateWalletConnection, arguments: {} });
+  const created = await call({ name: TOOL_NAMES.sessionOpenWalletConnectionCard, arguments: {} });
   try {
     const first = host(call); startCard("connect", connectRenderer); first.ontoolresult!(created);
     await vi.waitFor(() => expect(root.querySelectorAll("button").find((button) => button.dataset.cardAction === "disconnect")?.disabled).toBe(false));
@@ -4725,7 +4725,7 @@ it.each(["grpc", "graphql"] as const)("shows the exact %s restore target and cap
   const previous = endpoint === "grpc" ? "https://previous.example:8443" : "https://previous.example:8443/graphql";
   const target = endpoint === "grpc" ? "https://fullnode.mainnet.sui.io:443" : "https://graphql.mainnet.sui.io/graphql";
   const label = endpoint === "grpc" ? "Sui node (gRPC)" : "Activity data (GraphQL)";
-  const f = await settingsWorkflowFixture({ env: endpoint === "grpc" ? { SUI_GRPC_URL: override } : { SUI_GRAPHQL_URL: override } });
+  const f = await settingsWorkflowFixture({ env: endpoint === "grpc" ? { SUI_MCP_GRPC_URL: override } : { SUI_MCP_GRAPHQL_URL: override } });
   try {
     await f.wallet.run(() => endpoint === "grpc" ? f.preferences.setSuiGrpcUrl(previous) : f.preferences.setSuiGraphqlUrl(previous));
     const card = await f.prepare({ kind: "restore_endpoint", endpoint });

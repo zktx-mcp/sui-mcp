@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { build } from "vite";
+import { PRODUCT_DISPLAY_NAME } from "../src/mcp/serverInfo.js";
 
 const root = process.cwd();
 const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string };
@@ -87,7 +88,7 @@ for (const kind of ["account", "receipt", "chart", "connect", "review", "setting
   }
   const licenseText = await notices(Object.keys(script.modules));
   const escape = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sui MCP</title><style>${css.replaceAll("</style", "<\\/style")}</style></head><body><main id="app" aria-live="polite"></main><template id="dependency-notices">${escape(licenseText)}</template><script type="module">${script.code.replaceAll("</script", "<\\/script")}</script></body></html>`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(PRODUCT_DISPLAY_NAME)}</title><style>${css.replaceAll("</style", "<\\/style")}</style></head><body><main id="app" aria-live="polite"></main><template id="dependency-notices">${escape(licenseText)}</template><script type="module">${script.code.replaceAll("</script", "<\\/script")}</script></body></html>`;
   await writeFile(join(outDir, `${kind}.html`), html);
   await writeFile(join(outDir, `${kind}.notices.txt`), licenseText);
 }

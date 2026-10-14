@@ -569,7 +569,7 @@ describe("intent evidence scenario replay", () => {
         canUseForPaymentAnswer: false,
         canUseForShortfallAnswer: false,
         doNotCombineWithPaymentAnswer: true,
-        requiredPaymentAnswerTool: "read.preview_intent_evidence",
+        requiredPaymentAnswerTool: "read_preview_intent_evidence",
         paymentAnswerUseBlockedReason: "quote_output_is_price_reference_not_payment_answer",
         requiredPaymentAnswerField: "responseSummary"
       });
@@ -586,7 +586,7 @@ describe("intent evidence scenario replay", () => {
         canUseForPaymentAnswer: false,
         canUseForShortfallAnswer: false,
         doNotCombineWithPaymentAnswer: true,
-        requiredPaymentAnswerTool: "read.preview_intent_evidence",
+        requiredPaymentAnswerTool: "read_preview_intent_evidence",
         paymentAnswerUseBlockedReason: "quote_output_is_price_reference_not_payment_answer",
         requiredPaymentAnswerField: "responseSummary"
       });

@@ -14,7 +14,7 @@ export const MCP_PROMPTS = [
     description: "Review current supported mainnet surfaces and tool status.",
     text: [
       "Inspect the Sui MCP server status and supported mainnet Sui protocol surfaces.",
-      "Use read.get_server_status first, then read.list_supported_protocols.",
+      "Use read_get_server_status first, then read_list_supported_protocols.",
       "Report implemented tools separately from unavailable or blocked surfaces."
     ].join("\n")
   },
@@ -24,8 +24,8 @@ export const MCP_PROMPTS = [
     description: "Prepare a local review session for a supported action proposal.",
     text: [
       "Prepare a reviewable Sui action only through Sui MCP's review-session flow.",
-      "Use action.prepare_external_proposal_review when the input is a structured external payment or Sui action proposal.",
-      "External proposals get read-only local review and never become signing material. Use action.prepare_sui_action_review for a natural-language swap intent; after a wallet account is connected, account-bound review can reach ready_for_wallet_review, where an explicit Review card action can request approval in the user’s wallet through the backend.",
+      "Use action_create_proposal_review when the input is a structured external payment or Sui action proposal.",
+      "External proposals get read-only local review and never become signing material. Use action_start_review for a natural-language swap intent; after a wallet account is connected, account-bound review can reach ready_for_wallet_review, where an explicit Review card action can request approval in the user’s wallet through the backend.",
       "Present the internal Review card and summarize the returned review checks. This MCP response never contains signing data, transaction bytes, or signing readiness; only an explicit UI action and wallet approval authorize the backend request; request status is separate from server-verified chain execution facts."
     ].join("\n")
   }
@@ -77,7 +77,8 @@ function registerSurfacePrompt(
   );
 }
 
-export function registerMcpPrompts(server: McpServer, surfaces: readonly AdapterPromptSurface[] = []): void {
+export function registerMcpPrompts(server: McpServer, surfaces: readonly AdapterPromptSurface[] = []): string[] {
+  const registeredNames: string[] = [];
   for (const prompt of MCP_PROMPTS) {
     server.registerPrompt(
       prompt.name,
@@ -98,6 +99,7 @@ export function registerMcpPrompts(server: McpServer, surfaces: readonly Adapter
         ]
       })
     );
+    registeredNames.push(prompt.name);
   }
 
   // Adapter prompt surfaces: action-first names (`swap-deep`) with one
@@ -106,7 +108,9 @@ export function registerMcpPrompts(server: McpServer, surfaces: readonly Adapter
   // Claude Desktop shows a single input field). The model parses the
   // intent; this server never does.
   for (const surface of surfaces) {
-    registerSurfacePrompt(server, promptNameFor(surface), surface, surface.description);
+    const name = promptNameFor(surface);
+    registerSurfacePrompt(server, name, surface, surface.description);
+    registeredNames.push(name);
   }
   // Bare action prompts are always registered. One protocol: straight to it.
   // Several protocols: an optional `protocol` argument (completion suggests
@@ -114,7 +118,9 @@ export function registerMcpPrompts(server: McpServer, surfaces: readonly Adapter
   // user's choice, never the server's.
   for (const [action, group] of actionGroups(surfaces)) {
     registerBareActionPrompt(server, action, group);
+    registeredNames.push(action);
   }
+  return registeredNames;
 }
 
 export function bareActionPromptText(

@@ -646,7 +646,7 @@ describe("fresh-client answer regression", () => {
       /transactionContext facts are transaction-level context/i,
       /accountBalanceChangeInferencePolicy=do_not_infer_from_transaction_context/i,
       /Do not provide profit formulas or hypothetical profit examples/i,
-      /Use session\.create_wallet_identity when a wallet-account read needs/i,
+      /Use session_create_wallet_identity when a wallet-account read needs/i,
       /For DeepBook-supported price questions, use pinned DeepBook read tools/i,
       /summarize_settlement_asset_group_parity\.responseSummary for the user-facing answer/i
     ];
@@ -681,8 +681,8 @@ describe("fresh-client answer regression", () => {
       /mainnet-only Sui DeFi intent evidence toolkit/i,
       /userAnswerUse\.answerFields/i,
       /toolAvailability\.requiredToolsAvailable/i,
-      /read\.get_server_status, then read\.list_settlement_asset_groups, then read\.preview_intent_evidence/i,
-      /read\.summarize_settlement_asset_group_parity/i,
+      /read_get_server_status, then read_list_settlement_asset_groups, then read_preview_intent_evidence/i,
+      /read_summarize_settlement_asset_group_parity/i,
       /active account context/i,
       /Unsupported:/i,
       /suimcp:\/\/docs\/agent-behavior/i

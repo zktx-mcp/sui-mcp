@@ -6,7 +6,7 @@ This document is the MCP API reference. It owns tool contracts, response fields,
 
 It does not own installation steps or user-question playbooks. Installation and client setup live in `docs/MCP_SETUP.md`. User-question flows and response wording live in `docs/AGENT_BEHAVIOR.md`.
 
-Tool names use dot prefixes and avoid arbitrary shell, arbitrary Move calls, and private-key handling.
+Tool names use `domain_verb_object`. A name does not grant authority; input schemas, card visibility and scoped permission checks define the allowed effects. Tools do not expose arbitrary shell commands, arbitrary Move calls or private-key handling.
 
 The local stdio gateway forwards each request through authenticated internal
 HTTP. A request body must fit within 4 MiB, including the entire MCP JSON-RPC
@@ -37,32 +37,32 @@ not grant input permission; a saved card is read through its bound resource.
 
 | Tool | Status | Purpose |
 | --- | --- | --- |
-| `read.get_server_status` | Implemented | Returns package, version, evidence policy, network, runtime, `implementedToolsCount`, resources, prompts, and tool implementation status. |
-| `read.list_supported_protocols` | Implemented | Lists current mainnet protocol surfaces and support levels. |
-| `read.list_deepbook_pools` | Implemented | Lists DeepBook mainnet pools from pinned `@mysten/deepbook-v3` constants. |
-| `read.list_deepbook_tokens` | Implemented | Lists DeepBook mainnet tokens from pinned `@mysten/deepbook-v3` constants. |
-| `read.inspect_deepbook_orderbook` | Implemented | Uses pinned DeepBook SDK read methods over Sui gRPC simulation reads with an internal sender placeholder; `ticks` is capped at 50. |
-| `read.get_deepbook_mid_price` | Implemented | Returns a DeepBook pool mid price snapshot from pinned SDK simulation reads. |
-| `read.get_deepbook_usdc_price_history` | Implemented | Returns DeepBookV3 official Indexer USDC candle evidence for a requested official interval. |
-| `read.get_deepbook_usdc_price_at_time` | Implemented | Returns the DeepBookV3 official Indexer USDC candle for or nearest to one target UTC time. |
-| `read.quote_deepbook_action` | Implemented | Quotes raw integer DeepBook quantities through pinned SDK transaction builders and raw `u64` simulation return values with an internal sender placeholder. |
-| `read.quote_deepbook_display_amount` | Implemented | Converts an explicit display source amount through pinned DeepBook token units, then returns scoped display quote facts plus raw quote evidence. |
-| `read.summarize_deepbook_account_inventory` | Implemented | Summarizes active-account DeepBook BalanceManager inventory through pinned SDK simulation reads. |
-| `read.summarize_wallet_assets` | Implemented | Reads coin balances for an explicit address or the active account through Sui gRPC `client.core.listBalances`; accepts `cursor` for pagination. |
-| `read.classify_wallet_assets` | Implemented | Classifies coin balances for an explicit address or the active account by balanceStatus and coin-balance roles; accepts `cursor` for pagination. |
-| `read.list_settlement_asset_groups` | Implemented | Lists supported settlement asset groups derived from pinned mainnet SDK registries. |
-| `read.summarize_settlement_asset_group_parity` | Implemented | Summarizes direct DeepBook mid-price parity across a supported settlement asset group against a declared measurement reference. |
-| `read.preview_intent_evidence` | Implemented | Builds current wallet and DeepBook evidence for a natural-language settlement intent; not transaction building or signing. |
-| `read.list_review_activity` | Implemented | Lists local Sui MCP review evidence for one account. |
-| `read.summarize_review_funnel` | Implemented | Summarizes local review lifecycle counts, status distribution, and review timing. |
-| `read.get_review_session_detail` | Implemented | Returns stored local evidence for one Sui MCP review session. |
-| `read.inspect_sui_transaction` | Implemented | Looks up one Sui transaction digest and stores normalized facts only when the transaction sender or a returned balance-change owner matches a known local wallet. |
-| `read.scan_sui_account_activity` | Implemented | Runs a bounded GraphQL activity scan for a known or explicit Sui account. |
-| `read.summarize_sui_activity_scan` | Implemented | Runs a bounded Sui activity scan and returns requested-account facts plus deterministic normalized-fact analysis without full details. |
-| `read.scan_sui_function_activity` | Implemented | Runs a bounded GraphQL scan for transactions the account sent that called one full `package::module::function`. |
-| `read.summarize_sui_function_activity_scan` | Implemented | Runs the sent-function activity scan and returns requested-account facts plus deterministic normalized-fact analysis without full details. |
-| `read.summarize_sui_account_activity` | Implemented | Summarizes stored normalized Sui activity facts from local SQLite. |
-| `read.get_account_asset_timeline` | Implemented | Builds stored local account asset net-flow bars from normalized activity facts and optional DeepBook USDC token-denominated candle references. Not held balances or complete wallet history. |
+| `read_get_server_status` | Implemented | Returns package, version, evidence policy, network, runtime, `implementedToolsCount`, resources, prompts, and tool implementation status. |
+| `read_list_supported_protocols` | Implemented | Lists current mainnet protocol surfaces and support levels. |
+| `read_list_deepbook_pools` | Implemented | Lists DeepBook mainnet pools from pinned `@mysten/deepbook-v3` constants. |
+| `read_list_deepbook_tokens` | Implemented | Lists DeepBook mainnet tokens from pinned `@mysten/deepbook-v3` constants. |
+| `read_inspect_deepbook_orderbook` | Implemented | Uses pinned DeepBook SDK read methods over Sui gRPC simulation reads with an internal sender placeholder; `ticks` is capped at 50. |
+| `read_get_deepbook_mid_price` | Implemented | Returns a DeepBook pool mid price snapshot from pinned SDK simulation reads. |
+| `read_get_deepbook_usdc_price_history` | Implemented | Returns DeepBookV3 official Indexer USDC candle evidence for a requested official interval. |
+| `read_get_deepbook_usdc_price_at_time` | Implemented | Returns the DeepBookV3 official Indexer USDC candle for or nearest to one target UTC time. |
+| `read_quote_deepbook_action` | Implemented | Quotes raw integer DeepBook quantities through pinned SDK transaction builders and raw `u64` simulation return values with an internal sender placeholder. |
+| `read_quote_deepbook_display_amount` | Implemented | Converts an explicit display source amount through pinned DeepBook token units, then returns scoped display quote facts plus raw quote evidence. |
+| `read_summarize_deepbook_account_inventory` | Implemented | Summarizes active-account DeepBook BalanceManager inventory through pinned SDK simulation reads. |
+| `read_summarize_wallet_assets` | Implemented | Reads coin balances for an explicit address or the active account through Sui gRPC `client.core.listBalances`; accepts `cursor` for pagination. |
+| `read_classify_wallet_assets` | Implemented | Classifies coin balances for an explicit address or the active account by balanceStatus and coin-balance roles; accepts `cursor` for pagination. |
+| `read_list_settlement_asset_groups` | Implemented | Lists supported settlement asset groups derived from pinned mainnet SDK registries. |
+| `read_summarize_settlement_asset_group_parity` | Implemented | Summarizes direct DeepBook mid-price parity across a supported settlement asset group against a declared measurement reference. |
+| `read_preview_intent_evidence` | Implemented | Builds current wallet and DeepBook evidence for a natural-language settlement intent; not transaction building or signing. |
+| `read_list_review_activity` | Implemented | Lists local Sui MCP review evidence for one account. |
+| `read_summarize_review_funnel` | Implemented | Summarizes local review lifecycle counts, status distribution, and review timing. |
+| `read_get_review_session_detail` | Implemented | Returns stored local evidence for one Sui MCP review session. |
+| `read_inspect_sui_transaction` | Implemented | Looks up one Sui transaction digest and stores normalized facts only when the transaction sender or a returned balance-change owner matches a known local wallet. |
+| `read_scan_sui_account_activity` | Implemented | Runs a bounded GraphQL activity scan for a known or explicit Sui account. |
+| `read_summarize_sui_activity_scan` | Implemented | Runs a bounded Sui activity scan and returns requested-account facts plus deterministic normalized-fact analysis without full details. |
+| `read_scan_sui_function_activity` | Implemented | Runs a bounded GraphQL scan for transactions the account sent that called one full `package::module::function`. |
+| `read_summarize_sui_function_activity_scan` | Implemented | Runs the sent-function activity scan and returns requested-account facts plus deterministic normalized-fact analysis without full details. |
+| `read_summarize_sui_account_activity` | Implemented | Summarizes stored normalized Sui activity facts from local SQLite. |
+| `read_get_account_asset_timeline` | Implemented | Builds stored local account asset net-flow bars from normalized activity facts and optional DeepBook USDC token-denominated candle references. Not held balances or complete wallet history. |
 
 Read-only tools split by address requirement.
 
@@ -112,15 +112,15 @@ Token list entries are keyed by SDK symbol and include the pool keys that refere
 
 Token entries include `decimals` derived only from pinned `mainnetCoins.scalar` when every scalar is a power of ten. If that invariant fails, the token registry tool fails closed instead of guessing.
 
-`read.get_deepbook_mid_price` returns `priceDirection: "quote_per_base"`, so a `SUI_USDC` result is USDC per SUI.
+`read_get_deepbook_mid_price` returns `priceDirection: "quote_per_base"`, so a `SUI_USDC` result is USDC per SUI.
 
 The price is the pinned SDK `midPrice` result with `source.precision: "deepbook_v3_to_fixed_9_js_number"`.
 
 The response includes `priceSemantics` and `userAnswerUse.cannotAnswer` for unsupported conclusions. It is a DeepBook pool snapshot, not a global market price, fiat USD cash-out estimate, external market-price conversion, USDC/USD peg assumption, quote-vs-mid slippage calculation, effective quote price, price-impact calculation, venue comparison, best-route claim, route recommendation, transaction-building input, signing data, signing readiness, P&L, or cost basis.
 
-If the SDK returns a non-positive or non-finite mid price, both `read.get_deepbook_mid_price` and `read.inspect_deepbook_orderbook` fail closed with `quote_unavailable`.
+If the SDK returns a non-positive or non-finite mid price, both `read_get_deepbook_mid_price` and `read_inspect_deepbook_orderbook` fail closed with `quote_unavailable`.
 
-`read.get_deepbook_usdc_price_history` returns DeepBookV3 official Indexer USDC candle evidence for a requested official interval.
+`read_get_deepbook_usdc_price_history` returns DeepBookV3 official Indexer USDC candle evidence for a requested official interval.
 
 Inputs require `start` and `end` as canonical ISO 8601 UTC timestamps and exactly one selector: `poolName`, `assetSymbol`, or `coinType`. Optional `interval` accepts only official Indexer interval values and defaults to `15m`.
 
@@ -148,7 +148,7 @@ USDC in this tool is the token-denominated quote asset for the returned official
 
 This output is not a live quote, execution price, historical mid price, global market price, fiat USD cash-out estimate, external market-price conversion, USDC/USD peg assumption, route recommendation, best route, transaction-building input, signing data, signing readiness, P&L, tax evidence, cost basis, user-account transaction history, or user-account balance history.
 
-`read.get_deepbook_usdc_price_at_time` uses the same official Indexer candle source and selector rules, but accepts one `targetTime` instead of a range. Optional `interval` defaults to `15m`. Optional `maxDistanceMinutes` limits how far from the target time the tool may select a candle.
+`read_get_deepbook_usdc_price_at_time` uses the same official Indexer candle source and selector rules, but accepts one `targetTime` instead of a range. Optional `interval` defaults to `15m`. Optional `maxDistanceMinutes` limits how far from the target time the tool may select a candle.
 
 Successful at-time responses return:
 
@@ -162,13 +162,13 @@ Successful at-time responses return:
 
 `status: "no_price_in_search_window"` means no official Indexer candle was available inside the bounded search window. The tool does not synthesize a price, interpolate, carry forward a previous candle outside the search window, or perform an on-demand chain-history scan.
 
-Internal read cards are opened with `ui.open_account`, `ui.open_receipt`, and `ui.open_chart`. They require a client that provides MCP Apps. A client without that UI receives `ui_unavailable`; ordinary MCP read tools remain available.
+Internal read cards are opened with `ui_open_account`, `ui_open_receipt`, and `ui_open_chart`. They require a client that provides MCP Apps. A client without that UI receives `ui_unavailable`; ordinary MCP read tools remain available.
 
 | Tool | Input and result |
 | --- | --- |
-| `ui.open_account` | Optional explicit Sui address; otherwise use the selected read account only when its wallet connection is currently usable. Missing input returns `input_required` with no card or source query. Shows name, address, coin totals, Display NFTs, other-object count, fetched time and enumeration limits; no address form. |
-| `ui.open_receipt` | A transaction digest is required for a query. Omission returns `input_required` with no card or source query. The result view shows execution outcome, balance changes, net gas, sender, digest and fetched time; no hash form. No wallet or active account is needed. Normalized receipt evidence and private display metadata remain available under their existing boundaries. |
-| `ui.open_chart` | Optional `poolName`, official Indexer interval, UTC `startTimeMs`/`endTimeMs`, and candle `limit`. Shows one selected USDC pool as candlesticks and volume. Range shortcuts fill these query fields. The initial time axis uses the saved request boundaries, with price-free whitespace at boundaries without candles; omitted boundaries use the returned data. |
+| `ui_open_account` | Optional explicit Sui address; otherwise use the selected read account only when its wallet connection is currently usable. Missing input returns `input_required` with no card or source query. Shows name, address, coin totals, Display NFTs, other-object count, fetched time and enumeration limits; no address form. |
+| `ui_open_receipt` | A transaction digest is required for a query. Omission returns `input_required` with no card or source query. The result view shows execution outcome, balance changes, net gas, sender, digest and fetched time; no hash form. No wallet or active account is needed. Normalized receipt evidence and private display metadata remain available under their existing boundaries. |
+| `ui_open_chart` | Optional `poolName`, official Indexer interval, UTC `startTimeMs`/`endTimeMs`, and candle `limit`. Shows one selected USDC pool as candlesticks and volume. Range shortcuts fill these query fields. The initial time axis uses the saved request boundaries, with price-free whitespace at boundaries without candles; omitted boundaries use the returned data. |
 
 A missing Account/Receipt target returns `data: { kind, status: "input_required", field, message }`, with no permission, card ID, saved resource or query. A host-rendered view shows the message without input controls or polling. Other errors remain errors.
 
@@ -176,7 +176,7 @@ A successful card-creating response contains a `cardId`, `kind`, `state`, `revis
 
 When Chart pool choices cannot be prepared, the backend creates a `closed`/`failed` card with a readable error. No selection is admitted and no candles are requested. Reading that card again returns the stored failure; retrying the source requires an explicit request for a new card. A database access or write failure is a tool error, not a successfully stored failure card.
 
-`ui.read_card` and `ui.submit_card` are app-only operations. Permission travels in UI metadata and is absent from model content and public saved resources. Input submission carries card ID, permission, expected revision and typed input. There is no first-view ownership or open/close operation. Recreated frames and chat returns read the same DB record. Identical duplicate input returns the stored request; conflicting input returns `card_conflict` and the authenticated current snapshot in error details. Invalid input returns `invalid_card_input` without consuming a valid selection. Invalid permission exposes neither current state nor private display data.
+`ui_read_card` and `ui_submit_card` are app-only operations. Permission travels in UI metadata and is absent from model content and public saved resources. Input submission carries card ID, permission, expected revision and typed input. There is no first-view ownership or open/close operation. Recreated frames and chat returns read the same DB record. Identical duplicate input returns the stored request; conflicting input returns `card_conflict` and the authenticated current snapshot in error details. Invalid input returns `invalid_card_input` without consuming a valid selection. Invalid permission exposes neither current state nor private display data.
 
 Receipt model results retain input kinds/indices/object references and identify input values and PTB as UI-only details. Receipt and completed Review show the executed transaction graph above their result summary when bound private metadata is available. Technical records are in one Details slide. Missing metadata leaves the saved result available without inventing a graph. The typed `sui-mcp/receipt-display` metadata binds display data to the same card ID, transaction digest and revision. It carries individual on-chain Pure input values and the graph derived from those inputs; never a serialized transaction, signature or wallet credential. Public saved resources contain only the model projection. A missing UI detail payload means unavailable display data, not that a transaction had no inputs.
 
@@ -249,7 +249,7 @@ For unadmitted disconnection or account selection, the exact target in
 card input remains available. An account returning later does not revive that
 attempt or clear its local automatic pause; the user can make a new selection.
 If an unknown result needs another lookup after the card's action period, request
-`session.open_review_management` with the same `reviewSessionId` and `attemptId`.
+`session_open_review_management` with the same `reviewSessionId` and `attemptId`.
 It adds no signing authority and does not repeat the transaction.
 
 A confirmation that joins an older in-flight read retains its obligation. After
@@ -263,20 +263,20 @@ Review displays one current wallet candidate without a dropdown. Its current aut
 Cards provide no clipboard actions or copy buttons. Their text remains readable and selectable. Chart values remain USDC-denominated source candles, not fiat USD, peg guarantees, route advice, portfolio valuation or P&L. Cards do not fetch chain/Indexer endpoints directly or poll completed results.
 
 
-`read.quote_deepbook_action` and `read.quote_deepbook_display_amount` use the pinned DeepBook transaction builder quote functions.
+`read_quote_deepbook_action` and `read_quote_deepbook_display_amount` use the pinned DeepBook transaction builder quote functions.
 
 Input kinds:
 
-- `read.quote_deepbook_action`: `quantitySemantics.inputAmountKind: "raw_u64"`.
-- `read.quote_deepbook_display_amount`: `inputAmountKind: "display_source_amount_converted_to_raw_u64"`.
+- `read_quote_deepbook_action`: `quantitySemantics.inputAmountKind: "raw_u64"`.
+- `read_quote_deepbook_display_amount`: `inputAmountKind: "display_source_amount_converted_to_raw_u64"`.
 
 Quote responses include `quantitySemantics` before the public quote values. The same response also includes `userAnswerUse.cannotAnswer` for unsupported conclusions such as payment coverage, shortfall contribution, route-dependent payment support, fiat USD cash-out, external market conversion or lookup, USDC/USD peg assumptions, P&L, cost basis, price impact, mid-price slippage, venue comparison, and route recommendation.
 
 `canUseForPaymentAnswer: false`, `canUseForShortfallAnswer: false`, `doNotCombineWithPaymentAnswer: true`, and `paymentAnswerUseBlockedReason` mean quote output is a price estimate only. Do not add it to the payment amount, coverage status, or shortfall amount in a user answer.
 
-`requiredPaymentAnswerTool: "read.preview_intent_evidence"` and `requiredPaymentAnswerField: "responseSummary"` identify the tool and field to use for payment amount and shortfall answers.
+`requiredPaymentAnswerTool: "read_preview_intent_evidence"` and `requiredPaymentAnswerField: "responseSummary"` identify the tool and field to use for payment amount and shortfall answers.
 
-The same response-local rule is also exposed as `userAnswerUse.followUp.tool: "read.preview_intent_evidence"` and `userAnswerUse.followUp.answerFields: ["responseSummary"]`.
+The same response-local rule is also exposed as `userAnswerUse.followUp.tool: "read_preview_intent_evidence"` and `userAnswerUse.followUp.answerFields: ["responseSummary"]`.
 
 Raw quote source:
 
@@ -287,7 +287,7 @@ Raw quote source:
 
 Returned raw fields are quote evidence only. They are not final min-out values, effective prices, price-impact calculations, venue comparisons, best-route claims, transaction-building inputs, signing data, or signing readiness.
 
-`read.quote_deepbook_display_amount` accepts `amountDisplay` as the source coin input amount for the requested `direction`.
+`read_quote_deepbook_display_amount` accepts `amountDisplay` as the source coin input amount for the requested `direction`.
 
 It does not accept output target amounts or inverse quote requests.
 
@@ -310,7 +310,7 @@ This quote is not a settlement asset choice.
 
 ### DeepBook account inventory
 
-`read.summarize_deepbook_account_inventory` uses the selected account only when its current wallet connection is usable, to discover DeepBook BalanceManager addresses. It has no explicit public-address input. Without a usable default, a missing selection returns `active_account_not_set`, and a stored but ineligible selection returns `input_invalid`; both carry `details.reason: "connected_account_required"` and `details.followUp` naming `session.get_interaction_status` and its connection/availability/pending/default-account fields. These responses do not request an address. Unavailable wallet operations return `wallet_unavailable` with the existing safe reason and recovery message.
+`read_summarize_deepbook_account_inventory` uses the selected account only when its current wallet connection is usable, to discover DeepBook BalanceManager addresses. It has no explicit public-address input. Without a usable default, a missing selection returns `active_account_not_set`, and a stored but ineligible selection returns `input_invalid`; both carry `details.reason: "connected_account_required"` and `details.followUp` naming `session_get_interaction_status` and its connection/availability/pending/default-account fields. These responses do not request an address. Unavailable wallet operations return `wallet_unavailable` with the existing safe reason and recovery message.
 
 With both `poolKey` and `managerAddress`, it checks pool account existence and returns display-like account inventory:
 
@@ -332,9 +332,9 @@ Returned `quantitySemantics.kind: "deepbook_display_number"` means these `number
 
 They are not raw balances, route liquidity, funding sources, withdrawal readiness, transaction-building inputs, signing data, or signing readiness.
 
-`read.summarize_wallet_assets` accepts an optional `account` input for public-address coin balance snapshots.
+`read_summarize_wallet_assets` accepts an optional `account` input for public-address coin balance snapshots.
 
-When `account` is omitted, it uses the same connection-qualified default as `session.get_interaction_status.assetReadAccount`. No stored selection returns `active_account_not_set` with `details.action: "provide_account"`; a stored but ineligible selection returns `input_invalid` with `details.reason: "address_required"`. Both request an explicit address. SDK unavailability is not reported as absence of a stored account.
+When `account` is omitted, it uses the same connection-qualified default as `session_get_interaction_status.assetReadAccount`. No stored selection returns `active_account_not_set` with `details.action: "provide_account"`; a stored but ineligible selection returns `input_invalid` with `details.reason: "address_required"`. Both request an explicit address. SDK unavailability is not reported as absence of a stored account.
 
 An explicit `account` read does not prove ownership, store the address as a known wallet, or create active account context.
 
@@ -356,7 +356,7 @@ If Sui metadata is unavailable, DeepBook-registered tokens can use pinned scalar
 
 If no verified decimals exist, `unit.status` is `unavailable` and clients must not infer decimals from the token symbol.
 
-`read.classify_wallet_assets` reuses the same explicit-address or active-account balance, unit, display, metadata cache behavior, and wallet snapshot quantity semantics as `read.summarize_wallet_assets`.
+`read_classify_wallet_assets` reuses the same explicit-address or active-account balance, unit, display, metadata cache behavior, and wallet snapshot quantity semantics as `read_summarize_wallet_assets`.
 
 It wraps each coin balance in `classification.assetClass: "coin_balance"`, `classification.balanceStatus`, and role labels such as `gas_candidate` or `deepbook_registered`.
 
@@ -372,7 +372,7 @@ It also would not make them route liquidity, payment readiness, portfolio comple
 
 The classifier does not create funding plans, choose routes, create review sessions, return transaction bytes, or produce signing material.
 
-`read.list_settlement_asset_groups` returns the supported natural-language settlement asset groups.
+`read_list_settlement_asset_groups` returns the supported natural-language settlement asset groups.
 
 In this release, `SUI_USD_SETTLEMENT_ASSETS` maps aliases such as dollar, dollars, USD, USD-like, stablecoin, stablecoins, and Korean dollar-word wording.
 
@@ -382,7 +382,7 @@ The asset group output includes included assets, excluded assets, source authori
 
 This is static SDK registry evidence, not live liquidity, fiat USD support, payment execution, route recommendation, or signing readiness.
 
-`read.summarize_settlement_asset_group_parity` returns internal parity evidence for a supported settlement asset group.
+`read_summarize_settlement_asset_group_parity` returns internal parity evidence for a supported settlement asset group.
 
 In this release it measures USD-denominated group assets against a declared reference asset. The default reference is USDC, but only as `measurement_reference_not_settlement_choice`.
 
@@ -398,7 +398,7 @@ Use `responseSummary` for questions about internal USD-denominated parity, highe
 
 This tool is not settlement-token choice, fiat USD cash-out, external market lookup, USDC/USD peg assumption, payment readiness, best route, route recommendation, transaction building, signing readiness, P&L, or cost basis.
 
-`read.preview_intent_evidence` accepts natural-language settlement evidence intents.
+`read_preview_intent_evidence` accepts natural-language settlement evidence intents.
 
 Use it this way:
 
@@ -410,7 +410,7 @@ For settlement-asset-only coverage, shortfall, and balance-total answers, use `r
 
 The response also exposes `userAnswerUse.answerFields` with the response-specific answer path.
 
-`responseSummary.answerCompleteness.answerCompleteFor` names the answer class. `responseSummary.answerCompleteness.requiredAnswerFields` names the fields required for that class. Do not call quote tools for the same question when `responseSummary.doNotCallQuoteToolsForThisQuestion` is `true`. If `toolAvailability.requiredToolsAvailable` is also `true`, answer from `responseSummary` and do not call `read.classify_wallet_assets`, `read.summarize_wallet_assets`, or quote tools to look for other source tokens for that same coverage, balance-total, or shortfall question. If quote tools were already called, do not use quote output for the payment amount, coverage status, or shortfall.
+`responseSummary.answerCompleteness.answerCompleteFor` names the answer class. `responseSummary.answerCompleteness.requiredAnswerFields` names the fields required for that class. Do not call quote tools for the same question when `responseSummary.doNotCallQuoteToolsForThisQuestion` is `true`. If `toolAvailability.requiredToolsAvailable` is also `true`, answer from `responseSummary` and do not call `read_classify_wallet_assets`, `read_summarize_wallet_assets`, or quote tools to look for other source tokens for that same coverage, balance-total, or shortfall question. If quote tools were already called, do not use quote output for the payment amount, coverage status, or shortfall.
 
 `responseSummary` exposes:
 
@@ -460,7 +460,7 @@ The current `lowSampleThreshold` is 5 local records, from `REVIEW_ACTIVITY_LOW_S
 
 When `lowSampleWarning` is true, treat counts as sparse local evidence and avoid drawing behavior patterns.
 
-For `read.list_review_activity`, `dataScope.recordCount` is the full matching local review count.
+For `read_list_review_activity`, `dataScope.recordCount` is the full matching local review count.
 
 The returned `activities` array can be shorter when `truncated.activities: true`.
 
@@ -468,25 +468,25 @@ The returned `activities` array can be shorter when `truncated.activities: true`
 
 MCP error responses intentionally omit `structuredContent`; clients should read the JSON error payload from `content[0].text`.
 
-`read.get_review_session_detail` transition rows include `isNoOp`.
+`read_get_review_session_detail` transition rows include `isNoOp`.
 
 A no-op transition is an observed lifecycle call whose stored status did not change, such as a repeated open or reconnect event.
 
-`read.get_review_session_detail.userAnswerUse.answerFields` lists `execution` only when the response includes an `execution` object. If `execution` is absent and `userAnswerUse.cannotAnswer` includes `stored_review_execution_result_without_execution_field`, the response cannot answer a stored execution-result question.
+`read_get_review_session_detail.userAnswerUse.answerFields` lists `execution` only when the response includes an `execution` object. If `execution` is absent and `userAnswerUse.cannotAnswer` includes `stored_review_execution_result_without_execution_field`, the response cannot answer a stored execution-result question.
 
 Funnel summaries count distinct reviews and do not treat repeated no-op rows as additional completed steps.
 
 Sui activity tools are user-requested read surfaces, not a background indexer.
 
-Summary activity tools omit full transaction details by design. Digest-level detail is exposed by `read.inspect_sui_transaction`.
+Summary activity tools omit full transaction details by design. Digest-level detail is exposed by `read_inspect_sui_transaction`.
 
 Tool roles:
 
-- `read.inspect_sui_transaction` performs a single digest lookup.
-- `read.scan_sui_account_activity` requests up to 100 account transactions for `affected` or `sent` relationship.
-- `read.summarize_sui_activity_scan` reuses the live scan path and adds deterministic `analysis` without returning full `details`.
-- `read.scan_sui_function_activity` and `read.summarize_sui_function_activity_scan` return transactions the selected account sent that called one full `package::module::function`.
-- `read.summarize_sui_account_activity` reads only local SQLite stored facts.
+- `read_inspect_sui_transaction` performs a single digest lookup.
+- `read_scan_sui_account_activity` requests up to 100 account transactions for `affected` or `sent` relationship.
+- `read_summarize_sui_activity_scan` reuses the live scan path and adds deterministic `analysis` without returning full `details`.
+- `read_scan_sui_function_activity` and `read_summarize_sui_function_activity_scan` return transactions the selected account sent that called one full `package::module::function`.
+- `read_summarize_sui_account_activity` reads only local SQLite stored facts.
 
 This is a bounded provider page, not complete wallet history.
 
@@ -512,7 +512,7 @@ Stored summary boundaries:
 - Stored summaries aggregate local account-level facts from digest lookups, account scans, or sent-function scans.
 - Scan kind is internal provenance.
 - Stored summary input does not accept `kind`, `function`, or function-history filters.
-- Legacy `summary` is the backward-compatible shallow count block.
+- `summary` contains the stored transaction counts.
 - `analysis.overview.transactionCount` mirrors the stored count.
 - `analysis.overview.analyzedTransactionCount` reports how many returned rows fed the richer aggregations.
 - `transactionDetailAvailability` counts returned stored rows with `details`. `userAnswerUse.answerFields` includes `transactions[].compact` and `transactions[].details` only when `transactionDetailAvailability.allReturnedTransactionsHaveDetails: true`.
@@ -653,7 +653,7 @@ The local sender check is defensive. A non-conforming provider row is dropped fr
 
 For a stored known-account scan, the dropped row contributes only to skipped counts. It is not treated as valid function history.
 
-`read.scan_sui_account_activity` and `read.scan_sui_function_activity` return pagination and coverage fields:
+`read_scan_sui_account_activity` and `read_scan_sui_function_activity` return pagination and coverage fields:
 
 - `hasMore`;
 - `continuationCursor`;
@@ -671,18 +671,18 @@ Provider cursors are opaque and best-effort. Cursor rejection returns a safe err
 
 Tool source comparison:
 
-- `read.scan_sui_account_activity`, `read.scan_sui_function_activity`, `read.summarize_sui_activity_scan`, and `read.summarize_sui_function_activity_scan` return live GraphQL row facts.
+- `read_scan_sui_account_activity`, `read_scan_sui_function_activity`, `read_summarize_sui_activity_scan`, and `read_summarize_sui_function_activity_scan` return live GraphQL row facts.
 - Those live rows include requested-account fields, transaction context, and `detailLookup` references but no full `details`.
 - The summary tools also return deterministic `analysis`.
-- `read.inspect_sui_transaction` is the full normalized detail path for a specific digest.
-- `read.summarize_sui_account_activity` reads only stored normalized facts from local SQLite.
-- `read.get_account_asset_timeline` reads only stored normalized facts from local SQLite, then can attach DeepBookV3 official Indexer USDC candle references for supported USDC-quoted assets.
+- `read_inspect_sui_transaction` is the full normalized detail path for a specific digest.
+- `read_summarize_sui_account_activity` reads only stored normalized facts from local SQLite.
+- `read_get_account_asset_timeline` reads only stored normalized facts from local SQLite, then can attach DeepBookV3 official Indexer USDC candle references for supported USDC-quoted assets.
 
-If stored or summary details are missing or capped, use the digest metadata with `read.inspect_sui_transaction` instead of inferring missing calls, balances, objects, events, gas, or errors.
+If stored or summary details are missing or capped, use the digest metadata with `read_inspect_sui_transaction` instead of inferring missing calls, balances, objects, events, gas, or errors.
 
 ### Stored Account Asset Timeline
 
-`read.get_account_asset_timeline` returns a stored local account asset-flow timeline for one account and UTC range.
+`read_get_account_asset_timeline` returns a stored local account asset-flow timeline for one account and UTC range.
 
 Inputs:
 
@@ -694,7 +694,7 @@ Output fields:
 
 - `coverage` describes whether stored scan rows prove the requested range is complete, partial, or absent.
 - `status: "account_not_known"` means the explicit account is not a known local wallet in the local activity store. In that status the tool does not return `scanNeeded`.
-- `scanNeeded`, when present, names `read.scan_sui_account_activity` as the bounded scan tool that can gather local evidence for a known account.
+- `scanNeeded`, when present, names `read_scan_sui_account_activity` as the bounded scan tool that can gather local evidence for a known account.
 - `netFlowBars` are observed account-scoped raw token balance-change bars from stored normalized activity rows.
 - `balanceStatus` is currently `unavailable_no_balance_anchor`, and `balanceBars` is empty. Do not present net-flow bars as held balances.
 - `sourceTransactions` reports how many stored rows were read, returned, truncated, and detail-covered.
@@ -708,19 +708,19 @@ This tool does not run scans, start a background indexer, create a price cache, 
 
 | Tool | Status | Purpose |
 | --- | --- | --- |
-| `action.prepare_sui_action_review` | Signable internal Review card | Creates a local review session and internal Review card for a supported swap action proposal. Account-bound DeepBook reviews may build local unsigned transaction material inside the review server, internally bind a Sui transaction digest to it, and derive object ownership, quote/policy, human-readable review, review-time simulation, and PTB visualization evidence. When every required evidence stage completes, an explicit Review card selection can admit backend-mediated WalletConnect approval for that exact transaction. The MCP tool does not return transaction bytes, signing data, or signing readiness. |
-| `action.prepare_external_proposal_review` | Non-signable review | Creates a local review session and internal Review card from an untrusted structured external proposal. It does not return transaction bytes. |
+| `action_start_review` | Internal swap Review card | Creates a local review session and internal Review card for a supported swap action proposal. Account-bound DeepBook reviews may build local unsigned transaction material inside the review server, internally bind a Sui transaction digest to it, and derive object ownership, quote/policy, human-readable review, review-time simulation, and PTB visualization evidence. When every required evidence stage completes, an explicit Review card selection can admit backend-mediated WalletConnect approval for that exact transaction. The MCP tool does not return transaction bytes, signing data, or signing readiness. |
+| `action_create_proposal_review` | Non-signable review | Creates a local review session and internal Review card from an untrusted structured external proposal. It does not return transaction bytes. |
 
-`action.prepare_sui_action_review` is account-bound: a swap review computes
+`action_start_review` is account-bound: a swap review computes
 its evidence (balances, transaction material, digest, simulation) for a
 specific sender, so the tool requires an active wallet account. Connect first
-with `session.create_wallet_connection`; with no active account the tool returns
+with `session_open_wallet_connection_card`; with no active account the tool returns
 `active_account_not_set` with `details.action: "connect_wallet_connection"`
 instead of creating a proposal that can never be computed or signed. The
 Review card reads that account from the server as the single source of truth
 and never connects a wallet itself.
 
-`action.prepare_sui_action_review` accepts a protocol-neutral swap `intent`
+`action_start_review` accepts a protocol-neutral swap `intent`
 (`type: "swap"`, `from.symbol`, `from.amount`, `to.symbol`,
 `maxSlippageBps`, optional `protocol`). The optional `protocol` field carries
 the protocol slug from the adapter registry (the same slug vocabulary as the
@@ -731,7 +731,7 @@ omitted; once several protocols support the same action the tool returns
 `intent.protocol` set - the server never picks a venue silently. An unknown
 slug returns `reason: "unknown_protocol"` with the available slugs.
 
-`action.prepare_external_proposal_review` accepts `proposal` with `type:
+`action_create_proposal_review` accepts `proposal` with `type:
 "payment"` or `type: "sui_action"`.
 
 Common required fields are `id`, `source`, `network: "sui:mainnet"`,
@@ -792,7 +792,7 @@ cards display those facts; neither the model nor the card receives bytes or
 signatures. Ordinary MCP calls cannot authorize signing or submission.
 
 After the wallet account is bound to a supported swap review session, the
-Review card and `session.get_review_status` may show protocol-specific quote
+Review card and `session_get_review_status` may show protocol-specific quote
 evidence and review-state checks for:
 
 - resolved DeepBook direct pool;
@@ -819,8 +819,9 @@ Completed stages are review progress only. If
 `transaction_material_build_or_verify` is completed, it means the local review
 server built unsigned transaction material and kept the bytes internal. If
 `digest_commitment` is completed, it means the server internally derived a Sui
-transaction digest from that stored material; the digest value and transaction
-bytes are not MCP or review-app outputs. Missing stages explain why the review
+transaction digest from that stored material; the schema-validated transaction-review contract may expose its commitment
+hash, while transaction bytes remain private. The hash is not signing authority
+or a wallet handoff. Missing stages explain why the review
 remains blocked. This lifecycle covers review evidence producer stages through
 review-time simulation. Wallet requests, signature verification, submission and
 chain observation are platform responsibilities after review, separate from
@@ -943,14 +944,14 @@ It is not a signing readiness signal. Review-state checks are pre-signing review
 
 | Tool | Input and result |
 | --- | --- |
-| `session.create_wallet_connection` | Opens an internal card with `intent: connect`, `disconnect` or `manage` (default). A connect-intent View automatically starts pairing after authenticated state confirmation; manage pairs only after the user chooses Connect wallet. A disconnect-intent card opens confirmation for a unique connected target. Disconnection requires target-specific confirmation and does not revoke onchain permissions. |
-| `session.get_wallet_connection` | Reads one `cardId`; public response excludes pairing and permission. |
-| `session.wait_wallet_connection` | Waits on one `cardId`, with an optional timeout up to 55 seconds; stops when user input is needed or the admitted connection/disconnection operation ends. |
-| `session.open_review_management` | Opens management for exact `reviewSessionId` + `attemptId`; no refresh or signing authority. |
-| `session.get_interaction_status` | Stored `activeAccount`, current-owner `connections`, `assetReadAccount`, wallet availability, and bounded pending connection/review lists. `assetReadAccount` is `available` with an account only when that selected address has a usable current connection; otherwise `address_required`. Stored `activeAccount` does not prove a live connection. `address_required` reports that no implicit default is available; it does not add an address input to connected-account-only tools. When wallet availability is unavailable, connection rows are last recorded facts, not proof of presence or absence. |
-| `session.get_review_status` | Current preparation status, review revision, optional current request and chain execution. |
-| `session.get_execution_result` | Observes the current explicitly referenced attempt and may read its known digest; never submits again. |
-| `session.wait_execution_result` | Bounded wait on the same request, separate from its signing and chain-observation deadlines. |
+| `session_open_wallet_connection_card` | Opens an internal card with `intent: connect`, `disconnect` or `manage` (default). A connect-intent View automatically starts pairing after authenticated state confirmation; manage pairs only after the user chooses Connect wallet. A disconnect-intent card opens confirmation for a unique connected target. Disconnection requires target-specific confirmation and does not revoke onchain permissions. |
+| `session_get_wallet_connection_card` | Reads one `cardId`; public response excludes pairing and permission. |
+| `session_wait_wallet_connection_card` | Waits on one `cardId`, with an optional timeout up to 55 seconds; stops when user input is needed or the admitted connection/disconnection operation ends. |
+| `session_open_review_management` | Opens management for exact `reviewSessionId` + `attemptId`; no refresh or signing authority. |
+| `session_get_interaction_status` | Stored `activeAccount`, current-owner `connections`, `assetReadAccount`, wallet availability, and bounded pending connection/review lists. `assetReadAccount` is `available` with an account only when that selected address has a usable current connection; otherwise `address_required`. Stored `activeAccount` does not prove a live connection. `address_required` reports that no implicit default is available; it does not add an address input to connected-account-only tools. When wallet availability is unavailable, connection rows are last recorded facts, not proof of presence or absence. |
+| `session_get_review_status` | Current preparation status, review revision, optional current request and chain execution. |
+| `session_get_execution_result` | Observes the current explicitly referenced attempt and may read its known digest; never submits again. |
+| `session_wait_execution_result` | Bounded wait on the same request, separate from its signing and chain-observation deadlines. |
 
 `pendingWalletConnections.items[].status` is `input_required`,
 `awaiting_approval`, or `disconnect_pending`. The last value describes an
@@ -964,7 +965,7 @@ While its SDK callback remains pending, unavailable progress preserves the
 operation and its last recorded connection state. Repeating the same selection
 does not send another SDK request.
 
-`session.get_interaction_status` reconciles stored connections against current SDK sessions before reading dependent review/request facts. This can record a connection change and invalidate a review or interrupt an unsubmitted request under the existing rules. It preserves the stored account selection and submitted chain results; it does not start pairing, SDK disconnect, signing or submission.
+`session_get_interaction_status` reconciles stored connections against current SDK sessions before reading dependent review/request facts. This can record a connection change and invalidate a review or interrupt an unsubmitted request under the existing rules. It preserves the stored account selection and submitted chain results; it does not start pairing, SDK disconnect, signing or submission.
 
 When a disconnect callback ended but its completion write failed, current reads
 reconcile that stored operation without another SDK disconnect. If the SDK is
@@ -1043,7 +1044,7 @@ The original request's stored deadlines are unchanged by a management card.
 A new signature requires a newly reviewed revision and explicit selection.
 Identical duplicate selections return the admitted attempt; no response-loss
 path replays a financial request. Model tools may open/read cards; only scoped
-app-only `ui.act_card` performs a user selection. UI permission and pairing QR
+app-only `ui_act_card` performs a user selection. UI permission and pairing QR
 travel in private metadata. Bytes/signatures never reach the card or model.
 
 Connection observation uses 5 seconds and request observation 3 seconds.
@@ -1210,13 +1211,13 @@ retained when a later submission-admission check fails.
 
 ### Stored review activity
 
-`read.list_review_activity` accepts account/time/limit and independent ANDed
+`read_list_review_activity` accepts account/time/limit and independent ANDed
 `reviewStatus`, `requestStatus`, `executionStatus` filters. One row represents
 one review session and its explicit current attempt, including optional
 `currentAttemptId`, `reviewRevision`, `transactionDigest`, request and chain
 status. `dataScope.recordCount` counts the complete filtered scope before limit.
 
-`read.summarize_review_funnel` keeps the session denominator. `reviewStatusCounts`
+`read_summarize_review_funnel` keeps the session denominator. `reviewStatusCounts`
 is the preparation distribution; `requestStatusCounts` is a list of
 `{ requestStatus, count }` entries (including zero counts); `executionStatusCounts`
 has success/failure counts. Status strings are data values, not secret-like JSON
@@ -1237,7 +1238,7 @@ result counts as completed and as its verified chain outcome, but does not count
 as `everAwaitedChainResult` unless the session actually reached that stage in an
 attempt. This metric is neither a submission total nor a mandatory funnel step.
 
-`read.get_review_session_detail` returns the current `request`, full
+`read_get_review_session_detail` returns the current `request`, full
 `requestCount`, capped `requests`, revision-bound state snapshots and transitions
 with `domain` and optional attemptId. Each request may contain a verified
 `execution`; absent execution does not imply failure. Current request is returned
@@ -1250,7 +1251,7 @@ facts actually exist.
 
 | Tool | Status | Purpose |
 | --- | --- | --- |
-| `account.get_active_account` | Implemented | Reads the active wallet-account read context. |
+| `account_get_active_account` | Implemented | Reads the active wallet-account read context. |
 
 The user clears the default read address through a confirmed Settings card action. Ordinary MCP calls do not clear it.
 
@@ -1258,10 +1259,10 @@ The user clears the default read address through a confirmed Settings card actio
 
 | Tool | Status | Purpose |
 | --- | --- | --- |
-| `settings.create_local_settings_session` | Implemented | Opens one internal Settings card with an unsubmitted draft. |
-| `settings.get_local_settings` | Implemented | Reads stored/effective Sui gRPC and GraphQL endpoints, sources and pending restart information. |
+| `settings_create_local_settings_session` | Implemented | Opens one internal Settings card with an unsubmitted draft. |
+| `settings_get_local_settings` | Implemented | Reads stored/effective Sui gRPC and GraphQL endpoints, sources and pending restart information. |
 
-The gateway name is preserved. Its result is a `kind: "settings"` card snapshot
+The result is a `kind: "settings"` card snapshot
 and a public saved-result link. Card permission is only in `sui-mcp/card` UI
 metadata. There is no `settingsUrl`, `openTarget`, external page, HTTP mutation
 API or compatibility alias. A client without internal cards receives
@@ -1271,7 +1272,7 @@ Settings groups Address for viewing assets, Local records, Troubleshooting and A
 settings. Confirmed changes are `clear_read_address`, `set_endpoint`,
 `restore_endpoint` (gRPC or GraphQL), `import_local_data`, `reset_local_data`
 and `restart_wallet_service`. Their preparation and confirmation use app-only
-`ui.act_card` with card permission, revision, operation identity and the exact
+`ui_act_card` with card permission, revision, operation identity and the exact
 preparation identity. Choosing or checking data does not apply it, contact a
 wallet or restart the SDK. Duplicate confirmation returns the same admitted
 result; MCP JSON-RPC request IDs do not authorize another operation.
@@ -1429,13 +1430,13 @@ remains set; storing an endpoint does not modify that environment.
 
 Download creates and verifies one private snapshot with an exclusive generated
 file identity. Supported Host delivery does not publish a second permanent backup. Response or result
-storage failure never regenerates that snapshot. `ui.read_settings_file` is
+storage failure never regenerates that snapshot. `ui_read_settings_file` is
 app-only and binds card/permission, operation, file, offset, verified hash/length
 and the current `attemptId` for a private download. Its ordinary content carries
 range metadata; Base64 bytes appear only in `sui-mcp/settings-file` UI metadata.
 The View checks the complete hash before standard Host delivery.
 
-File continuations also use app-only `ui.act_card`:
+File continuations also use app-only `ui_act_card`:
 
 - `settings_retry_download`: `operationId`, `fileId`, `previousAttemptId` and a
   new `attemptId`; atomically advances one attempt on the same live snapshot.
@@ -1494,8 +1495,8 @@ and addresses. Historical disconnected/failed records do not prove a current
 connection or approval. The complete recorded impact remains bound to admission;
 the display does not filter it into a new wallet-eligibility rule.
 
-Endpoint changes require fully quitting/reopening every participating app to
-apply parent configuration. Restart connection service only replaces the SDK
+Endpoint changes require stopping all participating MCP connections and waiting
+for the shared parent to exit, then reopening them to apply its configuration. Restart connection service only replaces the SDK
 child. Installation environment overrides continue to take precedence. Custom
 providers affect read data quality; use trusted Sui mainnet providers.
 
@@ -1515,12 +1516,12 @@ permissions and display facts. Clients must use the returned URI/key values.
 | `suimcp://docs/mcp-tools` | API reference: tool contracts, response fields, statuses, follow-up fields, and output boundaries. |
 | `suimcp://docs/wallet-connection` | Wallet connection reference: active read context, private SDK ownership and user-approved transaction requests. |
 | `suimcp://docs/agent-behavior` | Answer playbook: user-question flows, tool selection, and response wording boundaries. |
-| `suimcp://protocols/deepbook-v3` | Protocol reference only; use MCP tool responses and `read.list_supported_protocols` for current support. |
+| `suimcp://protocols/deepbook-v3` | Protocol reference only; use MCP tool responses and `read_list_supported_protocols` for current support. |
 | `suimcp://protocols/deepbook-margin` | Protocol reference only; no margin MCP read tools or signable actions are exposed in this release. |
 
 Only allowlisted mainnet protocol references are exposed as MCP resources.
 
-Protocol resources are not runtime registries, supported-protocol lists, live liquidity sources, route recommendations, or signing-readiness signals. Use `read.get_server_status`, `read.list_supported_protocols`, concrete tool schemas, and concrete tool responses for current product support.
+Protocol resources are not runtime registries, supported-protocol lists, live liquidity sources, route recommendations, or signing-readiness signals. Use `read_get_server_status`, `read_list_supported_protocols`, concrete tool schemas, and concrete tool responses for current product support.
 
 MCP resources are runtime-facing references that connected AI clients can read.
 

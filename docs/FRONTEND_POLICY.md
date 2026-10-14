@@ -321,7 +321,7 @@ Connect/Review explain that path when recovery is relevant; they do not host
 service-restart controls. Normal QR approval or initialization is not a failure
 diagnosis. An uncertain command first offers its same-request status check.
 If the parent/Settings is unavailable or a parent endpoint/installation change
-must apply, explain full exit/reopen of all participating apps. Child restart
+must apply, explain the setup guide's stop/reopen procedure for the shared parent. Child restart
 never implies remote disconnection, connection approval or chain outcome.
 
 Settings separates ordinary Read address, Local records and Troubleshooting
@@ -352,7 +352,7 @@ names do not select either path.
 An earlier possibly handled attempt requires Save a local copy before local
 saving, with a warning that another copy may exist. A local save in progress
 offers status observation, not another save, Host retry or cancellation. A
-confirmed failure with no publication can offer Retry save within the original
+failure recorded as `not_published` can offer Retry save within the original
 period; an uncertain result offers only Check status. State, authority, expiry,
 navigation and controls use the same current projection. Recorded saving and
 temporary cleanup remain separate facts, including when cleanup fails.
@@ -469,7 +469,7 @@ interchangeable:
 | Account address / Selected account / Reviewed account / Sender / Receiving account / Affected account | Query `account`, `activeAccount`, `review.account`, receipt `sender`, recipients and balance-change addresses | Query target, current selection, bound review and transaction roles; none is wallet authorization |
 | Ready for your review / Review needs updating / Review blocked | `ready_for_wallet_review` / `refresh_required` / `blocked`, displayed through `REVIEW_UI_LABELS` | Computed review information, not current permission to request a signature |
 | Transaction succeeded/failed on Sui | Verified `execution.status` / receipt `effectsStatus` | Independently observed chain outcome, not a completed tool call or wallet response |
-| Check status / Retry review / Check transaction result | `ui.read_card` or public saved resource / `prepare_review` / `read_result` | Read this card, recompute permitted review details, or observe the existing transaction; none requests a signature |
+| Check status / Retry review / Check transaction result | `ui_read_card` or public saved resource / `prepare_review` / `read_result` | Read this card, recompute permitted review details, or observe the existing transaction; none requests a signature |
 | Retry connection / Request wallet approval | `connect` / `request_signature` | Explicit connection retry versus a permitted request for wallet approval; actual wallet approval is still required |
 | Continue review | `prepare_review` after the View's local pause and a fresh target check | Explicitly continue review updates; it does not authorize signing |
 | Stop connecting / Stop approval request / Stop checking result | `stop_connection` / `stop_waiting` in `awaiting_signature` / `stop_waiting` once submission has started | End pairing, remove this approval request's submission permission, or stop result observation; the last cannot cancel a submitted transaction |

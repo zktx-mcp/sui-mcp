@@ -77,7 +77,7 @@ describe("documentation responsibility boundaries", () => {
       ],
       [
         "suimcp://protocols/deepbook-v3",
-        "Protocol reference only; use MCP tool responses and read.list_supported_protocols for current support."
+        "Protocol reference only; use MCP tool responses and read_list_supported_protocols for current support."
       ],
       [
         "suimcp://protocols/deepbook-margin",
@@ -138,13 +138,13 @@ describe("documentation responsibility boundaries", () => {
     expect(mcpTools).toMatch(/userAnswerUse\.diagnosticOnlyFields/);
     expect(mcpTools).toMatch(/userAnswerUse\.followUp\.tool/);
     expect(mcpTools).toMatch(/toolAvailability\.requiredToolsAvailable/);
-    expect(mcpTools).toMatch(/requiredPaymentAnswerTool:\s+"read\.preview_intent_evidence"/);
+    expect(mcpTools).toMatch(/requiredPaymentAnswerTool:\s+"read_preview_intent_evidence"/);
     expect(mcpTools).toMatch(/requiredPaymentAnswerField:\s+"responseSummary"/);
 
     expect(mcpTools).not.toMatch(/^## Example Workflows/m);
-    expect(mcpTools).not.toMatch(/Check server status with `read\.get_server_status`/);
+    expect(mcpTools).not.toMatch(/Check server status with `read_get_server_status`/);
     expect(mcpTools).not.toMatch(/Use summary output first/);
-    expect(mcpTools).not.toMatch(/immediately call `session\.wait_wallet_identity`/);
+    expect(mcpTools).not.toMatch(/immediately call `session_wait_wallet_identity`/);
   });
 
   it("keeps AGENT_BEHAVIOR as the answer playbook rather than a tool contract", () => {
@@ -152,12 +152,12 @@ describe("documentation responsibility boundaries", () => {
 
     expect(agentBehavior).toMatch(/MCP-exposed answer playbook/);
     expect(agentBehavior).toMatch(/does not define tool schemas or field contracts/i);
-    expect(agentBehavior).toMatch(/Answer only from current tool evidence[\s\S]{0,220}read\.get_server_status/);
+    expect(agentBehavior).toMatch(/Answer only from current tool evidence[\s\S]{0,220}read_get_server_status/);
     expect(agentBehavior).toMatch(/Can I cover a 1000 dollar payment/);
     expect(agentBehavior).toMatch(/How much are my USD-denominated assets together/);
     expect(agentBehavior).toMatch(/What is the shortfall/);
     expect(agentBehavior).toMatch(/Do not call quote tools for the same payment coverage, balance-total, or shortfall question/);
-    expect(agentBehavior).toMatch(/session\.wait_wallet_connection` use the/);
+    expect(agentBehavior).toMatch(/session_wait_wallet_connection_card` use the/);
   });
 
   it("keeps MCP_SETUP focused on setup while linking to API and playbook references", () => {
@@ -294,8 +294,8 @@ describe("documentation responsibility boundaries", () => {
 describe("disconnect request routing", () => {
   it("routes disconnect requests to the existing user-confirmed card, never to clearing read context", () => {
     const behavior = read("docs/AGENT_BEHAVIOR.md");
-    const flow = requiredBlock(behavior, 'For "disconnect my wallet",', '3. `session.get_wallet_connection`');
-    expect(flow).toContain("open `session.create_wallet_connection` with `intent: disconnect`");
+    const flow = requiredBlock(behavior, 'For "disconnect my wallet",', '3. `session_get_wallet_connection_card`');
+    expect(flow).toContain("open `session_open_wallet_connection_card` with `intent: disconnect`");
     expect(flow).toContain("Confirm disconnect or Back");
     expect(flow).toContain("Back only returns to the connection view");
     expect(flow).toContain("does not submit Cancel review or disconnect");

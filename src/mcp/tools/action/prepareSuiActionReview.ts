@@ -25,9 +25,9 @@ import { userAnswerUseSchema } from "../read/commonSchemas.js";
 
 export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps, "sessions" | "activityStore" | "cards" | "logger">): void {
   server.registerTool(
-    TOOL_NAMES.actionPrepareSuiActionReview,
+    TOOL_NAMES.actionStartReview,
     {
-      title: "Prepare swap review",
+      title: "Start swap review",
       description: "Create a local swap review session on a supported protocol. Returns an internal review card.",
       inputSchema: z.object({
         intent: swapIntentInputSchema
@@ -50,7 +50,7 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
       // no transaction can be built without that account. Refuse here when no
       // wallet account is connected instead of creating a hollow proposal that
       // can never be computed or signed. Connect first via
-      // session.create_wallet_connection.
+      // session_open_wallet_connection_card.
       let activeAccount;
       try {
         activeAccount = await deps.activityStore.getActiveAccount();
@@ -105,9 +105,9 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
 
   registerSuiMcpTool(
     server,
-    TOOL_NAMES.actionPrepareExternalProposalReview,
+    TOOL_NAMES.actionCreateProposalReview,
     {
-      title: "Prepare external proposal review",
+      title: "Create external proposal review",
       description: "Create a local non-signable review session from an untrusted external Sui proposal.",
       inputSchema: z.object({
         proposal: externalProposalSchema

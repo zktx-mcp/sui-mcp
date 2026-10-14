@@ -96,7 +96,7 @@ WAL mode can create companion files next to the main database, such as `sui-mcp.
 - `local_settings`: allowlisted local settings. The current key set is `suiGrpcUrl` and `suiGraphqlUrl`, stored as JSON-encoded text and applied after restart.
 - `coin_metadata_cache`: account-independent positive cache for Sui coin metadata used only to format wallet balance display amounts. Rows are keyed by normalized coin type and verified mainnet chain identifier, expire after 24 hours, and are excluded from local data export/import. Read or write failures for this cache block affected wallet unit reads with `metadata_cache_unavailable`; they are not reported as unavailable token decimals.
 
-The following live session tables hold runtime session state in the shared database so any one review server can serve a session another client created (see [Shared local server](#shared-local-server)):
+The following live session tables hold runtime session state in the shared database so the shared backend can serve cards and sessions created by participating clients (see [Shared local server](#shared-local-server)):
 
 - `live_review_sessions`: the live review session record — status, bound
   account, preparation/connection revision, current attempt reference,
@@ -228,7 +228,7 @@ All state-writing MCP callers use this owner, including reads that save activity
 
 ### Read cards
 
-`live_read_cards` owns the card kind (account, receipt, chart, connect or review), permission hash, backend owner, revision, original/accepted input, state/reason and saved result or scoped workflow operation reference. Business request status is not copied into a separate card state machine. Admission and result writes use conditional updates. Expiry is applied by the backend to unsubmitted input; a View timer only requests state. Frame recreation and chat navigation perform no close transition. The backend rejects late writes after local data replacement or owner changes, and recovery closes unfinished cards without repeating their source query.
+`live_read_cards` owns the card kind (account, receipt, chart, connect, review or settings), permission hash, backend owner, revision, original/accepted input, state/reason and saved result or scoped workflow operation reference. Business request status is not copied into a separate card state machine. Admission and result writes use conditional updates. Expiry is applied by the backend to unsubmitted input; a View timer only requests state. Frame recreation and chat navigation perform no close transition. The backend rejects late writes after local data replacement or owner changes, and recovery closes unfinished cards without repeating their source query.
 
 The same record contains a model-safe result and, for receipts, separately validated UI-only input values and PTB display data. They are projections of one source read. They are not activity evidence or serialized signing material. Public saved resources exclude the private partition, and product backups exclude card records and permission hashes entirely.
 
@@ -302,8 +302,7 @@ an approved address in the sole unexpired connection, with no pending connection
 operation. Missing source IDs remain valid historical/import data but require
 explicit selection before current default use. Eligibility is derived at the
 database evaluation time and published to cards as `usableConnectionId` and
-`assetReadAccount`; Views do not recount recorded connections. This adds no
-table or expiry writer. Stored status, disconnection outcomes and historical
+`assetReadAccount`; Views do not recount recorded connections. Stored status, disconnection outcomes and historical
 account records retain their separate meanings.
 The store reads the current run's private supervisor snapshot inside evaluation
 and immediate admission. Missing inspection does not mean an empty service.
@@ -486,7 +485,7 @@ NDJSON event logs remain optional audit/debug logs. They are not the product act
 
 Raw session tokens are not stored in SQLite. Live session records store token hashes for validation; this private state is separate from activity evidence and product backups. The activity-store evidence input types do not accept session token material, and review evidence JSON is checked with the same forbidden-field-name policy used for MCP output. Transaction bytes, signatures, serialized signing material, token-hash/session-token-like fields, seeds, mnemonics, and private-key-like field names are rejected before write. External proposal ingestion also rejects recognized Sui private-key strings, valid English BIP39 mnemonic phrases, obvious sensitive markers, and suspicious raw secret-like payloads before storing the sanitized requested intent. Generic asset metadata such as token symbols remains allowed.
 
-The local settings table is not a secret store. It stores only allowlisted local preferences such as the Sui mainnet gRPC and GraphQL endpoints. It must not store database paths, tokens, credentials, private keys, mnemonics, seeds, or arbitrary API keys. Environment overrides such as `SUI_GRPC_URL` and `SUI_GRAPHQL_URL` can temporarily supersede stored endpoints without mutating the database.
+The local settings table is not a secret store. It stores only allowlisted local preferences such as the Sui mainnet gRPC and GraphQL endpoints. It must not store database paths, tokens, credentials, private keys, mnemonics, seeds, or arbitrary API keys. Environment overrides such as `SUI_MCP_GRPC_URL` and `SUI_MCP_GRAPHQL_URL` can temporarily supersede stored endpoints without mutating the database.
 
 Review intent capture follows one adapter convention: if an adapter wants the original requested intent materialized for activity queries, it must place that object at `ActionPlan.adapterData.requestedIntent`. The full `plan_json` remains the canonical action plan, and `intent_json` is only the query-friendly copy of that adapter-supplied intent.
 
@@ -498,7 +497,6 @@ address withdrawals, gas reservations, and their observed balance/epoch facts.
 They are deeply copied and revalidated before admission, and are excluded from
 public backup.
 
-Old private evidence is not upgraded into funding proof. Existing owner recovery
-removes private material; a new review recomputes it. Historical public reviews,
+Owner recovery removes private material; a new review recomputes funding proof. Historical public reviews,
 admitted request facts, chain results and backup remain readable. Reading history
 does not re-query funding or confer new signing authority.

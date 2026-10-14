@@ -13,13 +13,13 @@ import { sessionStoreToolError } from "../../toolErrors.js";
 
 export function registerWalletConnectionTools(server: McpServer, deps: McpServerDeps): void {
   const failure = (error: unknown) => sessionStoreToolError(error, deps.logger);
-  server.registerTool(TOOL_NAMES.sessionCreateWalletConnection, {
+  server.registerTool(TOOL_NAMES.sessionOpenWalletConnectionCard, {
     title: "Open wallet connection controls", description: "Open a card for Sui wallet connection, disconnection and account selection.",
     inputSchema: z.object({ intent: z.enum(["manage", "connect", "disconnect"]).default("manage") }), outputSchema: successOutputSchema(cardSnapshotSchema.shape),
     _meta: cardMetadata("connect"), annotations: { readOnlyHint: false, openWorldHint: false }
   }, async ({ intent }) => { try { return await createWorkflowCard(server, deps, "connect", { intent }); } catch (error) { return failure(error); } });
-  server.registerTool(TOOL_NAMES.sessionGetWalletConnection, {
-    title: "Get wallet connection", description: "Read the saved state of one wallet connection card.",
+  server.registerTool(TOOL_NAMES.sessionGetWalletConnectionCard, {
+    title: "Get wallet connection card", description: "Read the saved state of one wallet connection card.",
     inputSchema: z.object({ cardId: z.string().min(1) }), outputSchema: successOutputSchema(cardSnapshotSchema.shape),
     annotations: { readOnlyHint: false, openWorldHint: false }
   }, async ({ cardId }) => {
@@ -30,8 +30,8 @@ export function registerWalletConnectionTools(server: McpServer, deps: McpServer
       return okToolResult(snapshot);
     } catch (error) { return failure(error); }
   });
-  server.registerTool(TOOL_NAMES.sessionWaitWalletConnection, {
-    title: "Wait for wallet connection", description: "Wait briefly for a wallet connection card's approval or required user input.",
+  server.registerTool(TOOL_NAMES.sessionWaitWalletConnectionCard, {
+    title: "Wait for wallet connection card", description: "Wait briefly for a wallet connection card's approval or required user input.",
     inputSchema: z.object({ cardId: z.string().min(1), timeoutMs: timeoutInputSchema }),
     outputSchema: successOutputSchema({ waitOutcome: z.enum(WAIT_OUTCOMES), card: cardSnapshotSchema }),
     annotations: { readOnlyHint: false, openWorldHint: false }

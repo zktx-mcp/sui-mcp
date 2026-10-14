@@ -163,7 +163,7 @@ protect readers on separate surfaces:
   custody, venue ranking, route choice, silent settlement-token selection, fiat
   cash-out, P&L and signing-readiness claims; user-approved wallet signing and
   independently verified backend submission are distinct supported operations;
-- the core answer path that `read.preview_intent_evidence.responseSummary` and
+- the core answer path that `read_preview_intent_evidence.responseSummary` and
   response-local `userAnswerUse.answerFields` identify fields for
   USD-denominated coverage, balance-total, and shortfall answers;
 - the safety rule that separate DeepBook quote outputs are price estimates and
@@ -510,7 +510,7 @@ other boundaries, define the equivalent negative combinations before editing.
   evidence and required user choices.
 - USD-denominated evidence checks require a runtime-facing preflight contract.
   AI-client guidance exposed through MCP instructions, resources, prompts, and
-  tests must require `read.get_server_status` before USD-denominated coverage,
+  tests must require `read_get_server_status` before USD-denominated coverage,
   balance-total, or shortfall answers.
 - Ordinary MCP tools are evidence and card gateways. They may create review
   sessions and return internal cards, but model calls must not authorize
@@ -657,8 +657,28 @@ observation. Settings permissions remain in UI metadata and scoped app-only inpu
 
 - Tool names, descriptions, and schemas must be concise, literal, and
   instruction-free.
-- Use MCP-compatible tool names. Prefer dot prefixes such as
-  `read.list_deepbook_pools` over slash names.
+- Use MCP-compatible `domain_verb_object` tool names, such as
+  `read_list_deepbook_pools`, without an additional product prefix. The verb
+  describes the actual effect: `get` reads one result, `list` reads a collection,
+  `inspect` analyzes evidence, `quote` estimates an exchange, `start` begins a
+  workflow, and `cancel` cancels it. Use `create`, `open`, `wait`, `submit` or
+  `act` when they accurately describe the existing contract. Names do not grant
+  authority or imply read-only, idempotent, signing-ready or safe behavior.
+- Keep product names and technical identities separate. User-facing product
+  copy uses the official display name; repository, executable, MCP server and
+  default connection registration use the lowercase kebab-case project ID.
+  Card titles describe their purpose without repeating the product name.
+- Product-owned environment variables use the project ID in uppercase with
+  underscores, followed by `_` and an `UPPER_SNAKE_CASE` role suffix. For Sui
+  MCP the prefix is `SUI_MCP_`. Product capability IDs use `domain.member`,
+  error and state codes use `snake_case`, JSON and TypeScript fields use
+  `lowerCamelCase`, and CLI options and HTTP path segments use `kebab-case`.
+  External wire formats, stored DB/backup fields and URIs, authentication
+  labels, chain IDs and SDK-owned names retain their owning contracts.
+- Replace product-owned names and their direct consumers together. Do not add
+  compatibility aliases, old-key detection, migrations, name translators or
+  a naming-specific schema framework. Preserve data, credentials and existing
+  input, authorization and integrity checks.
 - Do not include hidden instructions, prompt-like text, policy text, or
   model-behavior requests in tool descriptions.
 - Do not expose arbitrary shell execution, arbitrary Move calls, arbitrary
@@ -707,7 +727,7 @@ to understand its own meaning.
 
 Cross-tool references are allowed only as explicit follow-up guidance, for
 example: this quote result is a price estimate only; for payment amount or
-shortfall answers, call `read.preview_intent_evidence` and use
+shortfall answers, call `read_preview_intent_evidence` and use
 `responseSummary`.
 
 Do not make a different API response necessary just to understand whether the

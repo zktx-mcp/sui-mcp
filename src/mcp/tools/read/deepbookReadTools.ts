@@ -335,7 +335,7 @@ const deepbookQuoteQuantitySemanticsSchema = z.object({
   canUseForPaymentAnswer: z.literal(false),
   canUseForShortfallAnswer: z.literal(false),
   doNotCombineWithPaymentAnswer: z.literal(true),
-  requiredPaymentAnswerTool: z.literal("read.preview_intent_evidence"),
+  requiredPaymentAnswerTool: z.literal("read_preview_intent_evidence"),
   paymentAnswerUseBlockedReason: z.literal("quote_output_is_price_reference_not_payment_answer"),
   requiredPaymentAnswerField: z.literal("responseSummary"),
   fiatUsdCashOutAvailable: z.literal(false),

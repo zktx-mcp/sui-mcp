@@ -45,9 +45,9 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
 
   registerMcpResources(server);
   registerReadCards(server, deps);
-  registerMcpPrompts(server, deps.promptSurfaces ?? []);
+  const registeredPromptNames = registerMcpPrompts(server, deps.promptSurfaces ?? []);
   registerAccountTools(server, deps);
-  registerReadTools(server, deps);
+  registerReadTools(server, deps, registeredPromptNames);
   registerSettingsTools(server, deps);
   registerActionTools(server, deps);
   registerSessionTools(server, deps);

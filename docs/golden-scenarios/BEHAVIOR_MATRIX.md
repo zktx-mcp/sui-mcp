@@ -6,7 +6,7 @@ For current-release intent evidence checks that compare user prompts, preferred 
 
 For the deterministic MCP replay contract behind Korean USD-denominated coverage, total, and shortfall questions, see `docs/golden-scenarios/INTENT_EVIDENCE_GOLDEN_ANSWERS.md`.
 
-Manual client runs should call `read.get_server_status` first and record the package version, `evidencePolicy.version`, and `implementedToolsCount` before running the question rows.
+Manual client runs should call `read_get_server_status` first and record the package version, `evidencePolicy.version`, and `implementedToolsCount` before running the question rows.
 
 ## Current Release Intent Evidence Corpus
 
@@ -18,40 +18,40 @@ For current asset reads, use the connection-qualified default from `assetReadAcc
 
 `What is 10 SUI worth?`
 Class: `answer_only`.
-Use `read.get_deepbook_mid_price` with a disclosed DeepBook SUI quote pool such as `SUI_USDC`.
-Use `read.list_deepbook_pools` only when the pool is ambiguous.
+Use `read_get_deepbook_mid_price` with a disclosed DeepBook SUI quote pool such as `SUI_USDC`.
+Use `read_list_deepbook_pools` only when the pool is ambiguous.
 Expose DeepBook pool, mid price, quote asset, and `fetchedAt`.
 Do not present this as a global market price, route recommendation, settlement choice, or signing readiness.
 
 `If I sell 10 SUI, how many dollars do I get?`
 Class: `clarify_or_intent_evidence`.
 Do not quote until the user selects a registered DeepBook quote asset or pool, or asks for wallet-scoped USD-denominated intent evidence.
-If the user chooses a pool such as SUI/USDC, call `read.quote_deepbook_display_amount`.
+If the user chooses a pool such as SUI/USDC, call `read_quote_deepbook_display_amount`.
 Expose source input, missing quote-token or pool choice, fiat cash-out boundary, and available intent-evidence path when account context exists.
 Do not silently choose USDC or USDT, infer inverse output-target quotes, use web/finance lookup for USDC/USD, assume the USDC/USD peg, or present fiat cash-out, final min-out, route quality, funding readiness, or signing readiness.
 
 `What can I sell?`
 Class: `wallet_asset_read`.
-Use active account context or explicit address, then call `read.classify_wallet_assets`.
+Use active account context or explicit address, then call `read_classify_wallet_assets`.
 Expose returned zero/nonzero coin-balance classes, gas asset context, DeepBook token registry matches, and `uninspectedAssetClasses`.
 Do not treat staked, locked, DeepBook manager, LP, vault, NFT, object, unsupported, or unknown classes as zero balances or sellable candidates.
 
 `Sell DEEP for USDC.`
 Class: `clarify_or_quote_context`.
 Ask for a source amount before quoting.
-After source amount and pool are explicit, call `read.quote_deepbook_display_amount`.
-Use `read.classify_wallet_assets` only for scoped wallet context.
+After source amount and pool are explicit, call `read_quote_deepbook_display_amount`.
+Use `read_classify_wallet_assets` only for scoped wallet context.
 Do not assume amount, choose a route, run inverse quotes, create a review session, or treat DeepBook manager inventory as spendable.
 
 `Make $1000.`
 Class: `intent_evidence_with_choices`.
-Use `read.list_settlement_asset_groups`, then `read.preview_intent_evidence` when active account or explicit address context is available.
+Use `read_list_settlement_asset_groups`, then `read_preview_intent_evidence` when active account or explicit address context is available.
 Ask only for choices returned by `responseSummary`.
 Do not silently choose USDC or USDT, treat USDC as fiat USD, choose source assets, rank routes, or prepare signing.
 
 `Can I cover a 1000 dollar payment?`
 Class: `intent_evidence_with_choices`.
-Use `read.list_settlement_asset_groups`, then `read.preview_intent_evidence` with `intentKind: "cover_payment_like_amount"`, `denomination: "dollar"`, and `requiredDisplayAmount: "1000"`.
+Use `read_list_settlement_asset_groups`, then `read_preview_intent_evidence` with `intentKind: "cover_payment_like_amount"`, `denomination: "dollar"`, and `requiredDisplayAmount: "1000"`.
 Expose `responseSummary`, settlement-asset coverage basis, settlement-asset shortfall when available, required user choices, and unsupported payment/signing boundaries.
 Do not silently choose USDC or USDT, claim fiat USD cash-out, route-dependent payment support, gas readiness, transaction building, or signing readiness.
 
@@ -61,35 +61,35 @@ Do not claim fiat USD cash-out, route-dependent payment support, gas completenes
 
 `How much are my USD-denominated assets together?`
 Class: `intent_evidence_total_only`.
-Use `read.list_settlement_asset_groups`, then `read.preview_intent_evidence` with `intentKind: "summarize_settlement_asset_group_balance"` and `denomination: "dollar"`.
+Use `read_list_settlement_asset_groups`, then `read_preview_intent_evidence` with `intentKind: "summarize_settlement_asset_group_balance"` and `denomination: "dollar"`.
 Expose `responseSummary.conclusionKind: "current_settlement_asset_total"` and current display total when available.
 Do not invent a target amount, silently choose USDC or USDT, treat the total as fiat USD cash-out, recommend a route, claim payment readiness, produce transaction material, or imply signing readiness.
 
 `Which stablecoin-like asset is highest or lowest?`
 Class: `settlement_asset_group_parity`.
-Use `read.list_settlement_asset_groups`, then `read.summarize_settlement_asset_group_parity` with `denomination: "dollar"`.
+Use `read_list_settlement_asset_groups`, then `read_summarize_settlement_asset_group_parity` with `denomination: "dollar"`.
 Expose `responseSummary.referenceAssetRole`, min/max/mean/median statistics, and unsupported boundaries.
 Do not treat the reference asset as settlement selection, fiat USD value, peg assumption, payment readiness, route recommendation, transaction material, or signing readiness.
 
 `What is the shortfall?`
 Class: `intent_evidence_with_context_or_clarify`.
-If a target amount was already established, use `read.preview_intent_evidence` with that amount and answer from `responseSummary`.
+If a target amount was already established, use `read_preview_intent_evidence` with that amount and answer from `responseSummary`.
 If not, ask for the missing target amount.
 Do not guess the missing amount, silently choose a settlement token, choose source assets, rank routes, claim gas readiness, prepare signing, or produce transaction material.
 
 `Make it 100 SUI.`
 Class: `blocked_with_context`.
-Use `read.classify_wallet_assets` only for current coin context when active account or explicit address is available.
+Use `read_classify_wallet_assets` only for current coin context when active account or explicit address is available.
 Do not create a portfolio target, rebalance plan, source selection, route recommendation, or review session.
 
 `Keep 100 SUI and convert the rest.`
 Class: `blocked_with_context`.
-Use `read.classify_wallet_assets` only for current coin context when active account or explicit address is available.
+Use `read_classify_wallet_assets` only for current coin context when active account or explicit address is available.
 Do not infer gas reserve, sell source, route, reserve policy, transaction material, or signing readiness.
 
 `If USDC is short, sell another token to fill it.`
 Class: `intent_evidence_with_choices`.
-Use `read.preview_intent_evidence` with `targetAssetSymbol: "USDC"` and `targetAssetSelectionSource: "user_explicit"` when active account or explicit address context is available.
+Use `read_preview_intent_evidence` with `targetAssetSymbol: "USDC"` and `targetAssetSelectionSource: "user_explicit"` when active account or explicit address context is available.
 Expose selected target shortfall, `selectedTarget.selectionSource`, settlement-asset candidate conversion evidence or quote-unavailable reasons, and required user choices.
 Do not set target provenance for an AI-inferred target. Do not auto-pick assets to sell, rank routes, merge non-group quote proceeds into coverage, treat uninspected assets as funding sources, or prepare signing.
 
@@ -97,7 +97,7 @@ Do not set target provenance for an AI-inferred target. Do not auto-pick assets 
 
 `What is 1 SUI worth?`
 Class: `answer_only`.
-Call `read.get_deepbook_mid_price` with `poolKey: "SUI_USDC"` for Sui MCP verified context.
+Call `read_get_deepbook_mid_price` with `poolKey: "SUI_USDC"` for Sui MCP verified context.
 Answer as DeepBook SUI/USDC mid price at `fetchedAt`, not as the global market price.
 Do not use external web data unless the user explicitly asks for non-product market context.
 Do not ask for a wallet or push a review session.
@@ -112,12 +112,12 @@ Do not present it as a global USD price, route recommendation, price-impact calc
 
 `How much do I have?`
 Class: `clarify`.
-Check `session.get_interaction_status.assetReadAccount`. If no usable default is available, ask for a Sui address for tools that accept `account`. Open Connect only when the user requests connection.
+Check `session_get_interaction_status.assetReadAccount`. If no usable default is available, ask for a Sui address for tools that accept `account`. Open Connect only when the user requests connection.
 
 `Connect my wallet.`
 Class: `tool_wait`.
-Call `session.create_wallet_connection` with `intent: connect` and present the internal Connect card. Its authenticated View starts one pairing after checking current state; the ordinary tool call or wait does not. Read or wait using its cardId. A connection is account context, not transaction approval or login.
-Use `session.get_interaction_status.assetReadAccount` before announcing a usable default address. Resolve `connectionConflict` through user-confirmed targeted disconnection; never pick a wallet silently.
+Call `session_open_wallet_connection_card` with `intent: connect` and present the internal Connect card. Its authenticated View starts one pairing after checking current state; the ordinary tool call or wait does not. Read or wait using its cardId. A connection is account context, not transaction approval or login.
+Use `session_get_interaction_status.assetReadAccount` before announcing a usable default address. Resolve `connectionConflict` through user-confirmed targeted disconnection; never pick a wallet silently.
 On `timed_out`, say the wallet connection is still pending, not failed.
 
 `I want to buy $10 worth of SUI.`

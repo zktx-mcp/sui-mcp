@@ -16,7 +16,7 @@ export function settingsUploadMessageBudget(message: unknown): number | undefine
   const envelope = structuredClone(message) as { id?: unknown; method?: unknown; params?: { name?: unknown; arguments?: {
     revision?: unknown; input?: { action?: unknown; offset?: unknown; chunkBase64?: unknown }
   } } };
-  if (envelope.method !== "tools/call" || envelope.params?.name !== "ui.act_card" ||
+  if (envelope.method !== "tools/call" || envelope.params?.name !== "ui_act_card" ||
       envelope.params.arguments?.input?.action !== "settings_upload_chunk") return undefined;
   // Safe-integer decimal maxima cover ids/revisions; upload offsets use the
   // accepted raw-file limit.

@@ -46,7 +46,7 @@ export function walletBalanceUserAnswerUse(): UserAnswerUse {
     ],
     diagnosticOnlyFields: ["source", "quantitySemantics", "hasNextPage", "cursor"],
     followUp: {
-      tool: "read.preview_intent_evidence",
+      tool: "read_preview_intent_evidence",
       inputFields: ["account"],
       answerFields: ["responseSummary"],
       reason: "Use for USD-denominated payment coverage, balance-total, or shortfall answers; wallet balances are current coin snapshots only."
@@ -82,7 +82,7 @@ export function walletClassificationUserAnswerUse(): UserAnswerUse {
     ],
     diagnosticOnlyFields: ["source", "quantitySemantics", "hasNextPage", "cursor"],
     followUp: {
-      tool: "read.preview_intent_evidence",
+      tool: "read_preview_intent_evidence",
       inputFields: ["account"],
       answerFields: ["responseSummary"],
       reason: "Use for USD-denominated payment coverage, balance-total, or shortfall answers; classification labels are not payment evidence."
@@ -257,7 +257,7 @@ export function deepbookOrderbookUserAnswerUse(): UserAnswerUse {
     ],
     diagnosticOnlyFields: ["source"],
     followUp: {
-      tool: "read.quote_deepbook_display_amount",
+      tool: "read_quote_deepbook_display_amount",
       inputFields: ["poolKey"],
       answerFields: ["quote"],
       reason: "Use for an indicative DeepBook quote after the user supplies an explicit source amount, pool, and direction."
@@ -272,7 +272,7 @@ export function deepbookMidPriceUserAnswerUse(): UserAnswerUse {
     answerFields: ["poolKey", "base", "quote", "price", "priceDirection", "priceType", "fetchedAt"],
     diagnosticOnlyFields: ["source", "priceSemantics"],
     followUp: {
-      tool: "read.preview_intent_evidence",
+      tool: "read_preview_intent_evidence",
       answerFields: ["responseSummary"],
       reason: "Use for USD-denominated payment coverage, balance-total, or shortfall answers; mid price is pool price context only."
     }
@@ -374,7 +374,7 @@ export function deepbookQuoteUserAnswerUse(summaryKind: "raw" | "display"): User
       "quantitySemantics.paymentAnswerUseBlockedReason"
     ],
     followUp: {
-      tool: "read.preview_intent_evidence",
+      tool: "read_preview_intent_evidence",
       answerFields: ["responseSummary"],
       reason:
         "Use responseSummary for payment coverage, balance-total, or shortfall answers; if this quote was called during a payment question, do not combine its numbers into the conclusion."
@@ -435,7 +435,7 @@ export function deepbookAccountInventoryUserAnswerUse(detailStatus: DeepbookAcco
     preconditionFields: ["detailStatus"],
     diagnosticOnlyFields,
     followUp: {
-      tool: "read.summarize_wallet_assets",
+      tool: "read_summarize_wallet_assets",
       answerFields: ["balances"],
       reason: "Use for current wallet coin-balance snapshots; DeepBook BalanceManager inventory is a separate account surface."
     }

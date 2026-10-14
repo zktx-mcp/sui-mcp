@@ -105,7 +105,7 @@ it.each(["A", "a===", "YQ", "YQ=", "YR==", "YQ==\n"])("rejects noncanonical Base
 });
 
 it.each([0, 1, 2, 3, 4])("keeps the independent serialized size within 64 KiB for raw padding %i", (padding) => {
-  const envelope = { jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, method: "tools/call", params: { name: "ui.act_card",
+  const envelope = { jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, method: "tools/call", params: { name: "ui_act_card",
     arguments: { cardId: "card", permission: "scoped-ui-permission", revision: Number.MAX_SAFE_INTEGER,
       input: { action: "settings_upload_chunk", operationId: randomUUID(), fileId: randomUUID(), offset: 16 * 1024 * 1024, chunkBase64: "" } },
     _meta: { hostMessage: "Unicode 資料" } } };

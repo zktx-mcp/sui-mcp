@@ -28,7 +28,7 @@ import { SuiEndpointError, verifyMainnetGraphqlEndpoint, verifyMainnetGrpcEndpoi
 import { GraphqlSuiTransactionActivitySource } from "./suiTransactionGraphqlSource.js";
 
 const startedAt = new Date();
-const smokeFunctionTarget = process.env.SMOKE_FUNCTION_TARGET;
+const smokeFunctionTarget = process.env.SUI_MCP_SMOKE_FUNCTION_TARGET;
 const plannedTools = [
   TOOL_NAMES.readSummarizeWalletAssets,
   TOOL_NAMES.readInspectDeepbookOrderbook,
@@ -76,11 +76,11 @@ class SmokeMainnetError extends Error {
 async function main(): Promise<void> {
   const logger = createStderrLogger("smoke-mainnet");
   const bootConfig = loadSmokeBootConfig();
-  const smokeAddress = parseSuiAddress(requiredEnv("SMOKE_SUI_ADDRESS")) ?? fail("config_error", "SMOKE_SUI_ADDRESS must be a Sui address.");
-  const poolKey = requiredEnv("SMOKE_DEEPBOOK_POOL_KEY");
-  const quoteAmount = requiredEnv("SMOKE_QUOTE_AMOUNT");
-  const inspectDigest = process.env.SMOKE_INSPECT_DIGEST;
-  const inspectRandomLatest = truthyEnv("SMOKE_INSPECT_RANDOM_LATEST");
+  const smokeAddress = parseSuiAddress(requiredEnv("SUI_MCP_SMOKE_ADDRESS")) ?? fail("config_error", "SUI_MCP_SMOKE_ADDRESS must be a Sui address.");
+  const poolKey = requiredEnv("SUI_MCP_SMOKE_DEEPBOOK_POOL_KEY");
+  const quoteAmount = requiredEnv("SUI_MCP_SMOKE_QUOTE_AMOUNT");
+  const inspectDigest = process.env.SUI_MCP_SMOKE_INSPECT_DIGEST;
+  const inspectRandomLatest = truthyEnv("SUI_MCP_SMOKE_INSPECT_RANDOM_LATEST");
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "sui-mcp-smoke", version: "0.0.0" });
@@ -377,18 +377,18 @@ function fail(category: SmokeErrorCategory, message: string): never {
 
 function smokeEnvPresence(): Record<string, boolean> {
   return {
-    SUI_GRPC_URL: process.env.SUI_GRPC_URL !== undefined,
-    SUI_GRAPHQL_URL: process.env.SUI_GRAPHQL_URL !== undefined,
-    SMOKE_SUI_ADDRESS: process.env.SMOKE_SUI_ADDRESS !== undefined,
-    SMOKE_DEEPBOOK_POOL_KEY: process.env.SMOKE_DEEPBOOK_POOL_KEY !== undefined,
-    SMOKE_QUOTE_AMOUNT: process.env.SMOKE_QUOTE_AMOUNT !== undefined,
-    SMOKE_INSPECT_DIGEST: process.env.SMOKE_INSPECT_DIGEST !== undefined,
-    SMOKE_INSPECT_RANDOM_LATEST: process.env.SMOKE_INSPECT_RANDOM_LATEST !== undefined,
-    SMOKE_FUNCTION_TARGET: process.env.SMOKE_FUNCTION_TARGET !== undefined,
-    SMOKE_SWAP_PROTOCOL: process.env.SMOKE_SWAP_PROTOCOL !== undefined,
-    SMOKE_SWAP_FROM_SYMBOL: process.env.SMOKE_SWAP_FROM_SYMBOL !== undefined,
-    SMOKE_SWAP_TO_SYMBOL: process.env.SMOKE_SWAP_TO_SYMBOL !== undefined,
-    SMOKE_SWAP_AMOUNT_DISPLAY: process.env.SMOKE_SWAP_AMOUNT_DISPLAY !== undefined
+    SUI_MCP_GRPC_URL: process.env.SUI_MCP_GRPC_URL !== undefined,
+    SUI_MCP_GRAPHQL_URL: process.env.SUI_MCP_GRAPHQL_URL !== undefined,
+    SUI_MCP_SMOKE_ADDRESS: process.env.SUI_MCP_SMOKE_ADDRESS !== undefined,
+    SUI_MCP_SMOKE_DEEPBOOK_POOL_KEY: process.env.SUI_MCP_SMOKE_DEEPBOOK_POOL_KEY !== undefined,
+    SUI_MCP_SMOKE_QUOTE_AMOUNT: process.env.SUI_MCP_SMOKE_QUOTE_AMOUNT !== undefined,
+    SUI_MCP_SMOKE_INSPECT_DIGEST: process.env.SUI_MCP_SMOKE_INSPECT_DIGEST !== undefined,
+    SUI_MCP_SMOKE_INSPECT_RANDOM_LATEST: process.env.SUI_MCP_SMOKE_INSPECT_RANDOM_LATEST !== undefined,
+    SUI_MCP_SMOKE_FUNCTION_TARGET: process.env.SUI_MCP_SMOKE_FUNCTION_TARGET !== undefined,
+    SUI_MCP_SMOKE_SWAP_PROTOCOL: process.env.SUI_MCP_SMOKE_SWAP_PROTOCOL !== undefined,
+    SUI_MCP_SMOKE_SWAP_FROM_SYMBOL: process.env.SUI_MCP_SMOKE_SWAP_FROM_SYMBOL !== undefined,
+    SUI_MCP_SMOKE_SWAP_TO_SYMBOL: process.env.SUI_MCP_SMOKE_SWAP_TO_SYMBOL !== undefined,
+    SUI_MCP_SMOKE_SWAP_AMOUNT_DISPLAY: process.env.SUI_MCP_SMOKE_SWAP_AMOUNT_DISPLAY !== undefined
   };
 }
 

@@ -34,7 +34,7 @@ GraphQL queries, settings, review sessions, wallet identity, or signable action
 behavior.
 
 The current implementation is intentionally limited to transaction activity
-attribution. It does not promote any protocol to `read.list_supported_protocols`
+attribution. It does not promote any protocol to `read_list_supported_protocols`
 and does not add protocol-specific read tools.
 
 Current package rules are static mainnet research snapshots. The classifier does
@@ -78,25 +78,24 @@ The classifier must not inspect raw GraphQL payloads, transaction bytes,
 signatures, BCS payloads, private keys, session tokens, or provider-only fields
 that are not part of the normalized transaction activity detail model.
 
-## Selection
+## Implemented Rule Scopes
 
-The first classifier pass uses a diversity seed set plus one strategic fixture:
+The classifier has the following transaction-label scopes:
 
-| Protocol | Surface assetGroup | Why selected now | What this tests |
+| Protocol | Activity category | Source scope | Matching boundary |
 | --- | --- | --- | --- |
 | DeepBook V3 | CLOB / order book | Existing product context and pinned SDK source expose order, swap, settlement, BalanceManager, DEEP fee, and rebate concepts. | Order-book package/module/function labeling without adding signing support. |
 | Cetus CLMM | CLMM / AMM | The survey records a CLMM package plus global config and pools table objects. | Pool/table and position-object style signals that are not order-book signals. |
 | Suilend Lending | Lending market | The survey records a main market object, market type package, and lending surfaces. | Reserve, obligation, cToken, borrow, repay, and liquidation style signals. |
 | Aftermath afSUI | Liquid staking | The survey records afSUI packages, vault objects, treasury, and staking surfaces. | Receipt-token, vault, treasury, event/object, and exchange-rate-adjacent signals; direct stake/unstake labels require callable entrypoint verification. |
-| DeepTrade Core | DeepBook wrapper and fee system | Strategic fixture with a deep-dive note; overlaps the CLOB assetGroup but adds FeeManager, Treasury, loyalty, and reserve coverage signals. | Wrapper-vs-underlying attribution and fee-system evidence. |
+| DeepTrade Core | DeepBook wrapper and fee system | Package and object evidence for a wrapper; overlaps the CLOB assetGroup but adds FeeManager, Treasury, loyalty, and reserve coverage signals. | Wrapper-vs-underlying attribution and fee-system evidence. |
 
-Do not treat strategic selection as support. Strategic selection changes review
-priority only; it does not lower evidence, test, or boundary requirements.
+A matching rule does not establish protocol support or reduce its evidence
+requirements.
 
 ## Evidence Hierarchy
 
-Classifier matches must be versioned and evidence-based. A later implementation
-should use this hierarchy:
+Classifier matches must be versioned and evidence-based. The current matching hierarchy is:
 
 1. Direct Move package/module/function match.
 2. Event type package/module match.
@@ -119,7 +118,7 @@ Move call should be the primary label even when the transaction also touches
 DeepBook dependency objects. The DeepBook evidence should remain attached as an
 underlying or related signal, not as a separate unsupported position claim.
 
-## Candidate Output Shape
+## Output Projection
 
 This is the current conceptual shape used by `compact.protocolMatches`; exact
 tool output schemas live in the TypeScript source.
@@ -267,8 +266,8 @@ False-positive controls:
 
 Boundary:
 
-- DeepTrade Core is a strategic fixture and a DeepBook wrapper in the current
-  research snapshot.
+- The implemented DeepTrade rule labels a DeepBook wrapper in normalized
+  transaction facts.
 - DeepTrade app Margin and Earn surfaces are not classified in the first pass
   unless their concrete package/module/function evidence is separately verified.
 

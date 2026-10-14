@@ -347,7 +347,7 @@ export const FRESH_CLIENT_SCENARIOS: readonly FreshClientScenario[] = [
     id: "deepbook_swap_review_signing_blocked",
     description:
       'User asks "make me a DeepBook swap review". The prepare response must create a local review session, keep signing data out of MCP output, and direct the client to account-bound review status.',
-    tool: TOOL_NAMES.actionPrepareSuiActionReview,
+    tool: TOOL_NAMES.actionStartReview,
     toolExpectation: {
       requiredAnswerFields: ["reviewSessionId", "card", "plans[].preliminaryChecks"],
       requiredCanAnswerClaims: [

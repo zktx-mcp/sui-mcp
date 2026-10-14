@@ -7,7 +7,7 @@ in the source repository; tools are in [MCP Tools](MCP_TOOLS.md).
 
 ## Connection and read account
 
-`session.create_wallet_connection` takes an intent: `connect`, `disconnect` or `manage` (the default). A connect-intent card automatically starts one pairing after the View confirms current state with its UI permission, unless a connection or operation already exists. Manage opens connection controls without starting pairing; Connect wallet starts it only after the user clicks. Disconnect opens target-specific confirmation when one connection is available; the user chooses Confirm disconnect or returns with Back. No model-facing call can disconnect or request a signature. Public saved reads never start pairing. QR data stays in UI metadata bound to the exact card, connection and revision; reopening a waiting card preserves that pairing.
+`session_open_wallet_connection_card` takes an intent: `connect`, `disconnect` or `manage` (the default). A connect-intent card automatically starts one pairing after the View confirms current state with its UI permission, unless a connection or operation already exists. Manage opens connection controls without starting pairing; Connect wallet starts it only after the user clicks. Disconnect opens target-specific confirmation when one connection is available; the user chooses Confirm disconnect or returns with Back. No model-facing call can disconnect or request a signature. Public saved reads never start pairing. QR data stays in UI metadata bound to the exact card, connection and revision; reopening a waiting card preserves that pairing.
 
 Sui MCP uses one wallet connection at a time across all clients sharing a
 data directory. That connection can approve several Sui mainnet addresses; other
@@ -42,7 +42,7 @@ The backend validates accounts, Sui mainnet namespace, methods and expiry before
 recording a connection. A single wallet-approved account can become read context
 from an explicit connection; multiple approved accounts require an explicit
 selection. The active read account is stored in SQLite until changed or cleared.
-SDK restoration and status reads never undo a user clearing that context. The stored selection is separate from its eligibility as a default for current asset reads. Implicit asset reads require a usable current wallet connection for the selected address; disconnection, expiry, pending disconnection, multiple-connection conflict or unavailable wallet state removes that default. Tools with an `account` input may still read an explicit address; connected-account-only tools require connection/account selection or recovery of wallet availability. Explicit-address public reads and saved transaction/activity reads remain available. `session.get_interaction_status.assetReadAccount` supplies that default-account decision alongside `connections` and `walletAvailability`.
+SDK restoration and status reads never undo a user clearing that context. The stored selection is separate from its eligibility as a default for current asset reads. Implicit asset reads require a usable current wallet connection for the selected address; disconnection, expiry, pending disconnection, multiple-connection conflict or unavailable wallet state removes that default. Tools with an `account` input may still read an explicit address; connected-account-only tools require connection/account selection or recovery of wallet availability. Explicit-address public reads and saved transaction/activity reads remain available. `session_get_interaction_status.assetReadAccount` supplies that default-account decision alongside `connections` and `walletAvailability`.
 
 | Connection state | Available behavior |
 | --- | --- |
@@ -52,7 +52,7 @@ SDK restoration and status reads never undo a user clearing that context. The st
 | connected | View approved accounts and expiry; a new card may select another operation |
 | rejected / failed / expired / stopped / disconnected | View the recorded outcome; new operations need a new card |
 
-`session.get_interaction_status` reports the last confirmed wallet-service observation and stored connections. SDK events and command checks apply review/request invalidation through the same database owner. An ordinary status read does not wait for a fresh SDK request, change the selected account or start a wallet operation. `walletObservation` identifies the local service run, observation order and check time; it is not proof of the wallet app's current screen or online status. See the [interaction API](MCP_TOOLS.md) for the response contract.
+`session_get_interaction_status` reports the last confirmed wallet-service observation and stored connections. SDK events and command checks apply review/request invalidation through the same database owner. An ordinary status read does not wait for a fresh SDK request, change the selected account or start a wallet operation. `walletObservation` identifies the local service run, observation order and check time; it is not proof of the wallet app's current screen or online status. See the [interaction API](MCP_TOOLS.md) for the response contract.
 
 An admitted disconnect is a pending card operation, distinct from the last
 confirmed connection state. The same connection cannot be selected for another
@@ -108,8 +108,9 @@ supersede a still-pending startup without erasing a known failure.
 Restart completion does not confirm an interrupted disconnect or remove a
 remote session. Check retained connections in the wallet app. If Settings or
 the parent is unavailable, fully quit all apps using Sui MCP and reopen them;
-closing a peer/window can leave the owner running. Full app restart, rather
-than child restart, applies stored endpoints and installation changes.
+closing a peer/window can leave the owner running. Stored endpoints and installation changes require the shared parent backend to
+exit and restart. Client disable/refresh controls can supply this when all
+participating processes exit; otherwise fully quit and reopen the apps.
 
 A new owner records interrupted connection approval as stopped and unconfirmed
 disconnection as failed. It does not repeat either request or restore their

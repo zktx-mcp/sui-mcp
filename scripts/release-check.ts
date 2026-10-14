@@ -188,9 +188,9 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
   try {
     const port = await unusedPort();
     transport = new StdioClientTransport({ command: process.execPath, args: [binPath], cwd: installDir,
-      env: { SUI_NETWORK: "mainnet", SUI_MCP_DATA_DIR: join(installDir, "runtime-data"), SUI_MCP_REVIEW_PORT: String(port),
-        ...(process.env.SUI_GRPC_URL ? { SUI_GRPC_URL: process.env.SUI_GRPC_URL } : {}),
-        ...(process.env.SUI_GRAPHQL_URL ? { SUI_GRAPHQL_URL: process.env.SUI_GRAPHQL_URL } : {}) }, stderr: "pipe" });
+      env: { SUI_MCP_NETWORK: "mainnet", SUI_MCP_DATA_DIR: join(installDir, "runtime-data"), SUI_MCP_REVIEW_PORT: String(port),
+        ...(process.env.SUI_MCP_GRPC_URL ? { SUI_MCP_GRPC_URL: process.env.SUI_MCP_GRPC_URL } : {}),
+        ...(process.env.SUI_MCP_GRAPHQL_URL ? { SUI_MCP_GRAPHQL_URL: process.env.SUI_MCP_GRAPHQL_URL } : {}) }, stderr: "pipe" });
     // Drain SDK diagnostics without publishing a project identifier or token.
     transport.stderr?.on("data", () => {});
     client = new Client({ name: "installed-package-check", version: manifest.version }, {
@@ -235,8 +235,8 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
     }
     stage = "MCP tools and resources";
     const tools = await client.listTools();
-    for (const name of [TOOL_NAMES.readGetServerStatus, TOOL_NAMES.sessionCreateWalletConnection,
-      TOOL_NAMES.actionPrepareSuiActionReview, TOOL_NAMES.uiOpenAccount, TOOL_NAMES.uiOpenReceipt,
+    for (const name of [TOOL_NAMES.readGetServerStatus, TOOL_NAMES.sessionOpenWalletConnectionCard,
+      TOOL_NAMES.actionStartReview, TOOL_NAMES.uiOpenAccount, TOOL_NAMES.uiOpenReceipt,
       TOOL_NAMES.uiOpenChart, TOOL_NAMES.settingsCreateLocalSettingsSession]) {
       if (!tools.tools.some((tool) => tool.name === name)) throw new Error(`Installed tool is missing: ${name}`);
     }
@@ -279,7 +279,7 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
       if (value.isError || payload?.ok !== true) throw new Error("Installed wallet service call failed.");
       return payload.data;
     };
-    const created = await client.callTool({ name: TOOL_NAMES.sessionCreateWalletConnection, arguments: { intent: "manage" } });
+    const created = await client.callTool({ name: TOOL_NAMES.sessionOpenWalletConnectionCard, arguments: { intent: "manage" } });
     const reference = cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]);
     let card = cardSnapshotSchema.parse(resultData(created));
     const current = async () => cardSnapshotSchema.parse(resultData(await client!.callTool({ name: CARD_TOOLS.read, arguments: reference })));

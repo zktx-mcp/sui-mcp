@@ -593,7 +593,7 @@ function markdownCell(value: string): string {
 }
 
 function parseCliOptions(argv: string[]): CliOptions {
-  let endpoint = process.env.SUI_GRAPHQL_URL ?? DEFAULT_SUI_GRAPHQL_URL;
+  let endpoint = process.env.SUI_MCP_GRAPHQL_URL ?? DEFAULT_SUI_GRAPHQL_URL;
   let sampleSize = FUNCTION_FILTER_PROBE_SAMPLE_SIZE;
   let timeoutMs = DEFAULT_SUI_GRAPHQL_ENDPOINT_VERIFY_TIMEOUT_MS;
   for (let index = 0; index < argv.length; index += 1) {

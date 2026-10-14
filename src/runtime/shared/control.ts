@@ -7,8 +7,8 @@ import type { IncomingMessage } from "node:http";
 import { SERVER_VERSION } from "../../mcp/serverInfo.js";
 
 // Peers use the one package release identity, with no separate API counter.
-export const IDENTITY_PATH = "/__runtime/identity";
-export const INTERNAL_MCP_PATH = "/__runtime/mcp";
+export const IDENTITY_PATH = "/runtime/identity";
+export const INTERNAL_MCP_PATH = "/runtime/mcp";
 export const IDENTITY_CHALLENGE_HEADER = "x-sui-mcp-identity-challenge";
 export const SERVER_INSTANCE_HEADER = "x-sui-mcp-server-instance";
 // The existing review-server identity probe allows one second for a local response.

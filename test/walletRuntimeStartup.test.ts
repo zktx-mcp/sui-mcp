@@ -67,7 +67,7 @@ vi.mock("node:child_process", async (original) => {
     if (source.realRelay) {
       const child = actual.fork(new URL("./fixtures/walletSdkChild.ts", import.meta.url), [], {
         execArgv: ["--import", "tsx"], stdio: ["ignore", "ignore", "ignore", "ipc"],
-        env: { ...process.env, FIXTURE_WALLET_RELAY: source.realRelay, FIXTURE_WALLET_SUBSCRIBED_READ: "1" }
+        env: { ...process.env, SUI_MCP_TEST_WALLET_RELAY: source.realRelay, SUI_MCP_TEST_WALLET_SUBSCRIBED_READ: "1" }
       });
       const send = child.send.bind(child);
       child.send = ((message: WalletCommand, callback: (error: Error | null) => void) => {
@@ -238,14 +238,14 @@ it.each([
     expect(reread.data.facts!.assetReadAccount).toEqual(expected);
     expect(reread.data.facts!.walletAvailability).toMatchObject({ status: "available", walletRunId: runId });
     expect(reread.data.facts!.readAddress).toBe(input.kind === "cleared" ? undefined : account);
-    const connect = (await call(TOOL_NAMES.sessionCreateWalletConnection, { intent: "manage" })).structuredContent!.data as { data: Record<string, any> };
+    const connect = (await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" })).structuredContent!.data as { data: Record<string, any> };
     expect(connect.data.assetReadAccount).toEqual(expected);
     expect(connect.data.usableConnectionId).toBe(input.kind === "terminal" || input.kind === "expiry" && input.offset >= 0
       ? undefined : saved.connection.connectionId);
     expect(journal.getActiveAccountSync()).toEqual(storedBefore);
     expect(records.connection(saved.connection.connectionId)!.connection.status).toBe(input.kind === "terminal" ? input.status : "connected");
     if (input.kind === "different_source" || input.kind === "cleared") {
-      const ref = (await call(TOOL_NAMES.sessionCreateWalletConnection, { intent: "manage" }));
+      const ref = (await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" }));
       const card = ref.structuredContent!.data as { revision: number };
       await call(CARD_TOOLS.act, { ...ref._meta![CARD_METADATA_KEY] as object, revision: card.revision,
         input: { action: "use_account", walletRunId: runId, connectionId: saved.connection.connectionId, account } });
@@ -356,15 +356,13 @@ it("keeps ordinary MCP and Settings diagnosis neutral while an observed ready sn
 });
 
 it.each([
-  { label: "unset environment", failure: "none", project: undefined, initCalls: 1, reason: undefined, message: undefined },
-  { label: "invalid environment", failure: "none", project: "not-a-project-id", initCalls: 1, reason: undefined, message: undefined },
-  { label: "different environment", failure: "none", project: "1".repeat(32), initCalls: 1, reason: undefined, message: undefined },
-  { label: "metadata failure", failure: "metadata", project: undefined, initCalls: 0, reason: "initialization_failed", message: "could not start" },
-  { label: "storage failure", failure: "storage", project: undefined, initCalls: 0, reason: "initialization_failed", message: "could not start" },
-  { label: "SDK failure", failure: "init", project: undefined, initCalls: 1, reason: "initialization_failed", message: "could not start" },
-  { label: "restore failure", failure: "restore", project: undefined, initCalls: 1, reason: "restoration_failed", message: "could not be restored" }
-])("handles $label through the real runtime and MCP cards", async ({ failure, project, initCalls, reason, message }) => {
-  source.failure = failure; vi.stubEnv("SUI_MCP_WALLETCONNECT_PROJECT_ID", project);
+  { label: "successful initialization", failure: "none", initCalls: 1, reason: undefined, message: undefined },
+  { label: "metadata failure", failure: "metadata", initCalls: 0, reason: "initialization_failed", message: "could not start" },
+  { label: "storage failure", failure: "storage", initCalls: 0, reason: "initialization_failed", message: "could not start" },
+  { label: "SDK failure", failure: "init", initCalls: 1, reason: "initialization_failed", message: "could not start" },
+  { label: "restore failure", failure: "restore", initCalls: 1, reason: "restoration_failed", message: "could not be restored" }
+])("handles $label through the real runtime and MCP cards", async ({ failure, initCalls, reason, message }) => {
+  source.failure = failure;
   const directory = mkdtempSync(join(tmpdir(), "say-startup-"));
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const app = await createRuntimeApplication(loadBootConfig({ SUI_MCP_DATA_DIR: directory }), logger);
@@ -374,13 +372,13 @@ it.each([
     return response.result;
   };
   try {
-    const created = await call(TOOL_NAMES.sessionCreateWalletConnection);
+    const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard);
     expect(source.init).toHaveBeenCalledTimes(initCalls);
     expect(fingerprint(WALLETCONNECT_PROJECT_ID)).toBe(approvedProjectFingerprint);
     if (initCalls) {
       expect(fingerprint(source.init.mock.calls[0]![0].projectId)).toBe(approvedProjectFingerprint);
       expect(source.init.mock.calls[0]![0].metadata).toMatchObject({
-        name: "@zktx.io/sui-mcp",
+        name: "Sui MCP",
         url: "https://github.com/zktx-mcp/sui-mcp#readme"
       });
     }
@@ -393,8 +391,8 @@ it.each([
       const card = (created.structuredContent as { data: { cardId: string; revision: number; state: string } }).data;
       expect(card.state).toBe("ready");
       if (message) {
-        expect(JSON.stringify(await call(TOOL_NAMES.sessionGetWalletConnection, { cardId: card.cardId }))).toContain(message);
-        expect(JSON.stringify(await call(TOOL_NAMES.sessionWaitWalletConnection, { cardId: card.cardId, timeoutMs: 1 }))).toContain(message);
+        expect(JSON.stringify(await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: card.cardId }))).toContain(message);
+        expect(JSON.stringify(await call(TOOL_NAMES.sessionWaitWalletConnectionCard, { cardId: card.cardId, timeoutMs: 1 }))).toContain(message);
         const ref = created._meta![CARD_METADATA_KEY] as Record<string, unknown>;
         expect(JSON.stringify(await call(CARD_TOOLS.act, { ...ref, revision: card.revision, input: { action: "connect", walletRunId: (availability as { walletRunId: string }).walletRunId } }))).toContain(message);
       }
@@ -407,7 +405,6 @@ it.each([
     expect(source.connect).not.toHaveBeenCalled(); expect(source.request).not.toHaveBeenCalled();
     expect(JSON.stringify([created, logger.error.mock.calls])).not.toContain("PRIVATE-");
     expect(JSON.stringify([created, logger.error.mock.calls]).includes(WALLETCONNECT_PROJECT_ID)).toBe(false);
-    if (project) expect(JSON.stringify([created, logger.error.mock.calls])).not.toContain(project);
   } finally {
     await app.close();
     expect(source.leases.at(-1)).toHaveBeenCalledOnce();
@@ -417,7 +414,7 @@ it.each([
   }
 });
 
-it("uses the same approved project identity for stdio peers regardless of old environment settings", async () => {
+it("uses the same approved project and profile identity for stdio peers", async () => {
   const directory = mkdtempSync(join(tmpdir(), "say-startup-identity-"));
   const controls: ControlIdentity[] = [];
   const processListeners = new Map((["SIGINT", "SIGTERM"] as const).map((event) => [event, new Set(process.listeners(event))]));
@@ -434,10 +431,9 @@ it("uses the same approved project identity for stdio peers regardless of old en
     }
   }));
   vi.stubEnv("SUI_MCP_DATA_DIR", directory);
-  vi.stubEnv("SUI_GRPC_URL", undefined); vi.stubEnv("SUI_GRAPHQL_URL", undefined);
+  vi.stubEnv("SUI_MCP_GRPC_URL", undefined); vi.stubEnv("SUI_MCP_GRAPHQL_URL", undefined);
   try {
-    for (const [index, project] of [undefined, "not-a-project-id", "1".repeat(32)].entries()) {
-      vi.stubEnv("SUI_MCP_WALLETCONNECT_PROJECT_ID", project);
+    for (const index of [0, 1, 2]) {
       vi.resetModules();
       await import("../src/runtime/start.js");
       await vi.waitFor(() => expect(controls).toHaveLength(index + 1));
@@ -489,7 +485,7 @@ it.each(["expired_pairing", "inactive_pairing"] as const)("recovers the initial 
     expect(interaction.walletAvailability.status).toBe("initializing");
     expect(interaction.assetReadAccount.status).toBe("address_required");
     await vi.waitFor(() => expect(relay.calls.some((request) => request.method === "irn_unsubscribe")).toBe(true), { timeout: 10000 });
-    const created = await call(TOOL_NAMES.sessionCreateWalletConnection, { intent: "manage" });
+    const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" });
     const reference = created._meta![CARD_METADATA_KEY] as Record<string, unknown>;
     const current = payload(await call(CARD_TOOLS.read, reference));
     expect(current.state).toBe("ready"); expect(current.data.allowedActions).not.toContain("restart_wallet_service");
@@ -554,7 +550,7 @@ it("keeps an unrecorded SDK session blocked after Settings restart and Reset wit
     let context: Record<string, any> = {};
     await vi.waitFor(async () => { context = data(await call(TOOL_NAMES.sessionGetInteractionStatus)); expect(context.walletAvailability.status).toBe("available"); }, { timeout: 10000 });
     expect(context).toMatchObject({ connections: [], manageableConnectionIds: [], connectionReconciliationRequired: true, assetReadAccount: { status: "address_required" } });
-    const connect = await call(TOOL_NAMES.sessionCreateWalletConnection, { intent: "manage" });
+    const connect = await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" });
     const reference = connect._meta![CARD_METADATA_KEY] as Record<string, unknown>;
     const card = data(await call(CARD_TOOLS.read, reference));
     expect(card.data.allowedActions).toEqual(["cancel"]); expect(card.data.automaticAction).toBeUndefined();

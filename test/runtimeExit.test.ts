@@ -29,7 +29,7 @@ it.each(["foreign_port", "endpoint", "endpoint_timeout", "configuration", "EOF",
     const port = condition === "foreign_port" ? holderPort : await freePort();
     const child = spawn(process.execPath, ["--import", "tsx", "src/runtime/start.ts"], { cwd: process.cwd(),
       env: { ...process.env, SUI_MCP_DATA_DIR: directory, SUI_MCP_REVIEW_PORT: String(port),
-        SUI_GRPC_URL: `http://127.0.0.1:${endpointPort}`, SUI_NETWORK: condition === "configuration" ? "fixture-invalid" : "mainnet" },
+        SUI_MCP_GRPC_URL: `http://127.0.0.1:${endpointPort}`, SUI_MCP_NETWORK: condition === "configuration" ? "fixture-invalid" : "mainnet" },
       stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });

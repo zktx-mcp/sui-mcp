@@ -28,15 +28,9 @@ export type RuntimeConfig = BootConfig & {
 };
 
 export function loadBootConfig(env: NodeJS.ProcessEnv = process.env): BootConfig {
-  const network = env.SUI_NETWORK ?? "mainnet";
+  const network = env.SUI_MCP_NETWORK ?? "mainnet";
   if (network !== "mainnet") {
     throw new Error("Sui MCP product runtime only supports mainnet");
-  }
-
-  if (env.SUI_RPC_URL) {
-    throw new Error(
-      "Sui JSON-RPC endpoint configuration is not supported; use local settings, SUI_GRPC_URL for gRPC, or SUI_GRAPHQL_URL for GraphQL"
-    );
   }
 
   return {
@@ -79,8 +73,8 @@ export function composeRuntimeConfig(input: ComposeRuntimeConfigInput): RuntimeC
   const defaultSuiGraphqlUrl = parseGraphqlUrl(input.defaultSuiGraphqlUrl ?? DEFAULT_SUI_GRAPHQL_URL);
   const storedValue = parseGrpcUrl(input.storedSuiGrpcUrl ?? defaultSuiGrpcUrl);
   const storedGraphqlValue = parseGraphqlUrl(input.storedSuiGraphqlUrl ?? defaultSuiGraphqlUrl);
-  const envValue = env.SUI_GRPC_URL === undefined ? undefined : parseGrpcUrl(env.SUI_GRPC_URL);
-  const envGraphqlValue = env.SUI_GRAPHQL_URL === undefined ? undefined : parseGraphqlUrl(env.SUI_GRAPHQL_URL);
+  const envValue = env.SUI_MCP_GRPC_URL === undefined ? undefined : parseGrpcUrl(env.SUI_MCP_GRPC_URL);
+  const envGraphqlValue = env.SUI_MCP_GRAPHQL_URL === undefined ? undefined : parseGraphqlUrl(env.SUI_MCP_GRAPHQL_URL);
   const suiGrpcUrl = resolveSuiGrpcUrlView({
     defaultSuiGrpcUrl,
     storedValue,

@@ -16,7 +16,7 @@ describe("runtime local settings service", () => {
     const service = new RuntimeLocalSettingsService({
       preferencesRepository: repository,
       env: {
-        SUI_GRPC_URL: "https://override.sui.provider:9443"
+        SUI_MCP_GRPC_URL: "https://override.sui.provider:9443"
       }
     });
 

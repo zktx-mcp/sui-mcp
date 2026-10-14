@@ -10,7 +10,7 @@ describe("smoke mainnet read assertions", () => {
     const record = summarizeActivitySmokePayload(activityPayload({
       accountSource: "explicit_filter",
       transactions: [{ digest: "abc" }]
-    }), "read.scan_sui_account_activity", {
+    }), "read_scan_sui_account_activity", {
       expectedAccountSource: "explicit_filter",
       requireAnalysis: false
     });
@@ -53,7 +53,7 @@ describe("smoke mainnet read assertions", () => {
         overview: { transactionCount: 0 },
         limitations: ["empty_result"]
       }
-    }), "read.summarize_sui_activity_scan", {
+    }), "read_summarize_sui_activity_scan", {
       expectedAccountSource: "active_account_context",
       requireAnalysis: true
     });
@@ -111,7 +111,7 @@ describe("smoke mainnet read assertions", () => {
         limitations: [],
         coinFlows: [{ coinType: "0x3::coin::RWA" }]
       }
-    }), "read.summarize_sui_activity_scan", {
+    }), "read_summarize_sui_activity_scan", {
       expectedAccountSource: "active_account_context",
       requireAnalysis: true,
       expectNoDetails: true
@@ -142,7 +142,7 @@ describe("smoke mainnet read assertions", () => {
         limitations: [],
         coinFlows: []
       }
-    }), "read.summarize_sui_activity_scan", {
+    }), "read_summarize_sui_activity_scan", {
       expectedAccountSource: "active_account_context",
       requireAnalysis: true,
       expectNoDetails: true
@@ -165,7 +165,7 @@ describe("smoke mainnet read assertions", () => {
         limitations: [],
         coinFlows: []
       }
-    }), "read.summarize_sui_activity_scan", {
+    }), "read_summarize_sui_activity_scan", {
       expectedAccountSource: "active_account_context",
       requireAnalysis: true,
       expectNoDetails: true
@@ -185,7 +185,7 @@ describe("smoke mainnet read assertions", () => {
       balanceChanges: []
     };
 
-    expect(() => summarizeActivitySmokePayload(payload, "read.summarize_sui_activity_scan", {
+    expect(() => summarizeActivitySmokePayload(payload, "read_summarize_sui_activity_scan", {
       expectedAccountSource: "active_account_context",
       requireAnalysis: false
     })).toThrow(SmokeResponseShapeError);
@@ -202,7 +202,7 @@ describe("smoke mainnet read assertions", () => {
           balanceChanges: []
         }
       }]
-    }), "read.scan_sui_account_activity", {
+    }), "read_scan_sui_account_activity", {
       expectedAccountSource: "active_account_context",
       requireAnalysis: false
     })).toThrow(SmokeResponseShapeError);
@@ -226,7 +226,7 @@ describe("smoke mainnet read assertions", () => {
           ]
         }
       }]
-    }), "read.scan_sui_account_activity", {
+    }), "read_scan_sui_account_activity", {
       expectedAccountSource: "active_account_context",
       requireAnalysis: false
     })).toThrow(SmokeResponseShapeError);
@@ -238,7 +238,7 @@ describe("smoke mainnet read assertions", () => {
       relationship: "sent",
       functionTarget: "0x2::coin::transfer",
       transactions: []
-    }), "read.scan_sui_function_activity", {
+    }), "read_scan_sui_function_activity", {
       expectedAccountSource: "explicit_filter",
       expectedRelationship: "sent",
       requireFunction: true,
@@ -259,7 +259,7 @@ describe("smoke mainnet read assertions", () => {
       relationship: "affected",
       functionTarget: "0x2::coin::transfer",
       transactions: []
-    }), "read.scan_sui_function_activity", {
+    }), "read_scan_sui_function_activity", {
       expectedAccountSource: "explicit_filter",
       expectedRelationship: "sent",
       requireFunction: true,
@@ -271,7 +271,7 @@ describe("smoke mainnet read assertions", () => {
     const payload = activityPayload({ accountSource: "explicit_filter", transactions: [] });
     delete (payload.data as Record<string, unknown>).orderingVerified;
 
-    expect(() => summarizeActivitySmokePayload(payload, "read.scan_sui_account_activity", {
+    expect(() => summarizeActivitySmokePayload(payload, "read_scan_sui_account_activity", {
       expectedAccountSource: "explicit_filter",
       requireAnalysis: false
     })).toThrow(SmokeResponseShapeError);
@@ -390,7 +390,7 @@ function requestedAccountFactForFixture(transaction: unknown): Record<string, un
       detailTruncated: false
     },
     detailLookup: {
-      tool: "read.inspect_sui_transaction",
+      tool: "read_inspect_sui_transaction",
       digest
     }
   };

@@ -317,6 +317,8 @@ The goal of review is defect discovery, not praise or consensus.
   `SERVER_INSTRUCTIONS`, prompts, tool schemas/descriptions, MCP resources,
   response fields, and tests.
 - Tool descriptions must remain concise, literal, and instruction-free.
+- Role-specific naming rules are owned by the MCP Tool Safety section of
+  `docs/AGENT_DEVELOPMENT_POLICY.md`.
 - When editing `README.md`, `docs/`, `protocols/`, or runtime-facing instruction
   text, do a first-reader pass. A reader with no prior context must understand
   what is implemented, planned, unsupported, and out of scope.

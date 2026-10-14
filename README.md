@@ -27,14 +27,14 @@ Users can ask ordinary questions:
 - "How much are my USD-denominated assets together?"
 - "What is the shortfall?"
 
-This document describes `@zktx.io/sui-mcp@0.6.2`. Confirm that version is
+This document describes `@zktx.io/sui-mcp@0.7.0`. Confirm that version is
 published before using npm installation commands. For a local build, follow
 [Developer Checkout Setup](docs/MCP_SETUP.md#developer-checkout-setup).
 
 ## Product Scope in Two Layers
 
 - **Implemented:** Sui mainnet read evidence, non-signable external proposal review, and account-bound DeepBook swap review using protocol-agnostic adapters. Six internal cards use the same SQLite state and permission model. The backend verifies stored material, ownership, quote/policy provenance, human-readable facts, simulation and PTB evidence before an explicit user request. WalletConnect carries bytes only between the backend and wallet; ordinary MCP responses expose facts, request status and observed execution results. Settings owns endpoint and read-address controls, local backup/import/reset, and explicit connection-service recovery. Settings operations require scoped user confirmation; ordinary MCP calls only create the card or read settings.
-- **Never (permanently unsupported at every layer):** no private-key custody, no MCP or AI autonomous execution, no forwarding of opaque external transaction bytes to a wallet, no silent settlement-token or route choice, no fiat cash-out, no P&L, no peg guarantee.
+- **Safety boundaries:** no private-key custody, no MCP or AI autonomous execution, no forwarding of opaque external transaction bytes to a wallet, and no peg guarantee. The current product does not silently choose settlement tokens or routes. It does not provide fiat cash-out, P&L, tax or cost-basis support.
 
 DeepBook provides the current scoped Sui conversion, price, and orderbook
 evidence through the shared protocol adapter contracts. Wallet and Sui balance reads
@@ -107,7 +107,7 @@ user to confirm its exact target. Connection is not transaction approval.
 
 **Review and result.** The internal Review card automatically prepares and renews verified conditions for one selected wallet/account. Users inspect its transaction graph, amounts and costs, then choose Request wallet approval and approve in their wallet. One wallet connection is used at a time; choose among its approved addresses when needed. Conflicting saved connections must be resolved through targeted disconnection. Failed preparation has an explicit retry. Receipt and completed Review show the executed transaction graph, actual asset changes and net network fee. Supplementary facts are in one Details slide; earlier estimates in Review remain distinct from actual chain results. Missing graph or receipt data is marked unavailable. Cards use a single document layout without nested card panels.
 
-**DeepBook USDC chart.** `ui.open_chart` opens an internal MCP Apps card with
+**DeepBook USDC chart.** `ui_open_chart` opens an internal MCP Apps card with
 official DeepBookV3 Indexer candles and volume for one selected USDC pool.
 The saved result shows the selected pair, interval, UTC period and source time. Limited and empty results are identified.
 
@@ -156,11 +156,11 @@ These product behaviors are out of scope in the current release by design:
 
 ### Quote Response Limits
 
-Quote tools such as `read.quote_deepbook_action` and
-`read.quote_deepbook_display_amount` return scoped quote facts and raw quote
+Quote tools such as `read_quote_deepbook_action` and
+`read_quote_deepbook_display_amount` return scoped quote facts and raw quote
 evidence only.
 
-Their semantics mark quote output as price evidence, not payment coverage or shortfall evidence. Coverage and shortfall answers come from `read.preview_intent_evidence.responseSummary`.
+Their semantics mark quote output as price evidence, not payment coverage or shortfall evidence. Coverage and shortfall answers come from `read_preview_intent_evidence.responseSummary`.
 
 For quote responses alone, these conclusions are unsupported:
 
@@ -198,7 +198,8 @@ The npm package is `@zktx.io/sui-mcp`, and its repository is
 your client registration.
 
 Use the full scoped package name: the unscoped `sui-mcp` package is a different
-project. Keep the MCP registration name `sui-mcp`, without a suffix. Compatible
+project. Use `sui-mcp` as the default MCP registration name. A client-defined registration
+alias is a local label, not server identity or authorization. Compatible
 updates preserve the current data directory. Incompatible databases and backups
 are rejected without conversion, and files are left in place. Data from a
 different package is not discovered or imported. See the
@@ -217,11 +218,11 @@ Unsupported protocol experiments are not product functionality and are not inclu
 
 The canonical MCP API reference lives in [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md).
 
-The server also exposes `read.get_server_status`. It returns the package version, evidence policy version, `implementedToolsCount`, and implemented tool list at runtime.
+The server also exposes `read_get_server_status`. It returns the package version, evidence policy version, `implementedToolsCount`, and implemented tool list at runtime.
 
-DeepBook pool-price context is exposed through `read.get_deepbook_mid_price`. Use `docs/MCP_TOOLS.md` for the response fields and unsupported conclusions.
+DeepBook pool-price context is exposed through `read_get_deepbook_mid_price`. Use `docs/MCP_TOOLS.md` for the response fields and unsupported conclusions.
 
-Tool names use dot prefixes because the MCP spec recommends ASCII letters, digits, underscore, hyphen, and dot for tool names. `action.prepare_sui_action_review` returns a `reviewSessionId` and an internal `card`; it does not return executable transaction bytes.
+Tool names use `domain_verb_object`. Names identify an operation; its schema, card visibility and permission checks define its authority. `action_start_review` returns a `reviewSessionId` and an internal `card`; it does not request a signature, submit a transaction or return executable transaction bytes.
 
 ## Documentation Map
 
@@ -237,7 +238,7 @@ Runtime-facing MCP resources currently include:
 - `protocols/deepbook-v3.md`;
 - `protocols/deepbook-margin.md`.
 
-Protocol resources are explanatory references. Current support is declared by `read.get_server_status`, `read.list_supported_protocols`, concrete tool schemas, and concrete tool responses, not by protocol Markdown alone.
+Protocol resources are explanatory references. Current support is declared by `read_get_server_status`, `read_list_supported_protocols`, concrete tool schemas, and concrete tool responses, not by protocol Markdown alone.
 
 Development-only or release-review documents can define contributor rules and checks.
 
@@ -248,7 +249,7 @@ AI client answer behavior must be mirrored in runtime-facing instructions, resou
 - `docs/MCP_TOOLS.md`: API reference: tool contracts, response fields, statuses, follow-up fields, and output boundaries.
 - `docs/AGENT_BEHAVIOR.md`: Answer playbook: user-question flows, tool selection, and response wording boundaries.
 - `docs/WALLET_CONNECTION.md`: Wallet connection reference: active read context, private SDK ownership and user-approved transaction requests.
-- `protocols/deepbook-v3.md`: Protocol reference only; use MCP tool responses and read.list_supported_protocols for current support.
+- `protocols/deepbook-v3.md`: Protocol reference only; use MCP tool responses and read_list_supported_protocols for current support.
 - `protocols/deepbook-margin.md`: Protocol reference only; no margin MCP read tools or signable actions are exposed in this release.
 - `docs/TRANSACTION_ACTIVITY_LOG.md`: transaction activity evidence, storage, scan, and summary boundaries.
 - `docs/UTILITY_INDEX.md`: manual maintainer and developer utilities. Utility rows are not MCP tools unless they explicitly name an MCP tool, and source-checkout scripts are not packaged product commands.

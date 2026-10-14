@@ -88,7 +88,6 @@ describe("document claim boundaries", () => {
 describe("Sui source and MCP transport JSON-RPC boundaries", () => {
   it.each([
     "Sui JSON-RPC client imports are\nnot used.",
-    "Do not set SUI_RPC_URL; this runtime rejects Sui JSON-RPC config.",
     "MCP JSON-RPC is supported. Sui JSON-RPC is not supported.",
     "stdout is reserved for JSON-RPC protocol messages.",
     "MCP JSON-RPC is supported and Sui JSON-RPC is excluded."

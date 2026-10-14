@@ -53,14 +53,14 @@ export class RuntimeLocalSettingsService implements LocalSettingsService {
       options.bootSuiGrpcUrl ??
         resolveSuiGrpcUrlView({
           defaultSuiGrpcUrl: this.defaultSuiGrpcUrl,
-          envValue: this.env.SUI_GRPC_URL
+          envValue: this.env.SUI_MCP_GRPC_URL
         })
     );
     this.bootSuiGraphqlUrl = normalizeBootSuiGraphqlUrlView(
       options.bootSuiGraphqlUrl ??
         resolveSuiGraphqlUrlView({
           defaultSuiGraphqlUrl: this.defaultSuiGraphqlUrl,
-          envValue: this.env.SUI_GRAPHQL_URL
+          envValue: this.env.SUI_MCP_GRAPHQL_URL
         })
     );
     this.verifyGrpcEndpoint = options.verifyGrpcEndpoint ?? defaultGrpcEndpointVerifier;
@@ -84,12 +84,12 @@ export class RuntimeLocalSettingsService implements LocalSettingsService {
     const currentStoredView = resolveSuiGrpcUrlView({
       defaultSuiGrpcUrl: this.defaultSuiGrpcUrl,
       storedValue: stored,
-      envValue: this.env.SUI_GRPC_URL
+      envValue: this.env.SUI_MCP_GRPC_URL
     });
     const currentStoredGraphqlView = resolveSuiGraphqlUrlView({
       defaultSuiGraphqlUrl: this.defaultSuiGraphqlUrl,
       storedValue: storedGraphql,
-      envValue: this.env.SUI_GRAPHQL_URL
+      envValue: this.env.SUI_MCP_GRAPHQL_URL
     });
     return {
       suiGrpcUrl: withBootEffectiveEndpoint(currentStoredView, this.bootSuiGrpcUrl),

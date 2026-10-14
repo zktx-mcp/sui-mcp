@@ -6,7 +6,7 @@ The goal is not to push the user toward a review session. The goal is to verify 
 
 For deterministic natural-language USD-denominated replay scenarios, required MCP tool paths, expected answer shapes, and manual client observation fields, see `docs/golden-scenarios/INTENT_EVIDENCE_GOLDEN_ANSWERS.md`.
 
-Before running the question corpus, call `read.get_server_status` and record:
+Before running the question corpus, call `read_get_server_status` and record:
 
 - `packageName`;
 - `version`;
@@ -104,18 +104,18 @@ Protocol labels are conservative activity labels, not protocol support, position
 ## Current Release Questions
 
 `What is 1 SUI worth?`
-Use `read.get_deepbook_mid_price` with `poolKey: "SUI_USDC"`.
+Use `read_get_deepbook_mid_price` with `poolKey: "SUI_USDC"`.
 Answer with DeepBook SUI/USDC, `fetchedAt`, and not-global-market-price boundary.
 Do not ask for a wallet, start a review session, recommend a route, or imply signing readiness.
 
 `If I sell 10 SUI, how many USDC do I get?`
-Use `read.quote_deepbook_display_amount` after pool and direction are clear.
+Use `read_quote_deepbook_display_amount` after pool and direction are clear.
 Include source input, pool, direction, quote asset, and `fetchedAt`.
 Do not provide final min-out, transaction-building input, route quality, or signing readiness.
 
 `If I sell 10 SUI, how many dollars do I get?`
 Do not quote until the user selects a registered DeepBook quote asset or pool, or asks for wallet-scoped USD-denominated intent evidence.
-If the user chooses a pool such as SUI/USDC, call `read.quote_deepbook_display_amount`.
+If the user chooses a pool such as SUI/USDC, call `read_quote_deepbook_display_amount`.
 Say Sui MCP cannot turn "dollars" into fiat USD or silently choose USDC/USDT.
 Ask whether the user wants a specific DeepBook USD-denominated quote token/pool or wallet-scoped settlement-asset-group evidence.
 Do not provide a silent USDC/USDT default, USDC/USD peg conversion, web or finance lookup, bank cash-out estimate, final min-out, route quality, or signing readiness.
@@ -125,21 +125,21 @@ Clarify the source amount. Give examples such as `1 SUI` or `10 SUI`.
 Do not map vague words to a fixed amount or percent.
 
 `What is in my wallet?`
-Use `session.get_interaction_status.assetReadAccount` if available; otherwise ask for a Sui address for an address-capable read. Open Connect only when the user requests connection. A stored selection does not prove a usable connection or signing authority.
+Use `session_get_interaction_status.assetReadAccount` if available; otherwise ask for a Sui address for an address-capable read. Open Connect only when the user requests connection. A stored selection does not prove a usable connection or signing authority.
 
 `Show balances for this address: 0x...`
-Use `read.summarize_wallet_assets` or `read.classify_wallet_assets` with `account`.
+Use `read_summarize_wallet_assets` or `read_classify_wallet_assets` with `account`.
 Include snapshot time and explicit address scope.
 Do not imply ownership proof, active account context, or wallet authorization.
 
 `Summarize the latest 5 transactions for this wallet.`
-Use `read.summarize_sui_activity_scan` first.
+Use `read_summarize_sui_activity_scan` first.
 Answer with a short table or bullets.
 Include relationship, requested-account raw flows when discussing the wallet's own changes, bounded page status, and continuation/coverage if returned.
 Do not return full raw JSON, claim complete history, inspect unnecessary details, or treat `analysis.coinFlows` as wallet-specific.
 
 `Show details for the first transaction.`
-Use `read.inspect_sui_transaction` for the digest, or scan details when already present.
+Use `read_inspect_sui_transaction` for the digest, or scan details when already present.
 Include digest, status, sender, key Move calls, and available raw balance/gas facts.
 Do not infer missing fields when details are absent or truncated.
 
@@ -154,7 +154,7 @@ Explain continuation and coverage.
 Do not claim pagination proves complete history.
 
 `Which DeFi protocols did I use recently?`
-Use `read.summarize_sui_activity_scan`, or stored summary if the user asks for stored facts.
+Use `read_summarize_sui_activity_scan`, or stored summary if the user asks for stored facts.
 Use conservative protocol labels and limitations.
 Do not infer position inventory, P&L, supported-protocol list, or signing readiness.
 
@@ -176,7 +176,7 @@ Offer scoped quote facts when source amount and pool can be specified.
 Do not provide best route, ranking, route quality, or settlement choice.
 
 `Can I cover a 1000 dollar payment?`
-Call `read.list_settlement_asset_groups`, then `read.preview_intent_evidence` with `intentKind: "cover_payment_like_amount"`, `denomination: "dollar"`, and `requiredDisplayAmount: "1000"`.
+Call `read_list_settlement_asset_groups`, then `read_preview_intent_evidence` with `intentKind: "cover_payment_like_amount"`, `denomination: "dollar"`, and `requiredDisplayAmount: "1000"`.
 Answer from `responseSummary`: covered, shortfall, or unavailable.
 Ask only for returned `responseSummary.requiredUserChoices`.
 Do not silently select USDC/USDT, claim fiat USD cash-out, route-dependent payment support, gas readiness, transaction building, or signing readiness.
@@ -187,42 +187,42 @@ Answer intent evidence first, then ask only for required user choices returned b
 Do not silently select USDC/USDT, claim fiat USD cash-out, route-dependent payment support, transaction building, or signing readiness.
 
 `How much are my USD-denominated assets together?`
-Call `read.list_settlement_asset_groups`, then `read.preview_intent_evidence` with `intentKind: "summarize_settlement_asset_group_balance"` and `denomination: "dollar"`.
+Call `read_list_settlement_asset_groups`, then `read_preview_intent_evidence` with `intentKind: "summarize_settlement_asset_group_balance"` and `denomination: "dollar"`.
 Report current settlement-asset total only from `responseSummary.conclusionKind: "current_settlement_asset_total"`.
 Do not invent a payment target, silently select USDC/USDT, claim fiat USD cash-out, recommend a route, build a transaction, or imply signing readiness.
 
 `Which USD-denominated asset is highest or lowest right now?`
-Call `read.list_settlement_asset_groups`, then `read.summarize_settlement_asset_group_parity` with `denomination: "dollar"`.
+Call `read_list_settlement_asset_groups`, then `read_summarize_settlement_asset_group_parity` with `denomination: "dollar"`.
 Report available asset group parity max/min and, if useful, mean/median.
 State that the reference asset is only a measurement reference.
 Do not turn parity into settlement-token selection, fiat USD cash-out, USDC/USD peg assumption, payment readiness, best route, transaction building, or signing readiness.
 
 `What is the shortfall?`
-If a target amount is already established, call `read.preview_intent_evidence` with that amount.
+If a target amount is already established, call `read_preview_intent_evidence` with that amount.
 Otherwise clarify the missing target amount.
 Report `responseSummary.shortfallDisplayAmount` only when `conclusionKind` is `shortfall_in_settlement_asset_balance`.
 Report zero shortfall only when `conclusionKind` is `covered_by_settlement_asset_balance`.
 Do not guess the amount, silently choose a settlement token, choose source assets, rank routes, claim gas readiness, claim payment execution readiness, or imply signing readiness.
 
 `If USDC is short, can I fill it?`
-Use `read.preview_intent_evidence` with the established `requiredDisplayAmount`, `targetAssetSymbol: "USDC"`, and `targetAssetSelectionSource: "user_explicit"` or `"prior_user_explicit_context"` according to the user's wording.
+Use `read_preview_intent_evidence` with the established `requiredDisplayAmount`, `targetAssetSymbol: "USDC"`, and `targetAssetSelectionSource: "user_explicit"` or `"prior_user_explicit_context"` according to the user's wording.
 Distinguish settlement-asset aggregate shortfall from `selectedTarget.shortfallDisplayAmount`.
 Ask only for returned choices.
 Do not set a target source for an agent-inferred target. Do not count non-group quote proceeds as payment coverage, auto-select source assets, rank routes, claim route-dependent payment support, or imply signing readiness.
 
 `Prepare selling 10 SUI.`
-Use `action.prepare_sui_action_review` and present the internal Review card.
+Use `action_start_review` and present the internal Review card.
 Explain returned checks; only an explicit card selection and wallet approval
 can authorize the backend request. Do not return bytes, signing readiness or
 an execution claim from preparation alone.
 
 `Tell me this review session status.`
-Use `session.get_review_status` or `read.get_review_session_detail`.
+Use `session_get_review_status` or `read_get_review_session_detail`.
 Report current status and checks returned by the review layer.
 Do not give a safety guarantee or signing-readiness claim when status is blocked.
 
 `Connect my wallet.`
-Use `session.create_wallet_connection` with `intent: connect`, then read or wait on its cardId.
+Use `session_open_wallet_connection_card` with `intent: connect`, then read or wait on its cardId.
 Its authenticated View starts pairing only after confirming permission and current eligibility. A manage card instead waits for the user to choose Connect wallet. Confirm the usable default through `assetReadAccount`; an ordinary tool call or wait does not pair.
 Do not call it login, permanent authorization, or transaction permission.
 
@@ -247,7 +247,7 @@ Offer digest inspection when a digest is available.
 Release review should record at least one client observation file before claiming that a specific external AI client build followed this matrix unaided. The deterministic MCP replay tests are the product evidence-policy gate; manual observation files are client-behavior evidence. Each observation row should capture:
 
 - client name and date,
-- `read.get_server_status` package version, evidence policy version, and `implementedToolsCount`,
+- `read_get_server_status` package version, evidence policy version, and `implementedToolsCount`,
 - prompt,
 - tool path used,
 - whether the client used the summary-first path,

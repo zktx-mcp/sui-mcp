@@ -40,7 +40,7 @@ async function main(): Promise<void> {
     const controlReady = loadControlIdentity(bootConfig.activityDatabasePath, {
       network: bootConfig.network, chainIdentifier: bootConfig.expectedChainIdentifier,
       walletConnectProjectId: WALLETCONNECT_PROJECT_ID,
-      grpcOverride: process.env.SUI_GRPC_URL ?? null, graphqlOverride: process.env.SUI_GRAPHQL_URL ?? null
+      grpcOverride: process.env.SUI_MCP_GRPC_URL ?? null, graphqlOverride: process.env.SUI_MCP_GRAPHQL_URL ?? null
     });
     void controlReady.catch(() => {});
     // The SDK owns stdin from the start, including fragmented initialization

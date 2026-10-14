@@ -7,12 +7,12 @@
     "url": "https://github.com/zktx-mcp/sui-mcp",
     "source": "github"
   },
-  "version": "0.6.2",
+  "version": "0.7.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@zktx.io/sui-mcp",
-      "version": "0.6.2",
+      "version": "0.7.0",
       "transport": {
         "type": "stdio"
       }

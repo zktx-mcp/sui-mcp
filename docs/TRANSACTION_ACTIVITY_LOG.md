@@ -149,7 +149,7 @@ That analysis aggregates raw integer coin flows, gas totals, Move call targets, 
 
 It is not display conversion, P&L, position inventory, route quality, protocol support, transaction-building input, signing data, or signing readiness.
 
-Use `read.inspect_sui_transaction` when a user needs the full normalized facts for a digest.
+Use `read_inspect_sui_transaction` when a user needs the full normalized facts for a digest.
 
 The runtime does not store non-known party account addresses inside persisted transaction rows or normalized detail facts. If a digest lookup or explicit-account scan is not related to a known local wallet, the result can be returned for the current request but is not persisted.
 
@@ -163,19 +163,19 @@ Complete account transaction history is not a product surface of this data.
 
 AI clients may answer questions only from data the listed read tools return.
 
-`read.summarize_sui_activity_scan` summarizes a live bounded scan without full details or transaction-wide balance-change aggregates in row context.
+`read_summarize_sui_activity_scan` summarizes a live bounded scan without full details or transaction-wide balance-change aggregates in row context.
 
-`read.scan_sui_function_activity` and `read.summarize_sui_function_activity_scan` reuse the same requested-account fact, transaction-context, analysis, and protocol label pipeline for transactions the selected account sent that called one full `package::module::function`.
+`read_scan_sui_function_activity` and `read_summarize_sui_function_activity_scan` reuse the same requested-account fact, transaction-context, analysis, and protocol label pipeline for transactions the selected account sent that called one full `package::module::function`.
 
 They do not create a function-specific stored history, global function index, affected-object history, or complete dApp history.
 
-`read.summarize_sui_account_activity` summarizes account-level stored normalized facts only.
+`read_summarize_sui_account_activity` summarizes account-level stored normalized facts only.
 
 It can include rows from account scans, digest lookups, or sent-function scans, and the scan kind remains provenance rather than a user query filter.
 
-`read.get_account_asset_timeline` builds stored account asset net-flow bars from the same local normalized facts. Its requested UTC range is half-open: the start timestamp is included and the end timestamp is excluded.
+`read_get_account_asset_timeline` builds stored account asset net-flow bars from the same local normalized facts. Its requested UTC range is half-open: the start timestamp is included and the end timestamp is excluded.
 
-It first checks stored scan coverage for the requested account and UTC range. If no stored scan can support the requested range for a known account, it returns `scan_needed` and points to `read.scan_sui_account_activity`; it does not start a scan by itself. If an explicit account is not a known local wallet in the activity store, it returns `account_not_known` and does not return `scanNeeded`.
+It first checks stored scan coverage for the requested account and UTC range. If no stored scan can support the requested range for a known account, it returns `scan_needed` and points to `read_scan_sui_account_activity`; it does not start a scan by itself. If an explicit account is not a known local wallet in the activity store, it returns `account_not_known` and does not return `scanNeeded`.
 
 Timeline output uses account-scoped raw balance-change facts only. `netFlowBars` are observed inflow/outflow bars, not held balances. The storage model does not store balance snapshots or balance anchors. The timeline response returns `balanceStatus: "unavailable_no_balance_anchor"` and empty `balanceBars`.
 
@@ -185,7 +185,7 @@ Provider retention and rate-limit behavior are endpoint/operator properties, not
 
 Empty pages, bounded pages, and stored local summaries must not be treated as complete history.
 
-When normalized details are missing or capped, use `transactionDetailAvailability` and the returned digest metadata with `read.inspect_sui_transaction` instead of inventing missing fields.
+When normalized details are missing or capped, use `transactionDetailAvailability` and the returned digest metadata with `read_inspect_sui_transaction` instead of inventing missing fields.
 
 Inspect responses can include live GraphQL detail fields for the current response.
 

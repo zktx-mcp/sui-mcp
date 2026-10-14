@@ -49,10 +49,10 @@ it("carries the same connection conflict through actual MCP schemas, card resour
   vi.spyOn(f.transport, "inspectAll").mockImplementation(() => sessions.map((session) => ({ topic: session.topic, status: "present", session })));
   f.observe();
   const expected = { reason: "multiple_connections", connectionIds: connections.map((item) => item.connectionId).sort() };
-  const created = await call(TOOL_NAMES.sessionCreateWalletConnection, { intent: "manage" }), card = data(created);
+  const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" }), card = data(created);
   const ref = cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]);
-  const responses = [created, await call(TOOL_NAMES.sessionGetWalletConnection, { cardId: card.cardId }),
-    await call(TOOL_NAMES.sessionWaitWalletConnection, { cardId: card.cardId })];
+  const responses = [created, await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: card.cardId }),
+    await call(TOOL_NAMES.sessionWaitWalletConnectionCard, { cardId: card.cardId })];
   for (const response of responses) {
     const payload = data(response), snapshot = payload.card ?? payload;
     expect(snapshot.data.connectionConflict).toEqual(expected);
@@ -82,9 +82,9 @@ it("carries the same connection conflict through actual MCP schemas, card resour
 it("publishes the same source-qualified default in MCP views, waits and saved data", async () => {
   const { f, client, call } = await harness(), { connection } = await f.approve();
   await f.run(() => f.activity.setActiveAccount(f.account, "wallet_connection", f.now(), { id: "different-saved-source" }));
-  const created = await call(TOOL_NAMES.sessionCreateWalletConnection, { intent: "manage" }), card = data(created);
-  for (const response of [created, await call(TOOL_NAMES.sessionGetWalletConnection, { cardId: card.cardId }),
-    await call(TOOL_NAMES.sessionWaitWalletConnection, { cardId: card.cardId })]) {
+  const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" }), card = data(created);
+  for (const response of [created, await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: card.cardId }),
+    await call(TOOL_NAMES.sessionWaitWalletConnectionCard, { cardId: card.cardId })]) {
     const value = data(response), snapshot = value.card ?? value;
     expect(snapshot.data).toMatchObject({ activeAccount: f.account, usableConnectionId: connection.connectionId, assetReadAccount: { status: "address_required" } });
     expect(findForbiddenMcpFields(response.structuredContent)).toEqual([]);
@@ -116,7 +116,7 @@ describe("wallet cards, ordinary MCP and stored review activity", () => {
     const { f, call } = await harness();
     await f.approve();
     const before = f.run(() => f.sessions.reviewSessionIds());
-    const result = await call(TOOL_NAMES.actionPrepareSuiActionReview, { intent: {
+    const result = await call(TOOL_NAMES.actionStartReview, { intent: {
       type: "swap", protocol: "flowx", from: { symbol: "SUI", amount: "1" },
       to: { symbol: "USDC" }, maxSlippageBps: 50
     } });
@@ -134,32 +134,32 @@ describe("wallet cards, ordinary MCP and stored review activity", () => {
   it("reports the same pending disconnect through card, get, wait and interaction tools", async () => {
     const { f, call } = await harness(), { connection } = await f.approve();
     const pending = deferred<void>(); vi.mocked(f.transport.disconnect).mockImplementationOnce(() => pending.promise);
-    const created = await call(TOOL_NAMES.sessionCreateWalletConnection), snapshot = cardSnapshotSchema.parse(data(created));
+    const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard), snapshot = cardSnapshotSchema.parse(data(created));
     const ref = cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]);
     const admitted = data(await call(CARD_TOOLS.act, { ...ref, revision: snapshot.revision, input: { action: "disconnect", walletRunId: f.runtime.runId, connectionId: connection.connectionId } }));
     expect(admitted).toMatchObject({ state: "running", data: { observe: true, connection: { pendingAction: "disconnect", status: "connected" } } });
     expect(admitted.data).toMatchObject({ connectionAction: "disconnect" });
-    for (const snapshot of [admitted, data(await call(TOOL_NAMES.sessionGetWalletConnection, { cardId: ref.cardId })),
-      data(await call(TOOL_NAMES.sessionWaitWalletConnection, { cardId: ref.cardId, timeoutMs: 1 })).card]) {
+    for (const snapshot of [admitted, data(await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: ref.cardId })),
+      data(await call(TOOL_NAMES.sessionWaitWalletConnectionCard, { cardId: ref.cardId, timeoutMs: 1 })).card]) {
       expect(snapshot.data).not.toHaveProperty("walletRecoveryGuidance");
     }
     const overview = data(await call(TOOL_NAMES.sessionGetInteractionStatus));
     expect(overview).not.toHaveProperty("walletRecoveryGuidance");
     expect(overview.userAnswerUse.followUp.tool).toBe(TOOL_NAMES.sessionGetReviewStatus);
 
-    expect(data(await call(TOOL_NAMES.sessionGetWalletConnection, { cardId: ref.cardId })).data.observe).toBe(true);
-    expect(data(await call(TOOL_NAMES.sessionWaitWalletConnection, { cardId: ref.cardId, timeoutMs: 1 })).waitOutcome).toBe("timed_out");
+    expect(data(await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: ref.cardId })).data.observe).toBe(true);
+    expect(data(await call(TOOL_NAMES.sessionWaitWalletConnectionCard, { cardId: ref.cardId, timeoutMs: 1 })).waitOutcome).toBe("timed_out");
     expect(data(await call(TOOL_NAMES.sessionGetInteractionStatus)).pendingWalletConnections.items)
       .toContainEqual(expect.objectContaining({ cardId: ref.cardId, connectionId: connection.connectionId, status: "disconnect_pending" }));
     pending.resolve();
     await vi.waitFor(() => expect(f.run(() => f.records.connection(connection.connectionId)?.sdkPending)).toBe(false));
-    const final = data(await call(TOOL_NAMES.sessionGetWalletConnection, { cardId: ref.cardId }));
+    const final = data(await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: ref.cardId }));
     expect(final).toMatchObject({ state: "closed", data: { observe: false, connection: { status: "disconnected" } } });
     expect(findForbiddenMcpFields(final)).toEqual([]); expect(f.transport.disconnect).toHaveBeenCalledOnce();
   });
   it("keeps UI permission and the same pairing out of ordinary get/wait/saved results", async () => {
     const { f, client, call } = await harness();
-    const created = await call(TOOL_NAMES.sessionCreateWalletConnection, { intent: "connect" }), ready = cardSnapshotSchema.parse(data(created));
+    const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "connect" }), ready = cardSnapshotSchema.parse(data(created));
     const ref = cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]);
     expect(f.connect).not.toHaveBeenCalled();
     expect((ready.data as { boundary: string }).boundary).toContain("not a transaction approval");
@@ -168,8 +168,8 @@ describe("wallet cards, ordinary MCP and stored review activity", () => {
     const read = await call(CARD_TOOLS.read, ref); const privateDisplay = read._meta?.[WALLET_DISPLAY_METADATA_KEY];
     expect(privateDisplay).toMatchObject({ cardId: ref.cardId, pairingUri: expect.stringContaining("symKey=") });
     expect((await call(CARD_TOOLS.read, ref))._meta?.[WALLET_DISPLAY_METADATA_KEY]).toEqual(privateDisplay);
-    const get = await call(TOOL_NAMES.sessionGetWalletConnection, { cardId: ref.cardId });
-    const wait = await call(TOOL_NAMES.sessionWaitWalletConnection, { cardId: ref.cardId, timeoutMs: 1 });
+    const get = await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: ref.cardId });
+    const wait = await call(TOOL_NAMES.sessionWaitWalletConnectionCard, { cardId: ref.cardId, timeoutMs: 1 });
     const saved = await f.run(() => client.readResource({ uri: CARD_RESOURCE_PREFIX + ref.cardId }));
     const publicText = JSON.stringify({ get, wait, saved, content: read.content, structuredContent: read.structuredContent });
     for (const forbidden of [ref.permission, "symKey", "wc:fixture"]) expect(publicText).not.toContain(forbidden);
@@ -180,7 +180,7 @@ describe("wallet cards, ordinary MCP and stored review activity", () => {
 
   it("refuses workflow creation for clients without a card surface without creating an operation", async () => {
     const { f, call } = await harness(false);
-    expect((await call(TOOL_NAMES.sessionCreateWalletConnection)).isError).toBe(true);
+    expect((await call(TOOL_NAMES.sessionOpenWalletConnectionCard)).isError).toBe(true);
     expect(f.run(() => f.records.connections())).toEqual([]); expect(f.connect).not.toHaveBeenCalled();
   });
 
@@ -312,7 +312,7 @@ it.each(["initialization_failed", "restoration_failed"] as const)("returns compl
     if (name === TOOL_NAMES.sessionWaitExecutionResult) expect(response.waitOutcome).toBe("status_reached");
   }
   expect(data(await call(TOOL_NAMES.sessionGetInteractionStatus))).toMatchObject({ walletAvailability: { status: "unavailable" } });
-  expect(data(await call(TOOL_NAMES.sessionGetWalletConnection, { cardId: connectCard.snapshot.cardId })).data.connection.status).toBe("connected");
+  expect(data(await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: connectCard.snapshot.cardId })).data.connection.status).toBe("connected");
   const management = data(await call(TOOL_NAMES.sessionOpenReviewManagement, { reviewSessionId: ready.session.id, attemptId: saved.attemptId }));
   expect(management.data).toMatchObject({ request: saved, walletAvailability: { status: "unavailable" }, observe: false });
   expect(data(await call(TOOL_NAMES.readGetReviewSessionDetail, { reviewSessionId: ready.session.id })).request).toEqual(saved);
@@ -345,8 +345,8 @@ it("keeps asynchronous card-creation failures inside both review gateways' safe 
   const { f, call } = await harness(); await f.approve();
   const create = vi.spyOn(f.cards, "create").mockRejectedValue(new Error("PRIVATE-CARD-STORAGE"));
   const inputs = [
-    { name: TOOL_NAMES.actionPrepareSuiActionReview, input: { intent: { type: "swap", protocol: "deep", from: { symbol: "SUI", amount: "1" }, to: { symbol: "USDC" }, maxSlippageBps: 50 } } },
-    { name: TOOL_NAMES.actionPrepareExternalProposalReview, input: { proposal: { type: "payment", id: "untrusted-payment", source: { kind: "user", name: "Fixture" },
+    { name: TOOL_NAMES.actionStartReview, input: { intent: { type: "swap", protocol: "deep", from: { symbol: "SUI", amount: "1" }, to: { symbol: "USDC" }, maxSlippageBps: 50 } } },
+    { name: TOOL_NAMES.actionCreateProposalReview, input: { proposal: { type: "payment", id: "untrusted-payment", source: { kind: "user", name: "Fixture" },
       network: "sui:mainnet", createdAt: f.now().toISOString(), purpose: "Review a proposed payment", payment: {
         amount: { symbol: "SUI", amountDisplay: "1", amountKind: "display_proposal" }, recipient: { address: f.account } } } } }
   ];
@@ -383,7 +383,7 @@ it.each([TOOL_NAMES.sessionGetReviewStatus, TOOL_NAMES.sessionGetExecutionResult
 
 // Use public creation for each review: no test-only reopening of a consumed card.
 async function openProductReview(h: Awaited<ReturnType<typeof harness>>) {
-  const created = await h.call(TOOL_NAMES.actionPrepareSuiActionReview, { intent: { type: "swap", protocol: "deep",
+  const created = await h.call(TOOL_NAMES.actionStartReview, { intent: { type: "swap", protocol: "deep",
     from: { symbol: "SUI", amount: "1" }, to: { symbol: "USDC" }, maxSlippageBps: 50 } });
   // Public creation uses wall time; advance the controlled external-source clock
   // before any reads or transitions so history never predates session creation.
@@ -399,7 +399,7 @@ async function openProductReview(h: Awaited<ReturnType<typeof harness>>) {
   return { id, ref, read, act };
 }
 async function selectProductAccount(h: Awaited<ReturnType<typeof harness>>, connectionId: string, account: string) {
-  const created = await h.call(TOOL_NAMES.sessionCreateWalletConnection);
+  const created = await h.call(TOOL_NAMES.sessionOpenWalletConnectionCard);
   data(await h.call(CARD_TOOLS.act, { ...cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]),
     revision: cardSnapshotSchema.parse(data(created)).revision, input: { action: "use_account", walletRunId: data(created).data.walletAvailability.walletRunId, connectionId, account } }));
 }
@@ -500,7 +500,7 @@ it.each(["user_stop", "expiry_update", "account_change", "session_delete", "disc
   if (origin === "user_stop") data(await review.act({ action: "stop_waiting" }));
   else if (origin === "disconnect") {
     finishDisconnect = deferred<void>(); vi.mocked(f.transport.disconnect).mockImplementationOnce(() => finishDisconnect!.promise);
-    const created = await call(TOOL_NAMES.sessionCreateWalletConnection);
+    const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard);
     data(await call(CARD_TOOLS.act, { ...cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]), revision: cardSnapshotSchema.parse(data(created)).revision,
       input: { action: "disconnect", walletRunId: f.runtime.runId, connectionId: connection.connectionId } }));
   } else if (origin === "session_delete") f.notify();
@@ -542,7 +542,7 @@ it.each(["submitting", "awaiting_chain_result"] as const)("preserves same-digest
   f.notify({ topic: "fixture-topic", accounts: [f.account], methods: ["sui_signTransaction"], chain: "sui:mainnet",
     expiresAt: new Date(Date.parse(connection.expiresAt) + 1000).toISOString() });
   const disconnecting = deferred<void>(); vi.mocked(f.transport.disconnect).mockImplementationOnce(() => disconnecting.promise);
-  const connectCard = await call(TOOL_NAMES.sessionCreateWalletConnection);
+  const connectCard = await call(TOOL_NAMES.sessionOpenWalletConnectionCard);
   data(await call(CARD_TOOLS.act, { ...cardReferenceSchema.parse(connectCard._meta?.[CARD_METADATA_KEY]), revision: cardSnapshotSchema.parse(data(connectCard)).revision,
     input: { action: "disconnect", walletRunId: f.runtime.runId, connectionId: connection.connectionId } }));
   expect(f.run(() => f.records.authority(request.attemptId))).toEqual(authority);
@@ -685,7 +685,7 @@ it("settles an ended preparation after storage recovers, without restarting its 
 
 it.each(["absent", "retained", "unavailable"] as const)("recovers a stored disconnect with %s SDK state through ordinary reads", async (sdkState) => {
   const { f, call } = await harness(), { connection } = await f.approve();
-  const created = await call(TOOL_NAMES.sessionCreateWalletConnection), ref = cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]);
+  const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard), ref = cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]);
   const gate = deferred<void>(), disconnect = f.transport.disconnect, performDisconnect = vi.mocked(f.transport.disconnect).getMockImplementation()!;
   vi.mocked(disconnect).mockImplementationOnce(async () => {
     await gate.promise;
@@ -702,12 +702,12 @@ it.each(["absent", "retained", "unavailable"] as const)("recovers a stored disco
     await vi.waitFor(() => expect(f.logger.error).toHaveBeenCalledWith("Wallet operation failed", { stage: "disconnection" }));
     expect(f.run(() => f.records.connection(connection.connectionId)?.sdkPending)).toBe(false);
     db.exec("DROP TRIGGER reject_disconnected");
-    const result = data(await call(TOOL_NAMES.sessionGetWalletConnection, { cardId: ref.cardId }));
+    const result = data(await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: ref.cardId }));
     expect(result.state).toBe("closed");
     const expected = sdkState === "absent" ? "disconnected" : "failed";
     expect(result.data.connection.status).toBe(expected);
     if (expected === "failed") expect(result.data.connection.reason).toContain("may remain in your wallet app");
-    expect(data(await call(TOOL_NAMES.sessionWaitWalletConnection, { cardId: ref.cardId, timeoutMs: 1 })).waitOutcome).toBe("status_reached");
+    expect(data(await call(TOOL_NAMES.sessionWaitWalletConnectionCard, { cardId: ref.cardId, timeoutMs: 1 })).waitOutcome).toBe("status_reached");
     expect(data(await call(TOOL_NAMES.sessionGetInteractionStatus)).pendingWalletConnections.items).toEqual([]);
     expect(f.run(() => f.records.pendingDisconnect(connection.connectionId))).toBeUndefined();
     expect(disconnect).toHaveBeenCalledOnce();
@@ -859,7 +859,7 @@ it("advertises and opens disconnect controls without clearing context or disconn
   const { f, client, call } = await harness(), { connection } = await f.approve();
   const before = await f.run(() => f.activity.getActiveAccount());
   const tools = (await client.listTools()).tools;
-  const gateway = tools.find((tool) => tool.name === TOOL_NAMES.sessionCreateWalletConnection)!;
+  const gateway = tools.find((tool) => tool.name === TOOL_NAMES.sessionOpenWalletConnectionCard)!;
   expect(gateway.description).toContain("disconnection");
   expect(gateway.description).not.toMatch(/must|should|always/i);
   expect(gateway.inputSchema.properties).not.toHaveProperty("action");

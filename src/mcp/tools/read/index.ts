@@ -14,8 +14,8 @@ import { registerWalletReadTools } from "./walletReadTools.js";
 
 export { SUPPORTED_PROTOCOLS };
 
-export function registerReadTools(server: McpServer, deps: McpServerDeps): void {
-  registerServerStatusTools(server);
+export function registerReadTools(server: McpServer, deps: McpServerDeps, registeredPromptNames: readonly string[]): void {
+  registerServerStatusTools(server, registeredPromptNames);
   registerDeepbookReadTools(server, deps);
   registerWalletReadTools(server, deps);
   registerReviewActivityListTool(server, deps);

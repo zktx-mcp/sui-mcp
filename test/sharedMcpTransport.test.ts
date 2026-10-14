@@ -115,7 +115,7 @@ it("preserves a valid external proposal larger than the card/HTTP body limit ove
       action: { actionKind: "inspection", target: { label: "Untrusted target" }, assetFlow: Array.from({ length: 20 }, () => ({ direction: "outgoing", amount: { amountDisplay: "1", symbol: "SUI" }, description: "다".repeat(512) })) }
     });
     expect(Buffer.byteLength(JSON.stringify(proposal))).toBeGreaterThan(MAX_JSON_BODY_BYTES);
-    const result = await client.callTool({ name: TOOL_NAMES.actionPrepareExternalProposalReview, arguments: { proposal } });
+    const result = await client.callTool({ name: TOOL_NAMES.actionCreateProposalReview, arguments: { proposal } });
     expect(result.isError).not.toBe(true);
     expect(JSON.stringify(result.structuredContent)).toContain("proposal_review_only");
     expect(JSON.stringify(result.structuredContent)).not.toContain('"transactionBytes":');
@@ -162,7 +162,7 @@ it("preserves MCP discovery, completions and private results across clients and 
     expect((await a.listResourceTemplates()).resourceTemplates).toEqual([]);
     expect((await a.readResource({ uri: "fixture://state" })).contents).toEqual([{ uri: "fixture://state", text: "first" }]);
     expect((await a.listPrompts()).prompts.some((prompt) => prompt.name === "swap")).toBe(true);
-    expect(JSON.stringify(await a.getPrompt({ name: "swap", arguments: { intent: "10 sui to usdc" } }))).toContain("action.prepare_sui_action_review");
+    expect(JSON.stringify(await a.getPrompt({ name: "swap", arguments: { intent: "10 sui to usdc" } }))).toContain("action_start_review");
     expect((await a.complete({ ref: { type: "ref/prompt", name: "swap" }, argument: { name: "intent", value: "" } })).completion.values).toEqual(["10 sui to usdc", "10 수이 usdc로 환전"]);
     const result = await b.callTool({ name: "fixture.call", arguments: { hold: false } });
     expect(result.structuredContent).toEqual({ owner: "first" });

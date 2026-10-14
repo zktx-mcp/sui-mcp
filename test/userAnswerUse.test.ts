@@ -168,7 +168,7 @@ const followUpResponseShapes: Record<string, unknown> = {
   [TOOL_NAMES.sessionGetExecutionResult]: {
     executionResult: {}
   },
-  [TOOL_NAMES.sessionWaitWalletConnection]: {
+  [TOOL_NAMES.sessionWaitWalletConnectionCard]: {
     status: "connected",
     account: "0x1",
     chain: "sui:mainnet",
@@ -185,7 +185,7 @@ const quoteQuantitySemanticsShape = {
   canUseForPaymentAnswer: false,
   canUseForShortfallAnswer: false,
   doNotCombineWithPaymentAnswer: true,
-  requiredPaymentAnswerTool: "read.preview_intent_evidence",
+  requiredPaymentAnswerTool: "read_preview_intent_evidence",
   requiredPaymentAnswerField: "responseSummary",
   paymentAnswerUseBlockedReason: "quote_output_is_price_reference_not_payment_answer"
 };
