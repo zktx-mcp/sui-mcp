@@ -79,7 +79,7 @@ export const chartRenderer = {
     }
     form.addEventListener("submit", (event) => { event.preventDefault(); submitSelection(); });
     for (const control of [pool, interval, start, end]) control.addEventListener("change", submitSelection);
-    return { node: form, selectionHint: "To retry, clear the pair with “Choose a pair”, then select your pair again. Your time range and interval are kept." };
+    return { node: form, selectionRecovery: { label: "Retry chart", retry: submitSelection } };
   },
   result(snapshot) {
     const parsed = chartResultSchema.safeParse(snapshot.data);

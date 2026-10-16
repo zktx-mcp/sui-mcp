@@ -1,5 +1,7 @@
+import { readStoredTransactionRequest } from "../session/sqliteTransactionRequest.js";
+import { publicConnectionOperation } from "../session/walletConnectionOperations.js";
 import { decideReviewEvaluation, needsReviewMaterial, type ReviewEvaluationCandidate, type ReviewEvaluation } from "../session/reviewValidity.js";
-import { workflowEligibility, type WorkflowEvaluationInput, type EvaluatedWorkflowState } from "../session/workflowState.js";
+import { fixedReviewTarget, workflowEligibility, type WorkflowEvaluationInput, type EvaluatedWorkflowState } from "../session/workflowState.js";
 import { SessionStoreError } from "../session/sessionErrors.js";
 import { z } from "zod";
 import { TRANSACTION_REQUEST_STATUSES, transactionRequestStatusSchema } from "../session/transactionRequest.js";
@@ -8,13 +10,16 @@ import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
-import { SqliteWalletWorkflowStore, readStoredTransactionRequest } from "../session/sqliteWalletWorkflowStore.js";
+import { SqliteWalletWorkflowStore } from "../session/sqliteWalletWorkflowStore.js";
 import type { AdapterLifecycleValidator } from "../action/adapterLifecycleValidation.js";
 import { assertNoForbiddenMcpFields } from "../action/forbiddenFields.js";
 import { parseLifecycleValidatedReviewState } from "../action/reviewStateValidation.js";
 import { actionPlanSchema } from "../action/schemas.js";
 import type { ActionPlan, ReviewState } from "../action/types.js";
 import { parseSuiAddress } from "../suiAddress.js";
+import { SqliteAccountStore } from "./sqliteAccountStore.js";
+import { SUI_MAINNET_WALLET_CHAIN, fixedChainAccount } from "../session/chainAccounts.js";
+import { walletConnectionSchema } from "../session/walletConnection.js";
 import { SqlitePreferencesRepository } from "../preferences/sqlitePreferencesRepository.js";
 import { SqliteTransactionMaterialStore } from "../session/sqliteTransactionMaterialStore.js";
 import { SqliteCardRecordStore } from "../session/sqliteCardStore.js";
@@ -87,8 +92,6 @@ import {
   EXTERNAL_ACTIVITY_STATUSES,
   INTERNAL_SESSION_STATUSES,
   REVIEW_STATE_STATUSES,
-  type AccountRow,
-  type ActiveAccountRow,
   type CoinMetadataCacheRow,
   type CountRow,
   type ExternalActivityScanRow,
@@ -98,10 +101,8 @@ import {
   type ReviewActivityScope,
   type ReviewStateSnapshotRow,
   type ReviewTransitionRow,
-  asAccountSource,
   asInternalSessionStatus,
   asReviewTransitionEvent,
-  asString,
   assertDateRange,
   coinMetadataCacheRecordFromRow,
   countMap,
@@ -131,7 +132,6 @@ import {
 export { ActivityStoreError };
 export type { SqliteActivityStoreOptions };
 
-const ACTIVE_ACCOUNT_SINGLETON_ID = 1;
 export const DATA_DIR_ENV = "SUI_MCP_DATA_DIR";
 export const ACTIVITY_DATABASE_FILENAME = "sui-mcp.sqlite";
 
@@ -147,6 +147,7 @@ function restrictPathPermissions(path: string, mode: number): void {
 
 export class SqliteActivityStore implements ActivityStore {
   private readonly db: SqliteDatabase;
+  readonly chainAccounts: SqliteAccountStore;
   private readonly validateAdapterLifecycle: AdapterLifecycleValidator;
 
   constructor(options: SqliteActivityStoreOptions) {
@@ -165,6 +166,7 @@ export class SqliteActivityStore implements ActivityStore {
     }
     const database = new Database(options.databasePath);
     this.db = options.guardDatabase?.(database) ?? database;
+    this.chainAccounts = new SqliteAccountStore(this.db);
     try {
       initializeDatabase(this.db);
       configureDatabase(this.db);
@@ -192,61 +194,7 @@ export class SqliteActivityStore implements ActivityStore {
     return this.getAccountByAddressSync(normalized);
   }
 
-  async setActiveAccount(
-    address: string,
-    source: "wallet_connection",
-    now = new Date(),
-    wallet?: { name?: string | undefined; id?: string | undefined }
-  ): Promise<ActiveAccountRecord> {
-    return this.setActiveAccountSync(address, source, now, wallet);
-  }
-
-  private setActiveAccountSync(address: string, source: "wallet_connection", now: Date,
-    wallet?: { name?: string | undefined; id?: string | undefined }): ActiveAccountRecord {
-    const timestamp = now.toISOString();
-    return this.db.transaction(() => {
-      const account = this.upsertAccountSync(address, source, timestamp);
-      this.db
-        .prepare(
-          `INSERT INTO active_account_context (id, account_id, source, set_at, wallet_name, wallet_id)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             account_id = excluded.account_id,
-             source = excluded.source,
-             set_at = excluded.set_at,
-             wallet_name = excluded.wallet_name,
-             wallet_id = excluded.wallet_id`
-        )
-        .run(ACTIVE_ACCOUNT_SINGLETON_ID, account.id, source, timestamp, wallet?.name ?? null, wallet?.id ?? null);
-      return {
-        accountId: account.id,
-        address: account.address,
-        source,
-        setAt: timestamp,
-        ...(wallet?.name ? { walletName: wallet.name } : {}),
-        ...(wallet?.id ? { walletId: wallet.id } : {})
-      };
-    })();
-  }
-
-  async getActiveAccount(): Promise<ActiveAccountRecord | undefined> {
-    return this.getActiveAccountSync();
-  }
-
-  async clearActiveAccount(now = new Date()): Promise<void> { this.clearActiveAccountSync(now); }
-
-  clearActiveAccountSync(now = new Date()): void {
-    this.db
-      .prepare(
-        `INSERT INTO active_account_context (id, account_id, source, set_at)
-         VALUES (?, NULL, 'cleared', ?)
-         ON CONFLICT(id) DO UPDATE SET
-           account_id = NULL,
-           source = 'cleared',
-           set_at = excluded.set_at`
-      )
-      .run(ACTIVE_ACCOUNT_SINGLETON_ID, now.toISOString());
-  }
+  async getActiveAccount(): Promise<ActiveAccountRecord | undefined> { return this.getActiveAccountSync(); }
 
   async recordReviewSession(input: ReviewSessionEvidenceInput): Promise<void> {
     const plan = parseActionPlanEvidence(input.plan);
@@ -355,9 +303,6 @@ export class SqliteActivityStore implements ActivityStore {
         : null;
       if (accountId !== null) {
         this.assertReviewSessionAccount(input.reviewSessionId, accountId);
-        if (input.event === "wallet_connected") {
-          this.assertActiveAccountSync(accountId, input.reviewSessionId);
-        }
       }
       this.insertReviewTransition({ ...input, accountId });
       this.db
@@ -432,12 +377,16 @@ export class SqliteActivityStore implements ActivityStore {
         const { material: checked, clock } = live.publication;
         const at = clock(), handle = checked.artifacts.transactionMaterial;
         const material = handle && this.createTransactionMaterialStore().getTransactionMaterial(handle, at);
-        const connection = live.expected?.walletConnectionId ? this.db.prepare("SELECT revision,status,owner_id,connection_json FROM live_wallet_connections WHERE id=?")
-          .get(live.expected.walletConnectionId) as { revision: number; status: string; owner_id: string; connection_json: string } | undefined : undefined;
+        const connection = live.expected?.walletConnectionId ? this.db.prepare(`SELECT c.status,c.owner_id,c.run_id,c.connection_json,r.preparation_run_id FROM live_wallet_connections c
+          JOIN live_review_sessions r ON r.wallet_connection_id=c.id WHERE c.id=? AND r.id=? AND c.current_slot=1 AND c.data_epoch=(SELECT data_epoch FROM settings_control WHERE id=1)`)
+          .get(live.expected.walletConnectionId, live.expected.id) as { status: string; owner_id: string; run_id: string | null; preparation_run_id: string | null; connection_json: string } | undefined : undefined;
+        const wallet = connection && walletConnectionSchema.parse(JSON.parse(connection.connection_json));
         if (Date.parse(live.next.expiresAt) <= at.getTime() || !handle || !material || !sameHandle(material, handle) ||
             !Buffer.from(material.transactionBytes).equals(checked.transactionBytes) || !connection || connection.status !== "connected" ||
-            connection.owner_id !== live.expected?.ownerId || connection.revision !== live.expected?.walletConnectionRevision ||
-            Date.parse((JSON.parse(connection.connection_json) as { expiresAt: string }).expiresAt) <= at.getTime()) {
+            connection.owner_id !== live.expected?.ownerId || !connection.run_id || connection.run_id !== connection.preparation_run_id || !wallet ||
+            wallet.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== live.expected?.walletGrantRevision ||
+            fixedChainAccount(wallet, SUI_MAINNET_WALLET_CHAIN) !== parsedState.account ||
+            Date.parse(wallet.expiresAt) <= at.getTime()) {
           throw new SessionStoreError("invalid_session_transition", "Review material or wallet selection changed before publication.");
         }
       }
@@ -489,12 +438,12 @@ export class SqliteActivityStore implements ActivityStore {
     let where = base.whereSql; const params = [...base.params];
     if (filter.requestStatus !== undefined) { where += " AND r.request_status=?"; params.push(transactionRequestStatusSchema.parse(filter.requestStatus)); }
     if (filter.executionStatus !== undefined) { where += " AND e.status=?"; params.push(z.enum(["success", "failure"]).parse(filter.executionStatus)); }
-    const joins = `FROM review_sessions rs JOIN accounts a ON a.id=rs.account_id
+    const joins = `FROM review_sessions rs JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id=rs.account_id
       LEFT JOIN review_requests r ON r.attempt_id=rs.current_attempt_id AND r.review_session_id=rs.id AND r.account_id=rs.account_id
       LEFT JOIN review_executions e ON e.attempt_id=r.attempt_id`;
     const count = (this.db.prepare(`SELECT COUNT(*) AS count ${joins} ${where}`).get(...params) as CountRow).count;
     const rows = this.db.prepare(`SELECT rs.id AS review_session_id, rs.plan_id, rs.action_kind, rs.adapter_id, rs.protocol,
-      rs.current_status, rs.current_attempt_id, a.sui_address AS account, rs.created_at, rs.updated_at,
+      rs.current_status, rs.current_attempt_id, a.address AS account, rs.created_at, rs.updated_at,
       e.status AS execution_status, e.tx_digest,
       (SELECT COUNT(*) FROM review_state_snapshots s WHERE s.review_session_id=rs.id) AS snapshot_count,
       (SELECT COUNT(*) FROM review_status_transitions t WHERE t.review_session_id=rs.id) AS transition_count
@@ -554,8 +503,8 @@ export class SqliteActivityStore implements ActivityStore {
        (r.request_status!='completed' OR e.tx_digest!=r.transaction_digest OR json_valid(e.result_json)=0))) LIMIT 1`).get(...params);
     if (inconsistent) throw new ActivityStoreReadError("internal_error", "Stored review request evidence is inconsistent.", { reason: "invalid_stored_evidence" });
     // Aggregation must not turn a malformed current result into a valid count.
-    for (const row of this.db.prepare(`SELECT rs.id,rs.current_attempt_id,a.sui_address AS account
-      FROM review_sessions rs JOIN accounts a ON a.id=rs.account_id ${where} AND rs.current_attempt_id IS NOT NULL`)
+    for (const row of this.db.prepare(`SELECT rs.id,rs.current_attempt_id,a.address AS account
+      FROM review_sessions rs JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id=rs.account_id ${where} AND rs.current_attempt_id IS NOT NULL`)
       .all(...params) as { id: string; current_attempt_id: string; account: string }[]) {
       this.readRequestEvidence(row.current_attempt_id, row.id, row.account);
     }
@@ -574,15 +523,15 @@ export class SqliteActivityStore implements ActivityStore {
 
   async getReviewSessionDetail(input: ReviewSessionDetailInput): Promise<ReviewSessionDetailResult> {
     const scope = this.resolveReviewActivityScope({ account: input.account });
-    const row = scope.accountId === undefined ? undefined : this.db.prepare(`SELECT rs.*, a.sui_address AS account
-      FROM review_sessions rs JOIN accounts a ON a.id=rs.account_id WHERE rs.id=? AND rs.account_id=?`)
+    const row = scope.accountId === undefined ? undefined : this.db.prepare(`SELECT rs.*, a.address AS account
+      FROM review_sessions rs JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id=rs.account_id WHERE rs.id=? AND rs.account_id=?`)
       .get(input.reviewSessionId, scope.accountId) as { id: string; plan_id: string; action_kind: string; adapter_id: string; protocol: string;
         current_status: string; current_attempt_id: string | null; created_at: string; updated_at: string; account: string; plan_json: string; intent_json: string | null } | undefined;
     if (!row) throw new ActivityStoreReadError("session_not_found", "Review session not found", { reviewSessionId: input.reviewSessionId });
-    const snapshots = this.db.prepare(`SELECT s.*,a.sui_address AS account FROM review_state_snapshots s JOIN accounts a ON a.id=s.account_id
+    const snapshots = this.db.prepare(`SELECT s.*,a.address AS account FROM review_state_snapshots s JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id=s.account_id
       WHERE s.review_session_id=? AND s.account_id=? ORDER BY s.recorded_at,s.id LIMIT ?`)
       .all(input.reviewSessionId, scope.accountId, REVIEW_ACTIVITY_DETAIL_MAX_ITEMS + 1) as ReviewStateSnapshotRow[];
-    const transitions = this.db.prepare(`SELECT t.*,a.sui_address AS account FROM review_status_transitions t LEFT JOIN accounts a ON a.id=t.account_id
+    const transitions = this.db.prepare(`SELECT t.*,a.address AS account FROM review_status_transitions t LEFT JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id=t.account_id
       WHERE t.review_session_id=? AND (t.account_id IS NULL OR t.account_id=?) ORDER BY t.transitioned_at,t.id LIMIT ?`)
       .all(input.reviewSessionId, scope.accountId, REVIEW_ACTIVITY_DETAIL_MAX_ITEMS + 1) as ReviewTransitionRow[];
     const requestIds = this.db.prepare(`SELECT attempt_id FROM review_requests WHERE review_session_id=? AND account_id=? ORDER BY created_at,attempt_id LIMIT ?`)
@@ -752,13 +701,13 @@ export class SqliteActivityStore implements ActivityStore {
       .get(...scanParams) as CountRow).count;
     const scanRows = this.db
       .prepare(
-        `SELECT eas.scan_id, eas.kind, eas.account_id, a.sui_address AS account, eas.relationship,
+        `SELECT eas.scan_id, eas.kind, eas.account_id, a.address AS account, eas.relationship,
                 eas.input_digest, eas.from_checkpoint, eas.to_checkpoint, eas.from_timestamp,
                 eas.to_timestamp, eas.limit_count, eas.request_cursor, eas.response_cursor,
                 eas.endpoint_host, eas.chain_identifier, eas.fetched_at, eas.stored_count,
                 eas.skipped_count, eas.has_more, eas.window_complete, eas.incomplete_reason
          FROM external_activity_scans eas
-         JOIN accounts a ON a.id = eas.account_id
+         JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id = eas.account_id
          ${scanWhereSql}
          ORDER BY eas.fetched_at DESC, eas.scan_id DESC
          LIMIT ?`
@@ -871,13 +820,13 @@ export class SqliteActivityStore implements ActivityStore {
       .get(...params) as { earliest_timestamp: string | null; latest_timestamp: string | null };
     const rows = this.db
       .prepare(
-        `SELECT eat.account_id, a.sui_address AS account, eat.digest, eat.relationship,
+        `SELECT eat.account_id, a.address AS account, eat.digest, eat.relationship,
                 eat.checkpoint, eat.timestamp, eat.status, eat.known_sender_account_id,
                 eat.first_scan_id, eat.last_scan_id, eat.first_fetched_at, eat.last_fetched_at,
                 last_scan.incomplete_reason AS last_scan_incomplete_reason,
                 eat.detail_json
          FROM external_activity_transactions eat
-         JOIN accounts a ON a.id = eat.account_id
+         JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id = eat.account_id
          LEFT JOIN external_activity_scans last_scan ON last_scan.scan_id = eat.last_scan_id
          ${whereSql}
          ORDER BY
@@ -943,10 +892,9 @@ export class SqliteActivityStore implements ActivityStore {
   createWalletWorkflowStore(ownerId: string, clock: () => Date = () => new Date(),
     readSdkSnapshot: () => import("../session/walletRuntime.js").WalletSnapshot | undefined = () => undefined): SqliteWalletWorkflowStore {
     const records: SqliteWalletWorkflowStore = new SqliteWalletWorkflowStore(this.db, ownerId,
-      (address, id, name, now) => this.setActiveAccountSync(address, "wallet_connection", now, { id, name }),
-      clock, this.createTransactionMaterialStore(),
+      this.chainAccounts, clock, this.createTransactionMaterialStore(),
       (input, at) => this.reconcileWorkflowState(input, records, ownerId, at === undefined ? clock : () => at),
-      () => this.getActiveAccountSync(), readSdkSnapshot);
+      readSdkSnapshot);
     return records;
   }
 
@@ -990,7 +938,7 @@ export class SqliteActivityStore implements ActivityStore {
       const cards = this.createCardRecordStore();
       let record = input.expectedCard && records.currentCard(input.expectedCard);
       const reviewId = input.purpose === "review" ? input.reviewSessionId : undefined;
-      if (record && (input.purpose === "review" ? record.state.kind !== "review" || record.state.input.reviewSessionId !== reviewId : record.state.kind !== "connect")) {
+      if (record && (input.purpose === "review" ? record.state.kind !== "review" || record.state.input.reviewSessionId !== reviewId : !["connect", "disconnect"].includes(record.state.kind))) {
         throw new SessionStoreError("session_mismatch", "The workflow target does not match this card.");
       }
       const target = reviewId ? records.reviewReadTarget(reviewId, record) : undefined;
@@ -1008,20 +956,34 @@ export class SqliteActivityStore implements ActivityStore {
         records.advanceRequestDeadlines(now);
         records.expireConnections(now);
       } else records.advanceRequestDeadlines(now, target.attemptId);
-      if (record) record = cards.evaluate(record, () => now).record;
+      if (record) record = records.expireCard(record, now);
       const session = evaluated?.session;
       const request = target?.attemptId ? records.request(target.attemptId) : undefined;
       const authority = request && records.authority(request.attemptId);
       const details = request?.execution && records.executionDetails(request.attemptId);
-      const connection = record?.state.kind === "connect" && record.operationId ? records.connection(record.operationId) : undefined;
-      const connectionFacts = records.readConnectionFacts(now), targetAccount = session?.account ?? connectionFacts.activeAccount;
+      const operationRecord = ["connect", "disconnect"].includes(record?.scope ?? "") && record ? records.cardOperation(record) : undefined;
+      const operation = operationRecord && publicConnectionOperation(operationRecord);
+      const connectionFacts = records.readConnectionFacts(now), reviewTarget = session ? fixedReviewTarget(session, record?.state.input) : undefined;
+      const targetAccount = reviewTarget?.account;
+      if (record?.scope === "connect" || record?.scope === "disconnect") record = records.reconcileWalletCard(record, connectionFacts);
+      if (record?.scope === "review" && record.state.state === "ready") {
+        const expired = session?.status === "expired" || !!session && Date.parse(session.expiresAt) <= now.getTime();
+        const targetReplaced = !!reviewTarget && !!connectionFacts.connection && connectionFacts.connection.connectionId !== reviewTarget.connectionId;
+        const targetAbsent = !!reviewTarget && connectionFacts.connection?.connectionId === reviewTarget.connectionId && connectionFacts.connectionPresence.confirmed &&
+          connectionFacts.connectionPresence.observation?.status === "absent";
+        if (expired || targetAbsent || targetReplaced) {
+          const error = expired ? undefined : targetAbsent
+            ? "The wallet session for this review was confirmed absent. Ask in chat for a new transaction review; connect a wallet first if needed."
+            : "The original wallet connection is no longer current. Ask in chat for a new transaction review.";
+          record = records.endCard(record, expired ? "expired" : "failed", now, error);
+        }
+      }
       const facts = { ...connectionFacts, ownerId, record, session, request, authority,
         hasReviewInput: !!session && session.status !== "expired" && Date.parse(session.expiresAt) > now.getTime() &&
           cards.hasReviewInput(session.id, ownerId, now),
         walletAvailability: input.walletAvailability,
-        runtimeRecovery: record && records.walletRecovery(record),
+        operation,
         walletDependent: !target || target.walletDependent,
-        connection: connection ? records.connectionView(connection.connection) : undefined,
         boundReview: request && (record?.operationId || record?.scope === "review_manage") ? records.requestReview(request.attemptId) : undefined,
         busyForAccount: !!targetAccount && records.busyForAccount(targetAccount, now),
         receipt: details ? details.data : undefined, receiptDisplay: details ? details.receiptDisplay : undefined };
@@ -1101,37 +1063,7 @@ export class SqliteActivityStore implements ActivityStore {
   }
 
   private upsertAccountSync(address: string, source: AccountSource, timestamp: string): AccountRecord {
-    const normalized = parseSuiAddress(address);
-    if (!normalized) {
-      throw new ActivityStoreError("Invalid Sui account address");
-    }
-    this.db
-      .prepare(
-        `INSERT INTO accounts (sui_address, first_seen_at, last_used_at, first_source, last_source)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(sui_address) DO UPDATE SET
-           last_used_at = excluded.last_used_at,
-           last_source = excluded.last_source`
-      )
-      .run(normalized, timestamp, timestamp, source, source);
-    const row = this.db
-      .prepare(
-        `SELECT id, sui_address, first_seen_at, last_used_at, first_source, last_source
-         FROM accounts
-         WHERE sui_address = ?`
-      )
-      .get(normalized) as AccountRow | undefined;
-    if (!row) {
-      throw new ActivityStoreError(`Account was not recorded: ${normalized}`);
-    }
-    return {
-      id: row.id,
-      address: asString(row.sui_address),
-      firstSeenAt: asString(row.first_seen_at),
-      lastUsedAt: asString(row.last_used_at),
-      firstSource: asAccountSource(row.first_source),
-      lastSource: asAccountSource(row.last_source)
-    };
+    return this.chainAccounts.upsert(SUI_MAINNET_WALLET_CHAIN, address, source, timestamp);
   }
 
   private parseReviewStateEvidenceJson(
@@ -1155,40 +1087,24 @@ export class SqliteActivityStore implements ActivityStore {
   }
 
   private getAccountByAddressSync(address: string): AccountRecord | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT id, sui_address, first_seen_at, last_used_at, first_source, last_source
-         FROM accounts
-         WHERE sui_address = ?`
-      )
-      .get(address) as AccountRow | undefined;
-    return row
-      ? {
-          id: row.id,
-          address: asString(row.sui_address),
-          firstSeenAt: asString(row.first_seen_at),
-          lastUsedAt: asString(row.last_used_at),
-          firstSource: asAccountSource(row.first_source),
-          lastSource: asAccountSource(row.last_source)
-        }
-      : undefined;
+    return this.chainAccounts.get(SUI_MAINNET_WALLET_CHAIN, address);
   }
 
   private accountIdExists(accountId: number): boolean {
-    const row = this.db.prepare("SELECT id FROM accounts WHERE id = ?").get(accountId) as { id: number } | undefined;
+    const row = this.db.prepare("SELECT id FROM accounts WHERE id = ? AND chain_id=?").get(accountId, SUI_MAINNET_WALLET_CHAIN) as { id: number } | undefined;
     return row !== undefined;
   }
 
   private externalActivityScanById(scanId: string): ExternalActivityScanRecord | undefined {
     const row = this.db
       .prepare(
-        `SELECT eas.scan_id, eas.kind, eas.account_id, a.sui_address AS account, eas.relationship,
+        `SELECT eas.scan_id, eas.kind, eas.account_id, a.address AS account, eas.relationship,
                 eas.input_digest, eas.from_checkpoint, eas.to_checkpoint, eas.from_timestamp,
                 eas.to_timestamp, eas.limit_count, eas.request_cursor, eas.response_cursor,
                 eas.endpoint_host, eas.chain_identifier, eas.fetched_at, eas.stored_count,
                 eas.skipped_count, eas.has_more, eas.window_complete, eas.incomplete_reason
          FROM external_activity_scans eas
-         JOIN accounts a ON a.id = eas.account_id
+         JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id = eas.account_id
          WHERE eas.scan_id = ?`
       )
       .get(scanId) as ExternalActivityScanRow | undefined;
@@ -1201,13 +1117,13 @@ export class SqliteActivityStore implements ActivityStore {
   ): ExternalActivityTransactionRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT eat.account_id, a.sui_address AS account, eat.digest, eat.relationship,
+        `SELECT eat.account_id, a.address AS account, eat.digest, eat.relationship,
                 eat.checkpoint, eat.timestamp, eat.status, eat.known_sender_account_id,
                 eat.first_scan_id, eat.last_scan_id, eat.first_fetched_at, eat.last_fetched_at,
                 last_scan.incomplete_reason AS last_scan_incomplete_reason,
                 eat.detail_json
          FROM external_activity_transactions eat
-         JOIN accounts a ON a.id = eat.account_id
+         JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id = eat.account_id
          LEFT JOIN external_activity_scans last_scan ON last_scan.scan_id = eat.last_scan_id
          ${whereSql}
          ORDER BY
@@ -1245,8 +1161,8 @@ export class SqliteActivityStore implements ActivityStore {
         throw new ActivityStoreReadError("input_invalid", "Invalid account filter", { field: "account" });
       }
       const row = this.db
-        .prepare("SELECT id FROM accounts WHERE sui_address = ?")
-        .get(normalized) as { id: number } | undefined;
+        .prepare("SELECT id FROM accounts WHERE chain_id=? AND address=?")
+        .get(SUI_MAINNET_WALLET_CHAIN, normalized) as { id: number } | undefined;
       return {
         account: normalized,
         accountId: row?.id,
@@ -1256,8 +1172,8 @@ export class SqliteActivityStore implements ActivityStore {
 
     const active = this.getActiveAccountSync();
     if (!active) {
-      throw new ActivityStoreReadError("active_account_not_set", "Active account read context is not set", {
-        action: "connect_wallet_connection"
+      throw new ActivityStoreReadError("active_account_not_set", "No saved read address is set. Provide an explicit Sui account for this read.", {
+        action: "provide_account"
       });
     }
     return {
@@ -1268,25 +1184,7 @@ export class SqliteActivityStore implements ActivityStore {
   }
 
   getActiveAccountSync(): ActiveAccountRecord | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT a.id AS account_id, a.sui_address AS address, c.source AS source, c.set_at AS set_at,
-                c.wallet_name AS wallet_name, c.wallet_id AS wallet_id
-         FROM active_account_context c
-         JOIN accounts a ON a.id = c.account_id
-         WHERE c.id = ? AND c.account_id IS NOT NULL`
-      )
-      .get(ACTIVE_ACCOUNT_SINGLETON_ID) as ActiveAccountRow | undefined;
-    return row
-      ? {
-          accountId: row.account_id,
-          address: asString(row.address),
-          source: "wallet_connection",
-          setAt: asString(row.set_at),
-          ...(row.wallet_name ? { walletName: row.wallet_name } : {}),
-          ...(row.wallet_id ? { walletId: row.wallet_id } : {})
-        }
-      : undefined;
+    return this.chainAccounts.currentReadAccount(SUI_MAINNET_WALLET_CHAIN);
   }
 
   private assertReviewSessionAccount(reviewSessionId: string, accountId: number): void {
@@ -1301,14 +1199,7 @@ export class SqliteActivityStore implements ActivityStore {
     }
   }
 
-  private assertActiveAccountSync(accountId: number, reviewSessionId: string): void {
-    const row = this.db
-      .prepare("SELECT account_id FROM active_account_context WHERE id = ? AND source = 'wallet_connection'")
-      .get(ACTIVE_ACCOUNT_SINGLETON_ID) as { account_id: number | null } | undefined;
-    if (!row || row.account_id !== accountId) {
-      throw new ActivityStoreError(`Review session active account changed before commit: ${reviewSessionId}`);
-    }
-  }
+
 }
 
 function assertNonEmptyHalfOpenRange(from: string, to: string): void {

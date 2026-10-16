@@ -6,7 +6,7 @@ It does not define tool field contracts or response wording. Use `docs/MCP_TOOLS
 
 The README keeps only the short entry path; client-specific setup, restart behavior, and troubleshooting live here.
 
-These instructions target `@zktx.io/sui-mcp@0.7.0`. Package installation requires
+These instructions target `@zktx.io/sui-mcp@0.8.0`. Package installation requires
 that exact version to be published; use the developer checkout instructions when
 it is not available. A repository rename or local build does not publish the
 package. Changing client settings or rebuilding files does not replace an
@@ -52,7 +52,7 @@ They do not require wallet connection.
 
 This placeholder is only the sender value required by DeepBook SDK simulation reads. It is not a user's wallet, signing authorization, or fake user liquidity.
 
-Reads that require a connected default account use `session_open_wallet_connection_card`. Tools with an `account` input also accept an explicit Sui address without a wallet connection.
+Reads that require a current fixed wallet address use `session_open_wallet_connection_card`. Tools with an `account` input also accept an explicit Sui address without a wallet connection.
 
 ## Developer Checkout Setup
 
@@ -130,7 +130,7 @@ per-client configuration below, which give the exact `command` and `args`.
 
 The npm package for this release is `@zktx.io/sui-mcp`. The commands below
 require the requested version to be published; confirm it with
-`npm view @zktx.io/sui-mcp@0.7.0 version` before switching. Both installation
+`npm view @zktx.io/sui-mcp@0.8.0 version` before switching. Both installation
 methods start the same `sui-mcp` stdio MCP server. Use a local checkout when
 working on a version that has not been published.
 
@@ -229,7 +229,7 @@ restart first. A previous wallet pairing can remain in the wallet app; remove
 an unwanted pairing there rather than assuming new local storage disconnected it.
 
 Replace the old registration instead of adding a second one. Use
-`sui-mcp` as the default registration name and select `@zktx.io/sui-mcp@0.7.0`
+`sui-mcp` as the default registration name and select `@zktx.io/sui-mcp@0.8.0`
 in its command arguments. A client-defined alias does not change the package,
 server identity or permissions. Remove obsolete runtime environment overrides. If you set
 `SUI_MCP_DATA_DIR`, choose a new empty directory; never point it at another
@@ -238,8 +238,7 @@ and `SUI_MCP_REVIEW_PORT` in every participating client.
 
 After restarting the clients, call `read_get_server_status` in each. Check
 `packageName`, `version` and `serverName`: they must identify the intended npm
-package and version, with `serverName` equal to `sui-mcp`. Open a new management
-card and confirm the new empty wallet state. This check does not require signing
+package and version, with `serverName` equal to `sui-mcp`. Read `session_get_interaction_status` to confirm the new empty wallet state. This check does not require signing
 or submitting a transaction. Prior conversation cards are not current controls;
 open cards through the new registration.
 
@@ -455,11 +454,11 @@ After the MCP server is connected:
    - `read_inspect_deepbook_orderbook`
    - `read_quote_deepbook_action`
    - `read_quote_deepbook_display_amount`
-3. For wallet-account reads, call `session_open_wallet_connection_card`.
-4. Use the internal Connect card in an MCP Apps-capable client and explicitly choose the connection operation.
+3. If a read tool accepts `account` and the user supplied a Sui address, pass it directly. When the user wants to connect a wallet for implicit reads, call `session_open_wallet_connection_card`.
+4. Open the internal Connect card in an MCP Apps-capable client. Its authenticated view starts its one permitted connection request; there is no operation selector.
 5. Scan the card’s pairing QR in a Sui mainnet wallet and approve the connection. This is not approval of a transaction.
-6. Read or wait on the returned cardId. A card that still needs a selection does not have a pending pairing. Select an approved account explicitly if the wallet provides several.
-7. Call `session_get_interaction_status` to check the connection and available default asset account. `account_get_active_account` separately reports the stored selection.
+6. Read or wait using the returned `cardId`. See [Session Tools](MCP_TOOLS.md#session-tools) for card outcomes and exact-operation reads. The completed connection card contains no addresses or further controls.
+7. Call `session_get_interaction_status` to check the connection and `assetReadAccount`. `account_get_active_account` separately reports the saved read address, which is not proof of a usable connection.
    Then call the read tool that matches the user's request:
    - `read_summarize_wallet_assets` for balances.
    - `read_classify_wallet_assets` for coin-balance roles.
@@ -469,7 +468,7 @@ After the MCP server is connected:
    - `read_summarize_sui_function_activity_scan` for sent transactions that called one full function target.
    If the selected tool accepts `account` and the user supplied a Sui address, pass it instead of starting wallet connection. DeepBook account inventory has no explicit address input.
 8. For local review evidence, use `read_list_review_activity`, `read_summarize_review_funnel`, or `read_get_review_session_detail`.
-9. For local endpoint settings or local data controls, ask your AI client to call `settings_create_local_settings_session`, then use the internal card controls. Setting changes apply after restart.
+9. For requested wallet networks, the saved read address, local endpoints or local data controls, ask your AI client to call `settings_create_local_settings_session`, then use the internal card controls. Saved network choices apply to the next wallet connection; endpoint changes apply after the shared parent restarts.
 
 ## Wallet Connection Boundary
 
@@ -487,11 +486,13 @@ local configuration value. Only the backend owner starts its isolated SDK child,
 clients use the same product identifier when identifying that shared backend.
 Do not paste pairing URIs or UI permission values into chat.
 
-Sui MCP allows one usable wallet connection across the shared data folder,
-with one or more wallet-approved Sui mainnet addresses. If several valid
-connections are saved, the Connect card lists them for target-specific
-Disconnect confirmation. Account use and signing remain blocked until the
-conflict is resolved. No connection is silently chosen or remotely removed.
+Sui MCP allows one current wallet connection across the shared data folder,
+with one fixed address per returned requested chain. Settings selects requested
+Sui, Ethereum and Solana mainnet networks; financial actions remain Sui-only.
+Change wallet, address or approved scope by disconnecting and reconnecting.
+An unexpected SDK session is not adopted or listed as another product choice.
+Remove it in the wallet app and check status before new pairing or financial input.
+The product never silently chooses or remotely removes an unexpected session.
 
 Connection service restart belongs to Settings, not Connect. If an operation
 is unresponsive or the service is unavailable, ask to open Settings and use
@@ -549,19 +550,24 @@ To inspect settings or change stored endpoints, ask your AI client:
 - "Show my Sui MCP local settings."
 - "Open my Sui MCP Settings card."
 
-Settings groups Address for viewing assets, Local records, Troubleshooting and
-Advanced settings. Each card lets you make one change and keeps its result:
+Settings groups Address for viewing assets, Wallet networks, Local records,
+Troubleshooting and Advanced settings. Each card lets you make one change and
+keeps its result:
 
-- view or clear the default address used when checking assets;
+- clear the saved Sui address used for implicit reads, without disconnecting the
+  wallet, changing its fixed addresses or cancelling transaction requests;
+- choose Sui, Ethereum and/or Solana mainnet networks for new wallet connections;
 - back up records saved on this computer;
 - restore a Sui MCP backup, replacing the current local records and settings;
 - delete local records and saved settings;
 - check or restart the wallet connection service;
 - select a custom Sui network address or return to a built-in default.
 
-Local records include saved addresses, reviews, transaction and activity records,
-and Sui network settings. Restoring them does not reconnect your wallet or restore
-wallet approvals. Transactions on Sui are not cancelled by a restore or reset.
+Backups include chain-qualified address history, reviews, transaction and activity
+records, requested wallet networks and Sui endpoint settings. They do not contain
+the current connection, an active-account selection, read-address suppression or
+wallet approvals. Restoring records does not reconnect a wallet or activate a
+saved address. Transactions on Sui are not cancelled by a restore or reset.
 Internal request IDs and file hashes appear in Details. Advanced settings names
 the Sui node connection as gRPC and the activity-data connection as GraphQL.
 Network addresses set in the app launch configuration take priority over values
@@ -577,9 +583,9 @@ Settings validation rules:
 - Restoring or resetting can delete records whose transaction results were not confirmed and cannot cancel a transaction on Sui. It remains blocked while a wallet/transaction response is pending or the initial transaction-result waiting period has not ended, including after automatic result checks are stopped.
 - Choose Download backup in Local records once. Sui MCP prepares and checks the backup internally, then asks the app to save it. There is no separate Create backup step. For supported downloads, the app controls the destination and Sui MCP keeps no permanent extra copy; Suggested file name is not a confirmed save path.
 - If the download function explicitly reports that it is unsupported, the same backup is saved in `<SUI_MCP_DATA_DIR>/backups/` instead. Backup saved shows its actual Folder and File name. This file remains after restarting or replacing local data; temporary cleanup does not delete it. This choice depends on the function response, not the app name. Other errors do not silently change the destination.
-- If an earlier attempt may already have saved a copy, Save a local copy asks for that decision explicitly. Retry save is available only after a local save failure recorded as `not_published`. While saving or checking an uncertain result, Check status checks the same request without creating another file.
-- An accepted download request does not prove that the file was saved. If delivery fails or cannot be confirmed, Retry download sends the same snapshot while its thirty-minute transfer period remains open. An unconfirmed earlier request may already have saved a copy. Cancel download stops further transfer and cleans the temporary snapshot; it does not close a save dialog or delete a saved file. Reopening a card never starts another download automatically.
-- The thirty-minute transfer period starts when the snapshot is ready and is not extended by reads or retries. App acknowledgment, cancellation, expiry, server restart or local-data replacement ends private retention. A local save admitted before the deadline finishes its file work and records the result before cleanup; a restart can verify an already published file but never create a missing one. If temporary cleanup cannot be confirmed, Check status checks that same request without creating or downloading another backup. Existing saved local backup files are left intact. A backup larger than the 16 MiB restore limit is identified as such and is not silently truncated.
+- If an earlier attempt may already have saved a copy, a new delivery card offers Save a local copy with that warning. Retry save needs a new delivery card and a proven `not_published` failure. While saving or checking an uncertain result, Check status checks the same request without creating another file.
+- An accepted download request does not prove that the file was saved. If delivery fails or cannot be confirmed, ask for a new delivery card for that backup. Its Retry download sends the same snapshot within the original thirty-minute period; the ended card has no retry controls. An unconfirmed earlier request may already have saved a copy. Cancel download stops further transfer and cleans the temporary snapshot; it does not close a save dialog or delete a saved file. Reopening a card never starts another download automatically.
+- The thirty-minute transfer period starts when the snapshot is ready and is not extended by reads or retries. App acknowledgment, cancellation, expiry, server restart or local-data replacement ends private retention. A local save admitted before the deadline finishes its file work and records the result before cleanup; a restart can verify an already published file but never create a missing one. If temporary cleanup was not confirmed at completion, ask for a new Settings status card for that operation. It checks current cleanup without repeating the action, and the original result stays fixed. Existing saved local backup files are left intact. A backup larger than the 16 MiB restore limit is identified as such and is not silently truncated.
 - Import accepts only the current backup format and required field structure. Required settings and activity fields must be present; missing fields are not filled from defaults.
 - Current-format backups can contain `function_scan` provenance. Unsupported formats and scan-kind values are rejected rather than partially imported.
 - Endpoint chain-identifier verification runs only when the user confirms the replace-only import.
@@ -643,7 +649,7 @@ builds, and verifies the actual npm tarball and bundled licenses. It installs th
 tarball in a temporary directory and runs that installed binary to check MCP
 initialization, tools, document/card resources, the internal Settings card and
 assets, and the isolated SDK child. It confirms that Connect rejects restart
-input, manage does not pair merely by opening, and the SDK keeps its exclusive
+input, ordinary model calls start no pairing, and the SDK keeps its exclusive
 storage lease until shutdown. Runtime startup requires reachable Sui mainnet endpoints; a startup
 failure leaves dependent checks unverified. The check uses an isolated data
 directory and port, ends the child process before cleanup, and does not use your
@@ -653,7 +659,7 @@ See [Utility Index](UTILITY_INDEX.md#release-package-check) for prerequisites.
 ## Current Release Limitations
 
 - Product-facing behavior is mainnet-only.
-- Current asset reads without an explicit address require the selected account to have a usable current wallet connection. An explicit address works only for tools that accept `account`; DeepBook account inventory instead needs a usable connection and account selection. Saved result reads remain available.
+- Current asset reads without an explicit address require the saved Sui read address to belong to a usable current wallet connection. An explicit address works only for tools that accept `account`; DeepBook account inventory instead needs the saved Sui read address and a usable current connection. Saved result reads remain available.
 - Account-bound DeepBook review requires all evidence stages. The internal
   Review card then allows an explicit WalletConnect request under user control.
   Requests and observed chain results are separate; missing results remain
@@ -687,12 +693,15 @@ The smoke script calls read-only MCP tools against mainnet:
 - DeepBook orderbook;
 - raw-quantity DeepBook quote;
 - `read_scan_sui_account_activity` for `SUI_MCP_SMOKE_ADDRESS` with limit 5;
-- `read_summarize_sui_activity_scan` through active account context with limit 5.
+- `read_summarize_sui_activity_scan` for the explicit `SUI_MCP_SMOKE_ADDRESS` with limit 5.
 
 When `SUI_MCP_SMOKE_FUNCTION_TARGET` is set to a full `package::module::function`, it also calls:
 
 - `read_scan_sui_function_activity` for `SUI_MCP_SMOKE_ADDRESS` with limit 5;
-- `read_summarize_sui_function_activity_scan` through active account context with limit 5.
+- `read_summarize_sui_function_activity_scan` for the explicit `SUI_MCP_SMOKE_ADDRESS` with limit 5.
+
+All four activity calls supply the address explicitly and require
+`accountSource: "explicit_filter"`. They do not use or establish saved read context.
 
 The raw-quantity DeepBook quote smoke path does not call the display-amount quote.
 Without the complete optional swap input group, account-bound transaction-material
@@ -765,13 +774,13 @@ separate condition and does not by itself shut down the parent read service.
 
 ### Tool calls return `active_account_not_set`
 
-For tools with an `account` input, provide an explicit Sui address in chat. DeepBook account inventory has no address input and needs a connected selected account. When connection or account selection is wanted:
+For tools with an `account` input, provide an explicit Sui address in chat. DeepBook account inventory has no address input and needs the current connected Sui address. When a new connection is wanted:
 
-1. Open a Connect card with `session_open_wallet_connection_card` and `intent: connect`.
+1. Open a Connect card using `session_open_wallet_connection_card` with empty input.
 2. The card prepares the QR after confirming current state.
 3. Scan it and approve the Sui mainnet connection in your wallet.
-4. Read or wait on that cardId; select an approved read account when required.
-5. Confirm connection availability with `session_get_interaction_status`. Stored read context alone is not a usable default for current asset reads.
+4. Read or wait on that `cardId`, then inspect current addresses through `session_get_interaction_status`. See [Session Tools](MCP_TOOLS.md#session-tools) for exact-operation reads and [Wallet Connection](WALLET_CONNECTION.md#one-connection-fixed-addresses) for fixed network results.
+5. Confirm connection availability with `session_get_interaction_status`. Stored read context alone is not sufficient for current asset reads. If Settings cleared the read address, that does not mean the wallet disconnected; the same connection does not automatically restore the address.
 
 If the user supplied a specific Sui address for `read_summarize_wallet_assets` or `read_classify_wallet_assets`, pass that address as `account` instead of creating a wallet connection session.
 
@@ -779,7 +788,7 @@ If the user supplied a specific Sui address for `read_summarize_wallet_assets` o
 
 A 404 means the requested package or version could not be retrieved from the
 selected registry. Confirm the exact name and version, for example with
-`npm view @zktx.io/sui-mcp@0.7.0 version --registry=https://registry.npmjs.org`.
+`npm view @zktx.io/sui-mcp@0.8.0 version --registry=https://registry.npmjs.org`.
 A new version may not have been published or become visible yet; a mistyped name
 or an alternate/private registry can also explain the response. Check the
 publication result and registry configuration before retrying. Do not assume
@@ -800,6 +809,7 @@ A partially configured group is an error. `SUI_MCP_SMOKE_SWAP_MAX_SLIPPAGE_BPS` 
 existing explicit override. The script uses the same runtime review composition,
 material store and evidence validation as the product, and records whether
 transaction review data was emitted. This can involve mainnet simulation but
-never wallet pairing, signing or submission. The temporary active-account
-fixture is not proof of a wallet connection or ownership. Without the complete
+never wallet pairing, signing or submission. The temporary database supplies
+known-account history for that explicit address; it does not create a current
+wallet connection, saved read context or proof of ownership. Without the complete
 optional group, the result records that review computation was not run.

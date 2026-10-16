@@ -1,3 +1,4 @@
+import { WALLET_CHAINS, WALLET_CHAIN_LABELS, walletChainsSchema, type WalletChainId } from "../../core/session/chainAccounts.js";
 import { settingsViewSchema, SETTINGS_IMPORT_MAX_SIZE, type SettingsDraft } from "../../core/session/settingsOperation.js";
 import type { CardSnapshot } from "../contracts.js";
 import { section, accordion, element, row, mono, button, buttonRow, endRow, field, input, timeValue, type ButtonVariant } from "../../../review-app/src/ui/ui.js";
@@ -5,17 +6,17 @@ import { uploadSettingsFile, downloadSettingsFile, type SettingsDownloadStatus, 
 import type { CardRenderer, CardViewContext, CardDisplayRecovery, SettingsViewTransport } from "./lifecycle.js";
 import { CONNECTION_RECONCILIATION_MESSAGE, walletRecoveryImpactSchema, type WalletConnection, type WalletRecoveryImpact } from "../../core/session/walletConnection.js";
 
-type Page = "overview" | "address" | "records" | "troubleshooting" | "advanced";
+type Page = "overview" | "address" | "networks" | "records" | "troubleshooting" | "advanced";
 type Route = { kind: "section"; page: Page } | { kind: "operation"; operation: SettingsDraft["kind"] };
 const operationLabels: Record<SettingsDraft["kind"], string> = {
-  set_endpoint: "Change network address", restore_endpoint: "Use default network address", clear_read_address: "Clear default address",
-  download_backup: "Backup", export_local_data: "Backup", import_local_data: "Restore", reset_local_data: "Reset", restart_wallet_service: "Connection service restart"
+  set_endpoint: "Change network address", restore_endpoint: "Use default network address", set_wallet_networks: "Wallet networks", clear_read_address: "Clear saved read address",
+  download_backup: "Backup", import_local_data: "Restore", reset_local_data: "Reset", restart_wallet_service: "Connection service restart"
 };
-const pageLabels: Record<Page, string> = { overview: "Settings", address: "Address for viewing assets", records: "Local records",
+const pageLabels: Record<Page, string> = { overview: "Settings", address: "Address for viewing assets", networks: "Wallet networks", records: "Local records",
   troubleshooting: "Troubleshooting", advanced: "Advanced settings" };
-const menuDescriptions = { address: "View or clear the address used by default when checking your assets.", records: "Back up, restore or delete records saved on this computer.",
+const menuDescriptions = { address: "Clear the saved address used for implicit asset reads.", networks: "Choose the networks to request when connecting a wallet.", records: "Back up, restore or delete records saved on this computer.",
   troubleshooting: "Check or restart the wallet connection service.", advanced: "Change the Sui network addresses used to retrieve data and send transactions." };
-const recordScope = "Local records are saved addresses, reviews, transaction and activity records, and Sui network settings on this computer. They do not include wallet keys, wallet connections or wallet approvals.";
+const recordScope = "Local records are saved addresses, reviews, transaction and activity records, wallet network choices, and Sui network settings on this computer. They do not include wallet keys, wallet connections or wallet approvals.";
 const restartApps = "Fully quit every app using Sui MCP, then reopen them. Closing a window or quitting only one app may leave Sui MCP running.";
 const serviceLabels = { available: "Ready", initializing: "Starting", recovering: "Restarting", unavailable: "Unavailable" };
 const sourceLabels = { environment: "App launch settings", local_db: "Saved in Sui MCP", builtin_default: "Built-in default" };
@@ -24,18 +25,18 @@ const connectionLabels: Record<WalletConnection["status"], string> = { connected
 const recordLabels = [["accounts", "Saved addresses"], ["reviewSessions", "Reviews"], ["reviewRequests", "Transaction requests"],
   ["outcomeUnknownRequests", "Transaction requests with unconfirmed results"], ["externalActivityTransactions", "Activity records"], ["localSettings", "Saved network settings"]] as const;
 const titles: Record<SettingsDraft["kind"], string> = {
-  set_endpoint: "Save network address?", restore_endpoint: "Use default network address?", clear_read_address: "Clear the default address for viewing assets?",
-  download_backup: "Download backup", export_local_data: "Back up local records?", import_local_data: "Restore available", reset_local_data: "Reset local data?",
+  set_endpoint: "Save network address?", restore_endpoint: "Use default network address?", set_wallet_networks: "Save selected networks?", clear_read_address: "Clear saved read address",
+  download_backup: "Download backup", import_local_data: "Restore available", reset_local_data: "Reset local data?",
   restart_wallet_service: "Restart connection service?"
 };
 const finalLabels: Record<SettingsDraft["kind"], string> = {
-  set_endpoint: "Save network address", restore_endpoint: "Use default network address", clear_read_address: "Clear default address",
-  download_backup: "Download backup", export_local_data: "Create backup", import_local_data: "Restore local records", reset_local_data: "Reset local data",
+  set_endpoint: "Save network address", restore_endpoint: "Use default network address", set_wallet_networks: "Save networks", clear_read_address: "Clear saved read address",
+  download_backup: "Download backup", import_local_data: "Restore local records", reset_local_data: "Reset local data",
   restart_wallet_service: "Restart connection service"
 };
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function pageFor(kind?: SettingsDraft["kind"]): Page {
-  return kind === "clear_read_address" ? "address" : kind === "set_endpoint" || kind === "restore_endpoint" ? "advanced"
+  return kind === "clear_read_address" ? "address" : kind === "set_wallet_networks" ? "networks" : kind === "set_endpoint" || kind === "restore_endpoint" ? "advanced"
     : kind === "restart_wallet_service" ? "troubleshooting" : kind ? "records" : "overview";
 }
 function counts(node: HTMLElement, value: unknown, label: string): void {
@@ -47,13 +48,14 @@ function counts(node: HTMLElement, value: unknown, label: string): void {
 function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => void) | undefined, context: CardViewContext | undefined) {
   let state = settingsViewSchema.parse(snapshot.data), currentSnapshot = snapshot;
   let route: Route = state.draft ? { kind: "operation", operation: state.draft.kind } : { kind: "section", page: "overview" }, disposed = false;
+  let networkEdits: Set<WalletChainId> | undefined;
   let transport: SettingsViewTransport | undefined = context?.settings;
   let changed = context?.onDisplayChange;
   let fileNotice: { cardId: string; operationId: string; revision: number; draft: string; fileId: string | undefined; message: string } | undefined;
   let fileWork = false, downloadStatus: SettingsDownloadStatus | undefined;
   let commandProgress = context?.settingsCommandProgress;
   let downloadJob: { attemptId: string; phase: "admitting" | "waiting" | "sending" } | undefined;
-  let pendingReport: { operationId: string; fileId: string; attemptId: string; status: "acknowledged" | "not_completed" | "unconfirmed" | "unsupported";
+  let pendingReport: { operationId: string; fileId: string; attemptId: string; status: "acknowledged" | "not_completed" | "unconfirmed" | "unsupported" | "not_sent";
     failure?: { method: "ui/download-file"; code: -32601 } } | undefined;
   let reportRecovery: CardDisplayRecovery | undefined;
   let displayedDepth: number | undefined;
@@ -77,7 +79,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
   const select = (label: string, draft: SettingsDraft, danger = false, replaceSelection = false) => {
     const control = button(label, () => {
       if (disposed || fileWork) return;
-      if (!replaceSelection && state.draft && JSON.stringify(state.draft) === JSON.stringify(draft)) {
+      if (!replaceSelection && draft.kind === "import_local_data" && state.draft && JSON.stringify(state.draft) === JSON.stringify(draft)) {
         route = { kind: "operation", operation: draft.kind }; render(); changed?.();
       } else { fileNotice = undefined; act?.({ action: "settings_select", draft }); }
     }, danger ? "danger" : "secondary");
@@ -120,9 +122,9 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
       downloadStatus = status; render(); changed?.();
     }, () => !disposed && downloadJob === job && document.visibilityState !== "hidden" &&
       state.download?.currentAttemptId === job.attemptId && state.download.availability === "available").then(async (status) => {
-      if (!disposed && status && ["acknowledged", "not_completed", "unconfirmed", "unsupported"].includes(status)) {
+      if (!disposed && status && ["acknowledged", "not_completed", "unconfirmed", "unsupported", "backup_unverified"].includes(status)) {
         pendingReport = { operationId: file.operationId, fileId: file.fileId, attemptId: file.attemptId,
-          status: status as "acknowledged" | "not_completed" | "unconfirmed" | "unsupported",
+          status: status === "backup_unverified" ? "not_sent" : status as "acknowledged" | "not_completed" | "unconfirmed" | "unsupported",
           ...(status === "unsupported" ? { failure: { method: "ui/download-file" as const, code: -32601 as const } } : {}) };
         await reportDownload();
       }
@@ -179,8 +181,8 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
       content.append(row("Suggested file name", file.displayName), row("File size", `${file.totalSize.toLocaleString("en-US")} bytes`));
       if (file.totalSize > SETTINGS_IMPORT_MAX_SIZE) content.append(element("p", "ui-note", "This backup exceeds the 16 MiB restore limit."));
     }
-    if (act && transport && delivery?.allowedFileActions.includes("settings_retry_download")) {
-      content.append(downloadControl("Retry download", "settings_retry_download", () => beginDownload(true), !!downloadJob || !!pendingReport));
+    if (act && transport && !downloadJob && !pendingReport && delivery?.allowedFileActions.includes("settings_retry_download")) {
+      content.append(downloadControl("Retry download", "settings_retry_download", () => beginDownload(true)));
     }
     }
     if (act && transport && state.file && delivery?.allowedFileActions.includes("settings_cancel_download")) {
@@ -243,15 +245,14 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
     if (state.facts) detail.body.append(row("Version", state.facts.server.version));
     detail.body.append(row("Settings request ID", mono(state.operationId)));
     if (operation && operation.kind === state.draft?.kind && state.file) detail.body.append(row("File SHA-256", mono(state.file.sha256)));
-    if (operation && ["export_local_data", "download_backup", "import_local_data", "reset_local_data"].includes(operation.kind)) {
+    if (operation && ["download_backup", "import_local_data", "reset_local_data"].includes(operation.kind)) {
       detail.body.append(element("p", "ui-note", "Local backups do not contain wallet keys, wallet connections, wallet approvals, access granted to cards, transaction bytes or signatures."));
     }
     if (operation?.kind === "import_local_data" && state.preparation?.preview) {
       const preview = object(state.preparation.preview);
       counts(detail.body, preview.currentCounts, "Checked local records");
       counts(detail.body, preview.incomingCounts, "Backup records");
-      detail.body.append(row("Default address before restoring", typeof preview.currentReadAddress === "string" ? mono(preview.currentReadAddress) : "Not selected"),
-        row("Default address in this backup", typeof preview.incomingReadAddress === "string" ? mono(preview.incomingReadAddress) : "Not selected"));
+
     }
     if (location === "advanced" && state.facts) for (const [endpoint, label, value] of [["grpc", "Sui node", state.facts.localSettings.suiGrpcUrl], ["graphql", "Activity data", state.facts.localSettings.suiGraphqlUrl]] as const) {
       if (operation && (operation.kind === "set_endpoint" || operation.kind === "restore_endpoint") && operation.endpoint !== endpoint) continue;
@@ -275,9 +276,43 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
     const inputValues = preserveInputs ? [...node.querySelectorAll<HTMLInputElement>("input")]
       .filter((item) => item.type !== "file").map((item) => item.value) : undefined;
     const content = section();
+    if (currentSnapshot.state === "closed") {
+      const downloadTitle = state.download?.localSave?.status === "saved" ? "Backup saved" : state.download?.hostReport === "acknowledged" ? "Download requested"
+        : state.download?.hostReport === "not_completed" ? "Download not completed" : state.download?.hostReport === "unconfirmed" ? "Download unconfirmed"
+        : state.download?.hostReport === "not_sent" ? "Backup not sent" : state.download?.endReason === "cancelled" ? "Download cancelled" : state.download?.endReason ? "Download ended" : undefined;
+      content.append(element("h2", undefined, downloadTitle ?? (state.draft ? operationLabels[state.draft.kind] : "Settings result")),
+        element("p", state.result?.outcome === "failed" ? "ui-error" : "ui-note", state.result?.message ?? "Status recorded. This card cannot apply changes."),
+        row("Recorded at", timeValue(state.result?.recordedAt ?? currentSnapshot.createdAt)));
+      if (currentSnapshot.input.operationStatus) {
+        const phases = { draft: "Not confirmed", uploading: "Receiving a backup", sealed: "Backup received", prepared: "Awaiting confirmation",
+          executing: state.download ? "Backup delivery in progress" : "Applying change", stopping: "Stopping connection service", starting: "Starting connection service", terminal: "Finished" };
+        content.append(row("Status checked at", timeValue(currentSnapshot.createdAt)), row("Operation", phases[state.phase]));
+      }
+      if (state.download) content.append(row("Backup delivery", state.download.localSave?.status ?? state.download.hostReport ?? state.download.availability));
+      if (state.backupLocation) content.append(row("Backup folder", state.backupLocation.directory), row("File name", state.backupLocation.filename));
+      const result = object(state.result?.details);
+      const networks = walletChainsSchema.safeParse(result.walletConnectionChains);
+      if (networks.success) content.append(row("Saved networks", networks.data.map((chain) => WALLET_CHAIN_LABELS[chain]).join(", ") || "None"));
+      if (typeof result.storedValue === "string") {
+        content.append(row(result.endpoint === "grpc" ? "Saved Sui node address (gRPC)" : "Saved activity data address (GraphQL)", result.storedValue));
+        if (typeof result.effectiveValueAtSave === "string") content.append(row("Network address in use when saved", result.effectiveValueAtSave));
+        content.append(element("p", "ui-note", result.effectiveSourceAtSave === "environment"
+          ? "The app launch settings override this saved address. Remove that launch setting and restart all apps using Sui MCP to use the saved address."
+          : "To use the saved network address, " + restartApps));
+      }
+      if (state.temporaryFileCleanup && state.temporaryFileCleanup !== "complete") content.append(element("p", "ui-note", "Temporary-file cleanup was not confirmed when this result was recorded. Ask in chat for a new Settings status card to check the same request."));
+      if (state.file) {
+        content.append(row(state.draft?.kind === "download_backup" ? "Suggested file name" : "Backup file", state.file.displayName), row("File size", `${state.file.totalSize.toLocaleString("en-US")} bytes`));
+        if (state.draft?.kind === "download_backup" && state.file.totalSize > SETTINGS_IMPORT_MAX_SIZE) content.append(element("p", "ui-note", "This backup exceeds the 16 MiB restore limit."));
+      }
+      content.append(element("p", "ui-note", "To make another change or try delivery again, ask in chat for a new card."));
+      details(content, state.draft ? pageFor(state.draft.kind) : "overview", undefined, state.draft);
+      node.replaceChildren(content); return;
+    }
     const progress = commandProgress && currentSnapshot.state === "ready" && commandProgress.cardId === currentSnapshot.cardId &&
       commandProgress.operationId === state.operationId && (commandProgress.kind === "backup_check_response"
         ? state.draft?.kind === "import_local_data" && commandProgress.fileId === state.file?.fileId
+        : commandProgress.kind === "selection_response" ? true
         : JSON.stringify(commandProgress.draft) === JSON.stringify(state.draft)) ? commandProgress : undefined;
     const authoritativeOutcome = state.result || state.restoreCheck?.status === "can_restore" ||
       state.restoreCheck?.status === "cannot_restore" && ["invalid_backup", "file_unavailable", "input_unavailable"].includes(state.restoreCheck.reason);
@@ -307,10 +342,10 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
     const toolbar = element("nav", "settings-toolbar"); toolbar.setAttribute("aria-label", "Settings navigation");
     node.dataset.settingsPage = location;
     if (step === "confirmation" && operation && act && state.allowedActions.includes("settings_back")) {
-      const label = `Back to ${operationLabels[operation.kind]}`;
+      const label = `Back to ${operation.kind === "import_local_data" ? operationLabels[operation.kind] : pageLabels[location]}`;
       const back = button(label, () => {
         if (disposed || fileWork) return;
-        route = { kind: "operation", operation: operation.kind };
+        route = operation.kind === "import_local_data" ? { kind: "operation", operation: operation.kind } : { kind: "section", page: location };
         act({ action: "settings_back", operationId: state.operationId });
       }, "secondary");
       back.dataset.cardAction = "settings_back";
@@ -328,50 +363,6 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
     toolbar.append(position); content.append(toolbar);
     if (operation?.kind === "download_backup") {
       renderDownload(content);
-    } else if (step === "result" && state.result) {
-      content.append(element("p", state.result.outcome === "failed" ? "ui-error" : "ui-note", state.result.message));
-      const result = object(state.result.details);
-      if (typeof result.storedValue === "string") {
-        content.append(row(result.endpoint === "grpc" ? "Saved Sui node address (gRPC)" : "Saved activity data address (GraphQL)", result.storedValue));
-        if (typeof result.effectiveValueAtSave === "string") content.append(row("Network address in use when saved", result.effectiveValueAtSave));
-        content.append(element("p", "ui-note", result.effectiveSourceAtSave === "environment"
-          ? "When this address was saved, the app launch settings specified the network address in use. If that setting is still present, restarting will keep using it. Remove that launch setting before restarting to use the saved address."
-          : "The saved address is used after Sui MCP restarts, unless the app launch settings specify another address."), element("p", "ui-note", restartApps));
-      }
-      if (typeof result.path === "string") {
-        if (state.backupLocation) {
-          const location = element("div", "settings-backup-location");
-          location.append(row("Folder", element("span", "settings-path", state.backupLocation.directory)),
-            row("File name", element("span", "settings-path", state.backupLocation.filename)));
-          content.append(location);
-        }
-        if (state.file) {
-          content.append(row("File size", `${state.file.totalSize.toLocaleString("en-US")} bytes`));
-          if (state.file.totalSize > SETTINGS_IMPORT_MAX_SIZE) content.append(element("p", "ui-note", "This backup exceeds the 16 MiB restore limit. The entire backup was saved, but this installation cannot restore a file this large."));
-          if (act && transport) {
-            const control = button("Download this backup", () => {
-              if (disposed || !transport || !state.file || fileWork) return;
-              fileWork = true; control.disabled = true;
-              void downloadSettingsFile({ operationId: state.operationId, ...state.file }, transport, (status) => {
-                downloadStatus = status; render(); changed?.();
-              }, () => !disposed).finally(() => { fileWork = false; if (!disposed) { render(); changed?.(); } });
-            }, "secondary");
-            control.dataset.settingsDownload = "true"; control.disabled = fileWork;
-            content.append(control);
-          }
-          if (downloadStatus) content.append(element("p", "ui-note", {
-            pending: "Checking the backup before downloading…",
-            backup_unverified: "The backup file could not be read or checked. Nothing was sent to the app for download. Check the folder shown above, or open a new Settings card to create another backup.",
-            acknowledged: "The app received the download request. This does not confirm that the file was saved or where it was saved.",
-            not_completed: "The app did not complete the download request. It did not report whether the download was cancelled, refused or failed. The file passed its check before the request.",
-            unsupported: "This app cannot receive this file. The existing backup remains in the folder shown above.",
-            unconfirmed: "The download could not be confirmed. You can try Download this backup again; the same file will be checked before it is sent."
-          }[downloadStatus]));
-        }
-      }
-      const cleanup = state.temporaryFileCleanup ?? state.file?.cleanup;
-      if (cleanup === "failed" || cleanup === "pending") content.append(element("p", "ui-error", "Temporary-file cleanup has not been confirmed. The result above is unchanged. Use Check status to check again."));
-      content.append(element("p", "ui-note", "To make another change, ask in chat to open a new Settings card."));
     } else if (step === "progress") {
       const progress = element("p", "ui-note", checking ? "Checking backup…" : state.phase === "stopping" ? "Stopping the wallet connection service…" : state.phase === "starting" ? "Starting the wallet connection service…" : "Finishing this change…");
       progress.setAttribute("role", "status"); content.append(progress);
@@ -387,8 +378,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
         content.append(element("p", "ui-note", "Sui MCP checks that this address connects to Sui mainnet before saving it. Fully quit and reopen all apps using Sui MCP to use the change. Restarting only the wallet connection service does not apply it."));
         if (target.source === "environment") content.append(element("p", "ui-note", "The app launch settings specify the network address to use. Restarting without removing that launch setting will keep using that address."));
       }
-      if (state.draft.kind === "clear_read_address") content.append(element("p", "ui-note", "Clear the address used by default when viewing assets. This does not disconnect your wallet or cancel any transaction."));
-      if (["export_local_data", "reset_local_data"].includes(state.draft.kind)) content.append(element("p", "ui-note", recordScope));
+      if (state.draft.kind === "reset_local_data") content.append(element("p", "ui-note", recordScope));
       if (state.draft.kind === "reset_local_data" || state.draft.kind === "import_local_data") {
         if (readyRestore) {
           content.append(element("p", "ui-error", "Restoring replaces local records and saved network settings, including records with unconfirmed transaction results. You cannot undo this from this card. Other open cards will no longer work; open new cards after restoring."),
@@ -409,12 +399,9 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
           if (typeof before.outcomeUnknownRequests === "number" && before.outcomeUnknownRequests > 0) {
             content.append(element("p", "ui-error", "The current records with unconfirmed transaction results will be removed."));
           }
-          if (preview.activeAccountChange !== "unchanged") {
-            content.append(row("Default address for viewing assets", preview.activeAccountChange === "cleared" ? "Will be cleared"
-              : typeof preview.incomingReadAddress === "string" ? mono(preview.incomingReadAddress) : "Not selected"));
-          }
+
           if (preview.restartRequiredAfterImport === true) content.append(element("p", "ui-note", "After restoring, fully quit and reopen all apps using Sui MCP. Network addresses specified in the app launch settings still take priority over the restored settings."));
-          content.append(element("p", "ui-note", "Restoring a saved address does not reconnect your wallet. It can be used by default for viewing assets only when the same wallet connection is active and approves that address."));
+          content.append(element("p", "ui-note", "Restoring saved addresses does not reconnect a wallet. Disconnect any retained wallet connection, then connect again before using an address."));
         } else counts(content, state.preparation?.counts, "Current local records");
       }
       if (state.draft.kind === "restart_wallet_service") {
@@ -424,7 +411,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
           element("p", "ui-note", "These are recorded connections, not confirmation that a wallet is connected now. Restarting does not reconnect a disconnected wallet."));
         for (const connection of recorded.connections) {
           content.append(row("Wallet", connection.walletName ?? "Wallet"), row("Recorded status", connectionLabels[connection.status]));
-          for (const address of connection.accounts) content.append(row("Recorded wallet address", mono(address)));
+          for (const binding of connection.chainResults.filter((result) => result.status === "bound")) content.append(row(`${WALLET_CHAIN_LABELS[binding.chainId]} address`, mono(binding.address)));
           if (connection.disconnectPending) content.append(element("p", "ui-note", "This wallet's disconnection has not been confirmed."));
         }
         const waiting = recorded.requests.filter((request) => request.request_status === "awaiting_signature").length;
@@ -481,20 +468,18 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
           if (operation.kind === "set_endpoint") content.append(row("Selected network address", operation.value));
           else content.append(element("p", "ui-note", "Review the built-in default address before confirming this change."));
           if (value?.source === "environment") content.append(element("p", "ui-note", "The app launch settings specify the network address in use. Saving or restoring an address here does not remove that launch setting."));
-        } else if (operation.kind === "clear_read_address") {
-          content.append(row("Default address for viewing assets", state.facts?.readAddress ? mono(state.facts.readAddress) : "Not selected"),
-            element("p", "ui-note", "Clearing this default does not disconnect your wallet or change wallet approvals."));
+        } else if (operation.kind === "set_wallet_networks") {
+          content.append(row("Selected networks", operation.chains.map((chain) => WALLET_CHAIN_LABELS[chain]).join(", ") || "None"),
+            element("p", "ui-note", "The selection applies to new wallet connections. Existing connections and connection requests stay unchanged."));
         } else if (operation.kind === "restart_wallet_service") {
           if (state.facts) content.append(row("Wallet connection service", serviceLabels[state.facts.walletAvailability.status]));
           if (state.facts?.connectionReconciliationRequired) content.append(element("p", "ui-error", CONNECTION_RECONCILIATION_MESSAGE));
           if (state.facts && state.facts.walletAvailability.status !== "available") content.append(element("p", "ui-note", state.facts.walletAvailability.message));
           content.append(element("p", "ui-note", "Review the connection and transaction requests affected before confirming a service restart."));
-        } else if (operation.kind === "export_local_data") {
-          content.append(element("p", "ui-note", "Review the local records to save, then create the backup file."));
         } else if (operation.kind === "reset_local_data") {
           content.append(element("p", "ui-note", "Review the records and saved settings to delete before confirming the reset."));
         }
-        if (act && state.allowedActions.includes("settings_prepare")) primary = action("Continue", { action: "settings_prepare", operationId: state.operationId }, "primary");
+        if (act && state.allowedActions.includes("settings_prepare")) primary = action("Retry check", { action: "settings_prepare", operationId: state.operationId }, "primary");
       }
       if (primary) content.append(operationActions(primary));
     } else {
@@ -506,28 +491,48 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
         if (availability && availability.status !== "available") content.append(element("p", availability.status === "unavailable" ? "ui-error" : "ui-note",
           availability.message), ...(availability.status === "unavailable" ? [element("p", "ui-note", "Open Troubleshooting below to check the connection service.")] : []));
         const menu = element("div", "settings-menu"); menu.setAttribute("aria-label", "Settings sections");
-        for (const target of ["address", "records", "troubleshooting", "advanced"] as const) {
+        for (const target of ["networks", "address", "records", "troubleshooting", "advanced"] as const) {
           const item = navigate(pageLabels[target], { kind: "section", page: target }); item.classList.add("settings-menu-item"); item.setAttribute("aria-label", pageLabels[target]);
           item.textContent = "";
           item.append(element("span", "settings-menu-title", pageLabels[target]), element("span", "settings-menu-description", menuDescriptions[target]));
           menu.append(item);
         }
         content.append(menu);
-        if (state.draft) {
+        if (state.draft && (state.phase === "prepared" || state.draft.kind === "import_local_data")) {
           const pending = element("div", "settings-pending");
           pending.append(element("p", "ui-note", `Unfinished change: ${operationLabels[state.draft.kind]}.`),
             navigate("Resume", { kind: "operation", operation: state.draft.kind }));
           content.append(pending);
         }
       } else if (page === "address") {
-        content.append(row("Default address for viewing assets", state.facts?.readAddress ? mono(state.facts.readAddress) : "Not selected"));
-        if (state.facts?.assetReadAccount.status === "address_required" && state.facts.readAddress) content.append(element("p", "ui-note", "This saved address cannot currently be used by default. Provide an address in chat, or open Wallet connection and select an address approved by your connected wallet."));
-        content.append(element("p", "ui-note", "The default address is used when you ask to view assets without naming an address. To connect or disconnect your wallet, or select an approved address, ask in chat to open Wallet connection. Clearing the default does not disconnect your wallet."));
-        if (act && state.facts?.readAddress) content.append(select("Clear default address", { kind: "clear_read_address" }));
+        content.append(row("Saved read address", state.facts?.readAddress ? mono(state.facts.readAddress) : "Not set"),
+          element("p", "ui-note", "Clearing this address does not disconnect your wallet, change its fixed addresses or cancel a transaction. Explicit-address reads remain available."));
+        if (act && state.facts?.readAddress && state.facts.readConnectionId && state.allowedActions.includes("settings_clear_read_address")) {
+          content.append(endRow(action("Clear saved read address", { action: "settings_clear_read_address", operationId: state.operationId,
+            connectionId: state.facts.readConnectionId, account: state.facts.readAddress }, "primary")));
+        }
+      } else if (page === "networks") {
+        const saved = state.facts?.localSettings.walletConnectionChains ?? [];
+        networkEdits ??= new Set(state.draft?.kind === "set_wallet_networks" ? state.draft.chains : saved);
+        content.append(element("p", "ui-note", "Choose the networks for your next wallet connection. Only addresses approved by the wallet will be used."),
+          row("Saved networks", saved.map((chain) => WALLET_CHAIN_LABELS[chain]).join(", ") || "None"));
+        for (const chain of WALLET_CHAINS) {
+          const check = input({ type: "checkbox", name: chain }); check.checked = networkEdits.has(chain); check.disabled = !act;
+          check.dataset.cardAction = "settings_save_wallet_networks"; check.dataset.walletNetwork = chain;
+          check.addEventListener("change", () => { if (check.checked) networkEdits!.add(chain); else networkEdits!.delete(chain); });
+          content.append(field(WALLET_CHAIN_LABELS[chain], check));
+        }
+        content.append(element("p", "ui-note", "An unsent Connect request ends if its networks change. Requests already sent and approved connections keep their networks. To change an approved connection, disconnect it and connect again. An empty selection disables new connections."));
+        if (act) {
+          const save = button("Save networks", () => {
+            if (!disposed && !fileWork) act({ action: "settings_save_wallet_networks", operationId: state.operationId,
+              chains: WALLET_CHAINS.filter((chain) => networkEdits!.has(chain)), expectedChains: saved });
+          }, "primary"); save.dataset.cardAction = "settings_save_wallet_networks"; content.append(endRow(save));
+        }
       } else if (page === "records") {
         content.append(element("p", "ui-note", recordScope));
         if (act) content.append(
-          choice("Backup", "Download the current local records and Sui network settings as one backup file. If this connection cannot provide downloads, the same file is saved in the Sui MCP backup folder on this computer.", downloadControl("Download backup", "settings_download_backup", () => beginDownload(false))),
+          choice("Backup", "Download the current local records and settings as one backup file. If this connection cannot provide downloads, the same file is saved in the Sui MCP backup folder on this computer.", downloadControl("Download backup", "settings_download_backup", () => beginDownload(false))),
           choice("Restore", "Choose a Sui MCP backup. It will be checked automatically before you confirm the restore.", select("Restore local records", { kind: "import_local_data" })),
           choice("Reset", "Review the local records and stored settings to delete. This does not cancel transactions on Sui.", select("Reset local data", { kind: "reset_local_data" }, true)));
       } else if (page === "troubleshooting") {
@@ -556,7 +561,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
           content.append(endpointForm);
         }
       }
-      if (page !== "overview" && state.draft && page === pageFor(state.draft.kind)) {
+      if (page !== "overview" && state.draft && page === pageFor(state.draft.kind) && (state.phase === "prepared" || state.draft.kind === "import_local_data")) {
         content.append(element("p", "ui-note", `Unfinished change: ${operationLabels[state.draft.kind]}.`),
           navigate("Resume", { kind: "operation", operation: state.draft.kind }));
       }
@@ -565,11 +570,14 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
         content.append(endRow(action("Close Settings", { action: "settings_cancel" })));
       }
     }
-    if (progress?.kind === "preparation_response" && !state.result && !busy) {
-      const waiting = element("p", "ui-note", "Waiting for a response…"); waiting.setAttribute("role", "status"); content.append(waiting);
+    if ((progress?.kind === "preparation_response" || progress?.kind === "selection_response") && !state.result && !busy) {
+      const waiting = element("p", "ui-note", progress.kind === "selection_response" ? "Checking this change…" : "Waiting for a response…"); waiting.setAttribute("role", "status"); content.append(waiting);
     }
     if (fileNotice && step === "input" && operation?.kind === "import_local_data") content.append(element("p", "ui-note", fileNotice.message));
+    const focusedNetwork = node.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.walletNetwork : undefined;
     details(content, location, impact, operation); node.replaceChildren(content);
+    if (focusedNetwork) [...node.querySelectorAll<HTMLInputElement>("input[data-wallet-network]")]
+      .find((control) => control.dataset.walletNetwork === focusedNetwork)?.focus();
     if (inputValues) [...node.querySelectorAll<HTMLInputElement>("input")].filter((item) => item.type !== "file")
       .forEach((item, index) => { if (inputValues[index] !== undefined) item.value = inputValues[index]; });
     if (opened) node.querySelector<HTMLDetailsElement>("details")!.open = true;
@@ -591,7 +599,7 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
         JSON.stringify(data.draft) !== fileNotice.draft || data.file?.fileId !== fileNotice.fileId)) fileNotice = undefined;
     const sameSnapshot = next === currentSnapshot;
     if (sameSnapshot && !commandProgress && !nextContext.settingsCommandProgress) return true;
-    if (JSON.stringify(data.draft) !== JSON.stringify(state.draft)) route = data.draft
+    if (JSON.stringify(data.draft) !== JSON.stringify(state.draft) || data.phase === "prepared" && state.phase !== "prepared") route = data.draft
       ? { kind: "operation", operation: data.draft.kind } : { kind: "section", page: pageFor(state.draft?.kind) };
     const progress = uploadJob?.progress;
     if (uploadJob && (data.result || data.draft?.kind !== "import_local_data" ||

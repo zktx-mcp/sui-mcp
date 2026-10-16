@@ -1,6 +1,6 @@
 import type { InternalSessionStatus, ReviewSession } from "../action/types.js";
 import { isRequestWaiting, type TransactionRequest, type TransactionRequestStatus } from "./transactionRequest.js";
-import { workflowProgress, type WalletAvailability, type WorkflowProgress, type ConnectionConflict } from "./walletConnection.js";
+import { workflowProgress, type WalletAvailability, type WorkflowProgress } from "./walletConnection.js";
 import type { WalletObservation } from "./walletRuntime.js";
 
 export type ReviewSnapshot = {
@@ -10,7 +10,6 @@ export type ReviewSnapshot = {
   walletObservation?: WalletObservation | undefined;
   progress: WorkflowProgress;
   hasReviewInput: boolean;
-  connectionConflict?: ConnectionConflict | undefined;
   connectionReconciliationRequired?: true | undefined;
 };
 export function reviewProgress(preparing: boolean, request: TransactionRequest | undefined,
@@ -59,10 +58,10 @@ export function executionPollingHint() {
     recommendedIntervalSeconds: EXECUTION_POLLING_INTERVAL_SECONDS
   };
 }
-export function reviewStatusResponse({ session, request, walletAvailability, walletObservation, progress, connectionConflict, connectionReconciliationRequired }: ReviewSnapshot) {
+export function reviewStatusResponse({ session, request, walletAvailability, walletObservation, progress, connectionReconciliationRequired }: ReviewSnapshot) {
   const pollingStatus = getExecutionPollingStatus(session, request);
   return {
-    walletAvailability, walletObservation, progress, connectionConflict, connectionReconciliationRequired,
+    walletAvailability, walletObservation, progress, connectionReconciliationRequired,
     reviewSessionId: session.id, status: session.status, reviewRevision: session.reviewRevision,
     account: session.account, plans: session.plans, reviewState: session.reviewState,
     pollingStatus, statusCategory: executionStatusCategory(pollingStatus), pollingHint: executionPollingHint(),

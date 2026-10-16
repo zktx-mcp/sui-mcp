@@ -136,7 +136,7 @@ function serviceFor(store: InMemoryActivityStore, activitySource = source()): Tr
 describe("TransactionActivityService", () => {
   it("stores digest lookups only when the sender is a known wallet", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(store);
 
     await expect(service.inspectSuiTransaction({ digest })).resolves.toMatchObject({
@@ -163,7 +163,7 @@ describe("TransactionActivityService", () => {
 
   it("does not store digest lookups when no known wallet relation is confirmed", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -250,7 +250,7 @@ describe("TransactionActivityService", () => {
 
   it("stores digest lookups when a returned balance-change owner is a known wallet", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -307,8 +307,8 @@ describe("TransactionActivityService", () => {
 
   it("stores digest lookups for known non-active sender accounts without storing unknown parties", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
-    await store.setActiveAccount(otherWalletAccount, "wallet_connection", new Date("2026-05-11T00:01:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(otherWalletAccount, new Date("2026-05-11T00:01:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -341,7 +341,7 @@ describe("TransactionActivityService", () => {
 
   it("stores bounded scans for known accounts and leaves recent-N windows unclaimed", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -389,7 +389,7 @@ describe("TransactionActivityService", () => {
 
   it("summarizes a live bounded scan through the existing scan path", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(store);
 
     await expect(service.summarizeSuiActivityScan({})).resolves.toMatchObject({
@@ -577,7 +577,7 @@ describe("TransactionActivityService", () => {
 
   it("scans sent function activity and stores only sender-matching known rows", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const scanFunction = vi.fn(async () => ({
       transactions: [
         {
@@ -715,7 +715,7 @@ describe("TransactionActivityService", () => {
 
   it("validates function targets before issuing function scans", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const scanFunction = vi.fn(source().scanFunction);
     const service = serviceFor(store, source({ scanFunction }));
     const invalidTargets = [
@@ -797,7 +797,7 @@ describe("TransactionActivityService", () => {
 
   it("does not persist non-known party addresses inside normalized transaction details", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -856,7 +856,7 @@ describe("TransactionActivityService", () => {
 
   it("filters sent scans to transactions whose sender matches the known account", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -904,7 +904,7 @@ describe("TransactionActivityService", () => {
 
   it("skips affected scan storage when returned rows do not prove a known wallet relation", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -979,7 +979,7 @@ describe("TransactionActivityService", () => {
 
   it("applies timestamp windows as page filters and reports incomplete coverage while more pages remain", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -1030,7 +1030,7 @@ describe("TransactionActivityService", () => {
 
   it("allows explicit account filters but stores only known wallet scans", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(store);
 
     await expect(service.scanSuiAccountActivity({ account: otherWalletAccount, relationship: "sent" })).resolves.toMatchObject({
@@ -1047,7 +1047,7 @@ describe("TransactionActivityService", () => {
 
   it("returns ephemeral explicit-address scans when provider ordering is unverified", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -1085,7 +1085,7 @@ describe("TransactionActivityService", () => {
 
   it("returns a locally ordered page when the provider returns the latest page oldest-first", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -1118,7 +1118,7 @@ describe("TransactionActivityService", () => {
 
   it("marks stored scans incomplete when provider order is not monotonic", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -1162,7 +1162,7 @@ describe("TransactionActivityService", () => {
 
   it("maps invalid provider cursors to input errors without writing continuation state", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -1186,7 +1186,7 @@ describe("TransactionActivityService", () => {
 
   it("maps invalid provider cursors for function scans without writing continuation state", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -1214,7 +1214,7 @@ describe("TransactionActivityService", () => {
 
   it("maps rejected function filters to source evidence errors", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
       source({
@@ -1243,7 +1243,7 @@ describe("TransactionActivityService", () => {
 
   it("validates checkpoint bounds before issuing account scans", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const scanAccount = vi.fn(source().scanAccount);
     const service = serviceFor(store, source({ scanAccount }));
 
@@ -1259,7 +1259,7 @@ describe("TransactionActivityService", () => {
 
   it("rejects reversed checkpoint and timestamp windows before issuing account scans", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const scanAccount = vi.fn(source().scanAccount);
     const service = serviceFor(store, source({ scanAccount }));
 
@@ -1279,7 +1279,7 @@ describe("TransactionActivityService", () => {
 
   it("summarizes stored normalized facts without reading GraphQL", async () => {
     const store = new InMemoryActivityStore();
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(store);
     await service.scanSuiAccountActivity({});
 

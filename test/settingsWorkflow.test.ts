@@ -1,5 +1,8 @@
+import { disconnectViewSchema } from "../src/core/session/workflowView.js";
+import { seedReadAddressCleared, seedCurrentReadAccount } from "./fixtures/readAccount.js";
+import { suiGrants } from "./fixtures/walletGrants.js";
 import { afterEach, expect, it, vi } from "vitest";
-import { workflowViewSchema } from "../src/core/session/workflowView.js";
+import { reviewViewSchema, connectViewSchema } from "../src/core/session/workflowView.js";
 import { readFile, writeFile, rename, mkdir, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -23,7 +26,7 @@ const downloadPath = (f: Awaited<ReturnType<typeof fixture>>, card: Awaited<Retu
 };
 async function downloadReady(f: Awaited<ReturnType<typeof fixture>>, card: Awaited<ReturnType<typeof f.create>>) {
   let current = await f.read(card);
-  await vi.waitFor(async () => { current = await f.read(card); expect(view(current).result?.outcome).toBe("completed"); });
+  await vi.waitFor(async () => { current = await f.read(card); expect(view(current).download?.availability).toBe("available"); });
   return current;
 }
 const downloadReport = (card: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>["create"]>>) => {
@@ -33,56 +36,23 @@ const downloadReport = (card: Awaited<ReturnType<Awaited<ReturnType<typeof fixtu
 };
 
 
-it.each(["selected", "cleared", "different_source", "terminal", -1, 0, 1] as const)(
-  "keeps same-time qualification and the next explicit action consistent (%s)", async (kind) => {
-    const f = await fixture(), w = f.wallet, { connection } = await w.approve();
-    if (kind === "cleared") await w.run(() => w.activity.clearActiveAccount(w.now()));
-    if (kind === "different_source") {
-      const previous = w.run(() => w.records.restoreConnection({ topic: "previous-same-address-topic", accounts: [w.account],
-        methods: ["sui_signTransaction"], chain: "sui:mainnet", expiresAt: connection.expiresAt }, w.now()));
-      w.run(() => w.records.updateConnection(previous.connection.connectionId, { status: "disconnected" }, w.now()));
-      await w.run(() => w.activity.setActiveAccount(w.account, "wallet_connection", w.now(), { id: previous.connection.connectionId }));
-    }
-    if (kind === "terminal") w.run(() => w.records.updateConnection(connection.connectionId,
-      { status: "failed", reason: "The original disconnect was not confirmed." }, w.now()));
-    if (typeof kind === "number") {
-      w.run(() => w.records.updateConnection(connection.connectionId, { expiresAt: new Date(w.now().getTime() + 1000).toISOString() }, w.now()));
-      w.advance(1000 + kind);
-    }
-    const at = w.now().toISOString(), stored = await w.run(() => w.activity.getActiveAccount());
-    // Literal expectations come from selection provenance/status/expiry, not
-    // another consumer or the qualification helper. All reads share this clock.
-    const available = kind === "selected" || typeof kind === "number" && kind < 0;
-    const expected = available ? { status: "available", account: w.account } : { status: "address_required" };
-    const settings = await f.create();
-    expect(view(settings).facts!.assetReadAccount).toEqual(expected);
-    const connect = await w.run(() => w.cards.create("connect", { intent: "manage" }));
-    expect(workflowViewSchema.parse(connect.snapshot.data).assetReadAccount).toEqual(expected);
-    const { session } = await w.run(() => w.sessions.createReviewSession([w.plan], w.now()));
-    let review = await w.run(() => w.cards.create("review", { reviewSessionId: session.id }));
-    const projected = workflowViewSchema.parse(review.snapshot.data);
-    expect(projected.assetReadAccount).toEqual(expected);
-    if (available) expect(projected.automaticAction).toMatchObject({ action: "prepare_review", account: w.account, connectionId: connection.connectionId });
-    else expect(projected.automaticAction).toBeUndefined();
-    expect(w.now().toISOString()).toBe(at);
-    expect(await w.run(() => w.activity.getActiveAccount())).toEqual(stored);
-    if (kind === "different_source" || kind === "cleared") {
-      expect((await w.act(connect, { action: "use_account", connectionId: connection.connectionId, account: w.account })).error).toBeUndefined();
-      expect(view(await f.read(settings)).facts!.assetReadAccount).toEqual({ status: "available", account: w.account });
-      review = await w.read(review);
-      expect(workflowViewSchema.parse(review.snapshot.data).automaticAction).toMatchObject({ action: "prepare_review", account: w.account, connectionId: connection.connectionId });
-      expect(await w.run(() => w.activity.getActiveAccount())).toMatchObject({ walletId: connection.connectionId });
-    } else if (kind === "terminal" || typeof kind === "number" && kind >= 0) {
-      expect((await w.act(connect, { action: "disconnect", connectionId: connection.connectionId })).error).toBeUndefined();
-      await vi.waitFor(() => expect(w.run(() => w.records.connection(connection.connectionId)!.connection.status)).toBe("disconnected"));
-      const fresh = await w.run(() => w.cards.create("connect", { intent: "manage" }));
-      expect(workflowViewSchema.parse(fresh.snapshot.data).allowedActions).toContain("connect");
-      expect(view(await f.read(settings)).facts!.assetReadAccount).toEqual({ status: "address_required" });
-      expect(await w.run(() => w.activity.getActiveAccount())).toEqual(stored);
-    }
-    expect(w.quote).not.toHaveBeenCalled(); expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
-    expect(w.connect).toHaveBeenCalledOnce();
-  });
+it.each(["connected", "cleared", "terminal", -1, 0, 1] as const)("keeps one connection qualification consistent across consumers (%s)", async (kind) => {
+  const f = await fixture(), w = f.wallet, { connection } = await w.approve();
+  if (kind === "cleared") await w.run(() => seedReadAddressCleared(w.activity));
+  if (kind === "terminal") w.run(() => w.records.updateConnection(connection.connectionId, { status: "failed" }, w.now()));
+  if (typeof kind === "number") { w.run(() => w.records.updateConnection(connection.connectionId, { expiresAt: new Date(w.now().getTime()+1000).toISOString() }, w.now())); w.advance(1000+kind); }
+  const available = kind === "connected" || typeof kind === "number" && kind<0;
+  const expected = available ? { status: "available", account: w.account } : { status: "address_required", ...(kind === "cleared" ? { reason: "read_address_cleared" } : {}) };
+  const settings = await f.create(), context = w.run(() => w.workflow.currentConnectionContext());
+  expect(view(settings).facts!.assetReadAccount).toEqual(expected);
+  expect(context.assetReadAccount).toEqual(expected);
+  const { session } = await w.run(() => w.sessions.createReviewSession([w.plan], w.now()));
+  const review = reviewViewSchema.parse((await w.run(() => w.cards.create("review", { reviewSessionId: session.id, connectionId: connection.connectionId, account: w.account }))).snapshot.data);
+  expect(w.run(() => w.workflow.currentConnectionContext()).assetReadAccount).toEqual(expected);
+  if (available || kind === "cleared") expect(review.automaticAction).toMatchObject({ action: "prepare_review", connectionId: connection.connectionId, account: w.account });
+  else expect(review.automaticAction).toBeUndefined();
+  expect(w.sign).not.toHaveBeenCalled(); expect(w.quote).not.toHaveBeenCalled();
+});
 
 it("keeps same-time qualification blocked through pending Disconnect until its actual completion", async () => {
   const f = await fixture(), w = f.wallet, { connection } = await w.approve(), held = deferred<void>();
@@ -90,14 +60,13 @@ it("keeps same-time qualification blocked through pending Disconnect until its a
   const sdk = structuredClone(w.runtime.snapshot()!);
   const recorded = w.run(() => w.records.connection(connection.connectionId)!);
   expect(recorded).toMatchObject({ ownerId: "fixture-owner", runId: sdk.runId, sdkPending: false,
-    connection: { status: "connected", accounts: [w.account] } });
+    connection: { status: "connected", chainResults: [{ chainId: "sui:mainnet", status: "bound", address: w.account }] } });
   expect(Date.parse(connection.expiresAt)).toBeGreaterThan(at);
   expect(sdk.sessions).toMatchObject([{ topic: recorded.topic, status: "present",
-    session: { accounts: [w.account], expiresAt: connection.expiresAt } }]);
+    session: { grants: suiGrants([w.account]), expiresAt: connection.expiresAt } }]);
   expect(w.run(() => w.records.readConnectionFacts(w.now()))).toMatchObject({
-    activeAccount: w.account, activeAccountConnectionId: connection.connectionId,
-    connectionPresence: { confirmed: true, unrecorded: false, pendingConnectionIds: [],
-      connections: [{ connectionId: connection.connectionId, expiresAt: connection.expiresAt }] } });
+    activeAccount: w.account, connection: { connectionId: connection.connectionId },
+    connectionPresence: { confirmed: true, unrecorded: false, pending: false, observation: { status: "present", expiresAt: connection.expiresAt } } });
 
   // Positive controls use the same public consumers as the pending assertions.
   // The Review remains unprepared; reads do not execute its automatic input.
@@ -105,17 +74,16 @@ it("keeps same-time qualification blocked through pending Disconnect until its a
   expect(settings.error).toBeUndefined();
   expect(view(settings).facts).toMatchObject({ walletAvailability: { status: "available", walletRunId: sdk.runId },
     assetReadAccount: { status: "available", account: w.account } });
-  const currentConnect = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+  const currentConnect = await w.run(() => w.cards.create("connect", {}));
   expect(currentConnect.error).toBeUndefined();
-  const normalConnect = workflowViewSchema.parse(currentConnect.snapshot.data);
-  expect(normalConnect.assetReadAccount).toEqual({ status: "available", account: w.account });
-  expect(normalConnect.usableConnectionId).toBe(connection.connectionId);
-  expect(normalConnect.allowedActions).toContain("use_account");
+  expect(currentConnect.snapshot.state).toBe("closed");
+  expect(currentConnect.snapshot.data).toMatchObject({ allowedActions: [], observe: false });
+  expect(w.run(() => w.workflow.currentConnectionContext()).assetReadAccount).toEqual({ status: "available", account: w.account });
   const { session } = await w.run(() => w.sessions.createReviewSession([w.plan], w.now()));
-  const currentReview = await w.run(() => w.cards.create("review", { reviewSessionId: session.id }));
+  const currentReview = await w.run(() => w.cards.create("review", { reviewSessionId: session.id, connectionId: connection.connectionId, account: w.account }));
   expect(currentReview.error).toBeUndefined();
-  const normalReview = workflowViewSchema.parse(currentReview.snapshot.data);
-  expect(normalReview.assetReadAccount).toEqual({ status: "available", account: w.account });
+  const normalReview = reviewViewSchema.parse(currentReview.snapshot.data);
+  expect(w.run(() => w.workflow.currentConnectionContext()).assetReadAccount).toEqual({ status: "available", account: w.account });
   expect(normalReview.allowedActions).toContain("prepare_review");
   expect(normalReview.automaticAction).toMatchObject({ action: "prepare_review", account: w.account, connectionId: connection.connectionId });
   expect(w.now().getTime()).toBe(at);
@@ -126,7 +94,7 @@ it("keeps same-time qualification blocked through pending Disconnect until its a
     await held.promise; await disconnect(topic); finished = true;
   });
   // Admission consumes its own card, not the still-valid observation cards.
-  const card = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+  const card = await w.createDisconnection();
   try {
     expect((await w.act(card, { action: "disconnect", connectionId: connection.connectionId })).error).toBeUndefined();
     await vi.waitFor(() => expect(w.run(() => w.records.connection(connection.connectionId)!.sdkPending)).toBe(true));
@@ -138,10 +106,11 @@ it("keeps same-time qualification blocked through pending Disconnect until its a
     expect(w.run(() => w.records.connection(connection.connectionId))).toMatchObject({ ownerId: recorded.ownerId,
       runId: sdk.runId, sdkPending: true, connection: { status: "connected", expiresAt: connection.expiresAt } });
     expect(w.run(() => w.records.readConnectionFacts(w.now()))).toMatchObject({
-      activeAccount: w.account, activeAccountConnectionId: connection.connectionId,
-      connections: [{ connectionId: connection.connectionId, status: "connected", pendingAction: "disconnect" }],
-      connectionPresence: { confirmed: true, unrecorded: false, pendingConnectionIds: [connection.connectionId],
-        connections: [{ connectionId: connection.connectionId, expiresAt: connection.expiresAt }] } });
+      activeAccount: w.account,
+      connection: { connectionId: connection.connectionId, status: "connected" },
+      pendingOperation: { action: "disconnect", status: "running", settlementPending: true },
+      connectionPresence: { confirmed: true, unrecorded: false, pending: true,
+        observation: { status: "present", expiresAt: connection.expiresAt } } });
     expect(w.now().getTime()).toBe(at);
     expect(Date.parse(connection.expiresAt)).toBeGreaterThan(w.now().getTime());
 
@@ -152,20 +121,21 @@ it("keeps same-time qualification blocked through pending Disconnect until its a
     expect(view(pendingSettings).facts!.assetReadAccount).toEqual({ status: "address_required" });
     const pendingConnectCard = await w.read(currentConnect), pendingReviewCard = await w.read(currentReview);
     expect(pendingConnectCard.error).toBeUndefined(); expect(pendingReviewCard.error).toBeUndefined();
-    for (const observed of [pendingConnectCard, pendingReviewCard]) {
+    expect(pendingConnectCard.snapshot).toEqual(currentConnect.snapshot);
+    expect(w.run(() => w.workflow.currentConnectionContext()).assetReadAccount).toEqual({ status: "address_required" });
+    for (const observed of [pendingReviewCard]) {
       expect(observed.snapshot.state).toBe("ready");
       expect(Date.parse(observed.snapshot.expiresAt)).toBeGreaterThan(at);
       expect(w.run(() => w.cardRecords.get(observed.snapshot.cardId)!.acceptedInput)).toBeUndefined();
-      const projected = workflowViewSchema.parse(observed.snapshot.data);
+      const projected = reviewViewSchema.parse(observed.snapshot.data);
       expect(projected.walletAvailability).toMatchObject({ status: "available", walletRunId: sdk.runId });
-      expect(projected.assetReadAccount).toEqual({ status: "address_required" });
-      expect(projected.usableConnectionId).toBeUndefined();
+      expect(w.run(() => w.workflow.currentConnectionContext()).assetReadAccount).toEqual({ status: "address_required" });
+      expect(projected.nextStep.reason).toBe("operation_busy");
       expect(projected.allowedActions).toContain("cancel");
       expect(projected.allowedActions).not.toContain("use_account");
       expect(projected.allowedActions).not.toContain("prepare_review");
       expect(projected.automaticAction).toBeUndefined();
-      // These absences also hold for occupied/unprepared normal inputs, so
-      // they preserve invariants rather than independently proving pending.
+      // The retained session excludes both another pairing and financial input.
       expect(projected.allowedActions).not.toContain("connect");
       expect(projected.allowedActions).not.toContain("request_signature");
     }
@@ -178,19 +148,18 @@ it("keeps same-time qualification blocked through pending Disconnect until its a
     const afterExpiry = await f.create();
     expect(afterExpiry.error).toBeUndefined();
     expect(view(afterExpiry).facts!.assetReadAccount).toEqual({ status: "address_required" });
-    const connect = await w.run(() => w.cards.create("connect", { intent: "manage" }));
-    expect(connect.error).toBeUndefined(); expect(connect.snapshot.state).toBe("ready");
-    expect(workflowViewSchema.parse(connect.snapshot.data).allowedActions).toContain("cancel");
-    expect(workflowViewSchema.parse(connect.snapshot.data).allowedActions).not.toContain("connect");
+    const connect = await w.run(() => w.cards.create("connect", {}));
+    expect(connect.error).toBeUndefined(); expect(connect.snapshot.state).toBe("closed");
+    expect(connect.snapshot.data).toMatchObject({ allowedActions: [], observe: false });
     const { session: freshSession } = await w.run(() => w.sessions.createReviewSession([w.plan], w.now()));
-    const review = await w.run(() => w.cards.create("review", { reviewSessionId: freshSession.id }));
+    const review = await w.run(() => w.cards.create("review", { reviewSessionId: freshSession.id, connectionId: connection.connectionId, account: w.account }));
     expect(review.error).toBeUndefined(); expect(review.snapshot.state).toBe("ready");
-    expect(workflowViewSchema.parse(review.snapshot.data).allowedActions).toContain("cancel");
-    expect(workflowViewSchema.parse(review.snapshot.data).automaticAction).toBeUndefined();
+    expect(reviewViewSchema.parse(review.snapshot.data).allowedActions).toContain("cancel");
+    expect(reviewViewSchema.parse(review.snapshot.data).automaticAction).toBeUndefined();
     expect(finished).toBe(false);
     expect(w.runtime.snapshot()).toMatchObject({ runId: sdk.runId, sessions: sdk.sessions });
     expect(w.run(() => w.records.connection(connection.connectionId)!.sdkPending)).toBe(true);
-    expect(w.run(() => w.records.connectionView(w.records.connection(connection.connectionId)!.connection).pendingAction)).toBe("disconnect");
+    expect(w.run(() => w.records.readConnectionFacts(w.now()).pendingOperation)).toMatchObject({ action: "disconnect", status: "running", settlementPending: true });
   } finally {
     held.resolve();
     if (vi.mocked(w.transport.disconnect).mock.calls.length) await vi.waitFor(() => {
@@ -199,13 +168,15 @@ it("keeps same-time qualification blocked through pending Disconnect until its a
       expect(w.runtime.snapshot()!.sessions.find((item) => item.topic === recorded.topic)?.status).toBe("absent");
     });
   }
-  expect(w.run(() => w.cardRecords.get(card.snapshot.cardId)!.state)).toMatchObject({ state: "closed", reason: "completed" });
+  expect(w.run(() => w.cardRecords.get(card.snapshot.cardId)!.state)).toMatchObject({ state: "closed" });
+  expect((await w.read(card)).snapshot.data).toMatchObject({ result: { message: "Wallet disconnected." } });
+  expect((await w.run(() => w.cards.readWalletOperation(card.snapshot.cardId))).operation).toMatchObject({ action: "disconnect", status: "completed", settlementPending: false });
   expect(w.run(() => w.records.pendingDisconnect(connection.connectionId))).toBeUndefined();
-  expect(w.run(() => w.activity.getActiveAccountSync())).toEqual(stored);
+  expect(w.run(() => w.activity.getActiveAccountSync())).toMatchObject({ accountId: stored!.accountId, address: stored!.address, connectionId: stored!.connectionId, setAt: stored!.setAt });
   expect(view(await f.create()).facts!.assetReadAccount).toEqual({ status: "address_required" });
-  const fresh = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+  const fresh = await w.run(() => w.cards.create("connect", {}));
   expect(fresh.error).toBeUndefined(); expect(fresh.snapshot.state).toBe("ready");
-  expect(workflowViewSchema.parse(fresh.snapshot.data).allowedActions).toContain("connect");
+  expect(connectViewSchema.parse(fresh.snapshot.data).allowedActions).toContain("connect");
   expect(w.quote).not.toHaveBeenCalled(); expect(w.connect).toHaveBeenCalledOnce();
   expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
 });
@@ -228,7 +199,7 @@ it.each(["signature", "lookup"].flatMap((deadline) => ["draft", "selected", "pre
       expect(w.run(() => w.records.authority(request.attemptId))).toMatchObject(deadline === "signature"
         ? { sdk_pending: 1, submit_pending: 0, lookup_pending: 0 } : { sdk_pending: 0, submit_pending: 0, lookup_pending: 0 });
     });
-    let card = phase === "draft" ? await f.create() : await f.prepare({ kind: "clear_read_address" });
+    let card = phase === "draft" ? await f.create() : await f.prepare({ kind: "restore_endpoint", endpoint: "grpc" });
     if (phase === "selected") card = { ...await f.act(card, { action: "settings_back", operationId: view(card).operationId }), permission: card.permission };
     if (phase === "executing") {
       const publish = f.files.createDownload.bind(f.files);
@@ -250,7 +221,7 @@ it.each(["signature", "lookup"].flatMap((deadline) => ["draft", "selected", "pre
     const existing = await f.read(card), fresh = await f.create();
     expect(existing.error).toBeUndefined(); expect(fresh.error).toBeUndefined();
     expect(view(fresh).facts).toMatchObject({ walletAvailability: { status: "available" },
-      assetReadAccount: phase === "completed" ? { status: "address_required" } : { status: "available", account: w.account },
+      assetReadAccount: { status: "available", account: w.account },
       counts: { outcomeUnknownRequests: 0 } });
     if (phase === "completed") expect(view(existing).result).toEqual(operation!.result);
     else expect(view(existing).facts).toMatchObject({ walletAvailability: { status: "available" }, counts: { outcomeUnknownRequests: 0 } });
@@ -264,7 +235,7 @@ it.each(["signature", "lookup"].flatMap((deadline) => ["draft", "selected", "pre
     if (heldSignature) { signature.reject(new Error("Synthetic held signature ended")); heldSignature = false;
       await vi.waitFor(() => expect(w.run(() => w.records.authority(request.attemptId)?.sdk_pending)).toBe(0)); }
     release.resolve();
-    if (phase === "executing") await vi.waitFor(async () => expect(view(await f.read(card)).result?.outcome).toBe("completed"));
+    if (phase === "executing") await vi.waitFor(async () => expect(view(await f.read(card)).download?.availability).toBe("available"));
   } finally { db.exec("DROP TRIGGER IF EXISTS refuse_foreign_deadline"); if (heldSignature) signature.reject(new Error("Synthetic signature fixture ended")); release.resolve(); }
 });
 
@@ -293,7 +264,7 @@ it("reads Settings facts while an unrelated pending connection expiry remains un
       expect(response.error).toBeUndefined(); expect(view(response).facts).toMatchObject({ walletAvailability: { status: "available" }, assetReadAccount: { status: "address_required" } });
     }
     expect(w.run(() => w.records.connection(pending.connection.connectionId))).toEqual(before);
-    expect(w.run(() => w.workflow.currentConnectionContext()).manageableConnectionIds).toEqual([]);
+    expect(w.run(() => w.workflow.currentConnectionContext()).canDisconnect).toBe(false);
     expect(() => w.run(() => w.workflow.reconcileConnectionContext())).toThrow("foreign connection expiry refused");
     db.exec("DROP TRIGGER refuse_foreign_connection_expiry"); w.run(() => w.workflow.reconcileConnectionContext());
     expect(w.run(() => w.records.connection(pending.connection.connectionId)?.connection.status)).toBe("expired");
@@ -322,11 +293,70 @@ async function uploadBackup(f: Awaited<ReturnType<typeof fixture>>, raw: Buffer,
   return card;
 }
 
+it("refuses a backup carrying the retired account-selection payload without changing its bytes or current data", async () => {
+  const f = await fixture(), { connection } = await f.wallet.approve();
+  const current = await f.wallet.run(() => f.localData.exportLocalData(f.wallet.now()));
+  const raw = Buffer.from(JSON.stringify({ ...current, data: { ...current.data, chainAccountContexts: [] } }));
+  const card = await uploadBackup(f, raw), data = view(card), fileId = data.file!.fileId;
+  expect(data.restoreCheck).toMatchObject({ status: "cannot_restore", reason: "invalid_backup" });
+  expect(data.allowedActions).not.toContain("settings_confirm");
+  expect((await f.act(card, { action: "settings_confirm", operationId: data.operationId, preparationId: randomUUID() })).error?.code).toBe("card_conflict");
+  expect(await readFile(join(f.wallet.directory, ".settings-staging", `${fileId}.upload`))).toEqual(raw);
+  expect((await f.wallet.run(() => f.localData.exportLocalData(f.wallet.now()))).data).toEqual(current.data);
+  expect(f.wallet.run(() => f.records.control().data_epoch)).toBe(0);
+  expect(f.wallet.run(() => f.wallet.records.currentConnection()?.connection.connectionId)).toBe(connection.connectionId);
+  expect(f.wallet.transport.disconnect).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled();
+  const accepted = await uploadBackup(f, Buffer.from(JSON.stringify(current)), await f.read(card));
+  expect(view(accepted).restoreCheck).toEqual({ status: "can_restore" });
+});
+
+it.each(["reset", "import"] as const)("keeps pending connection operations through refused %s and prunes only settled records after replacement", async (kind) => {
+  const f = await fixture(), w = f.wallet, { connection, card: connected } = await w.approve();
+  const raw = Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData(w.now()))));
+  const release = deferred<void>(), manage = await w.createDisconnection();
+  vi.mocked(w.transport.disconnect).mockImplementationOnce(() => release.promise);
+  try {
+    const accepted = await w.act(manage, { action: "disconnect", connectionId: connection.connectionId });
+    expect(accepted.error).toBeUndefined();
+    const pending = disconnectViewSchema.parse(accepted.snapshot.data).operation!;
+    expect(pending).toMatchObject({ action: "disconnect", status: "running", settlementPending: true });
+    let prepared = kind === "reset" ? await f.prepare({ kind: "reset_local_data" }) : await uploadBackup(f, raw);
+    if (kind === "reset") expect((await f.confirm(prepared)).error).toMatchObject({ code: "invalid_card_input",
+      message: "A wallet or transaction response is still pending, or the initial transaction-result waiting period has not ended. Local records cannot be replaced yet." });
+    else expect(view(prepared).restoreCheck).toMatchObject({ status: "cannot_restore", reason: "wallet_request_unsettled" });
+    expect(w.run(() => w.records.operation(pending.operationId))).toMatchObject({ status: "running", settlementPending: true });
+    expect(w.run(() => f.records.control().data_epoch)).toBe(0);
+    expect(w.run(() => w.cardRecords.get(connected.snapshot.cardId))).toBeDefined();
+
+    // A definite SDK failure settles this request without proving remote absence.
+    // Replacement can remove its old card/result while preserving the session
+    // as a cleanup-only connection in the next data generation.
+    release.reject(new Error("Synthetic disconnect refusal; session remains present"));
+    await vi.waitFor(() => expect(w.run(() => w.records.operation(pending.operationId))).toMatchObject({ status: "failed", settlementPending: false }));
+    const retained = w.run(() => w.records.currentConnection())!;
+    expect(retained.topic).toBe("fixture-topic"); expect(w.transport.session(retained.topic!)).toBeDefined();
+    const operationIds = w.run(() => f.records.db.prepare("SELECT operation_id FROM wallet_connection_operations ORDER BY operation_id").all()) as { operation_id: string }[];
+    expect(operationIds).toHaveLength(2);
+    prepared = await f.read(prepared);
+    prepared = { ...await f.act(prepared, { action: "settings_prepare", operationId: view(prepared).operationId }), permission: prepared.permission };
+    expect(prepared.error).toBeUndefined(); expect(view(prepared).phase).toBe("prepared");
+    expect(view(await f.confirm(prepared)).result?.outcome).toBe("completed");
+    for (const { operation_id } of operationIds) expect(w.run(() => w.records.operation(operation_id))).toBeUndefined();
+    await expect(w.read(connected)).rejects.toThrow("access is unavailable");
+    await expect(w.read(manage)).rejects.toThrow("access is unavailable");
+    expect(w.run(() => w.records.currentConnection())).toEqual(retained);
+    expect(w.run(() => w.records.isUsableConnection(connection.connectionId))).toBe(false);
+    const current = await w.createDisconnection();
+    expect(current.snapshot.data).toMatchObject({ allowedActions: ["cancel", "disconnect"] });
+    expect(w.connect).toHaveBeenCalledOnce(); expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
+  } finally { release.reject(new Error("Synthetic pending request ended")); }
+});
+
 it.each(["chain_identifier_mismatch", "invalid_url"] as const)("retains a definite %s backup rejection across Back and same-count data changes until explicit selection", async (kind) => {
   let reject = true;
   const verify = vi.fn(async () => { if (reject) throw new SuiEndpointError(kind, "Private provider diagnostic"); });
   const f = await fixture({ verifyEndpoint: verify }), w = f.wallet;
-  await w.run(() => w.activity.setActiveAccount(w.account, "wallet_connection", w.now()));
+  await w.run(() => seedCurrentReadAccount(w.activity, w.account, w.now()));
   const raw = Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData())));
   let card = await uploadBackup(f, raw), fileId = view(card).file!.fileId;
   expect(view(card).restoreCheck).toEqual({ status: "can_restore" }); expect(verify).not.toHaveBeenCalled();
@@ -342,7 +372,7 @@ it.each(["chain_identifier_mismatch", "invalid_url"] as const)("retains a defini
   card = { ...await f.act(card, { action: "settings_back", operationId: view(card).operationId }), permission: card.permission };
   assertRejected();
   const counts = w.run(() => f.localData.getDataCountsSync()), revision = w.run(() => f.records.control().user_data_revision);
-  w.advance(1); await w.run(() => w.activity.setActiveAccount(w.account, "wallet_connection", w.now()));
+  w.advance(1); await w.run(() => seedCurrentReadAccount(w.activity, w.account, w.now()));
   expect(w.run(() => f.localData.getDataCountsSync())).toEqual(counts);
   expect(w.run(() => f.records.control().user_data_revision)).toBeGreaterThan(revision);
   card = await f.read(card); assertRejected();
@@ -391,7 +421,7 @@ it("does not describe an unfinished download snapshot as a startup supersession 
     expect(denied.error!.message).not.toContain("startup");
     expect(f.wallet.runtime.availability().status).toBe("available");
     expect(f.wallet.run(() => f.records.control().active_operation_id)).toBe(view(backup).operationId);
-    release.resolve(); await vi.waitFor(async () => expect(view(await f.read(backup)).result?.outcome).toBe("completed"));
+    release.resolve(); await vi.waitFor(async () => expect(view(await f.read(backup)).download?.availability).toBe("available"));
   } finally { release.resolve(); }
 });
 
@@ -441,14 +471,14 @@ it("keeps an automatic check pending through a frame read and rejects a data cha
     expect(view(during).restoreCheck).toEqual({ status: "checking" });
     expect(view(during).allowedActions).not.toContain("settings_confirm");
     expect(physical).toHaveBeenCalledOnce();
-    await f.wallet.run(() => f.wallet.activity.setActiveAccount(`0x${"b".repeat(64)}`, "wallet_connection", f.wallet.now()));
+    await f.wallet.run(() => f.wallet.activity.upsertAccount(`0x${"b".repeat(64)}`, "review_execution", f.wallet.now()));
     release.resolve(); card = { ...await pending, permission };
     expect(view(card)).toMatchObject({ restoreCheck: { status: "check_required" }, file: { fileId, sealed: true } });
     expect(f.wallet.run(() => f.records.control().data_epoch)).toBe(0);
     await call({ action: "settings_prepare", operationId: id });
     expect(view(card).restoreCheck).toEqual({ status: "can_restore" });
     expect(view(card).file!.fileId).toBe(fileId);
-    expect((view(card).preparation!.preview as LocalDataImportPreview).activeAccountChange).toBe("cleared");
+    expect(view(card).preparation!.preview).not.toHaveProperty("accountContextChanges");
     expect(f.wallet.run(() => f.wallet.cardRecords.get(card.snapshot.cardId)!.acceptedInput)).toBeUndefined();
     expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
   } finally { release.resolve(); await pending; }
@@ -483,8 +513,8 @@ it("projects and enforces the shared file reservation without blocking duplicate
   const raw = Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData())));
   const prepared = await uploadBackup(f, raw);
   const selectionCases: { action: string; card: Awaited<ReturnType<typeof f.create>> }[] = [];
-  for (const action of ["settings_select", "settings_back", "settings_cancel"]) {
-    selectionCases.push({ action, card: await f.prepare({ kind: "clear_read_address" }) });
+  for (const action of ["settings_select", "settings_back", "settings_cancel", "settings_save_wallet_networks"]) {
+    selectionCases.push({ action, card: await f.prepare({ kind: "restore_endpoint", endpoint: "grpc" }) });
   }
   let partial = await f.create();
   partial = { ...await f.act(partial, { action: "settings_select", draft: { kind: "import_local_data" } }), permission: partial.permission };
@@ -523,7 +553,8 @@ it("projects and enforces the shared file reservation without blocking duplicate
       expect(view(current).allowedActions).not.toContain("settings_confirm");
       // Send the valid permission/revision read before the competing I/O.
       // The actual guard must still reject it; the UI projection is not a lock.
-      const input = item.action === "settings_select" ? { action: item.action, draft: { kind: "clear_read_address" } }
+      const input = item.action === "settings_select" ? { action: item.action, draft: { kind: "restore_endpoint", endpoint: "grpc" } }
+        : item.action === "settings_save_wallet_networks" ? { action: item.action, operationId: original!.operationId, chains: ["eip155:1"], expectedChains: ["sui:mainnet"] }
         : item.action === "settings_cancel" ? { action: item.action } : { action: item.action, operationId: original!.operationId };
       expect((await f.act(item.card, input)).error?.code).toBe("card_conflict");
       expect(w.run(() => f.records.get(original!.operationId))).toEqual(original);
@@ -548,14 +579,15 @@ it("projects and enforces the shared file reservation without blocking duplicate
     expect(w.run(() => f.records.file(fileId))).toEqual(beforeFile);
     expect(await readFile(join(w.directory, ".settings-staging", `${fileId}.upload`))).toEqual(raw.subarray(0, 1));
     expect(w.run(() => f.records.control().file_io_id)).toBe(heldIO);
-    release.resolve(); await vi.waitFor(async () => expect(view(await f.read(blocker)).result?.outcome).toBe("completed"));
+    release.resolve(); await vi.waitFor(async () => expect(view(await f.read(blocker)).download?.availability).toBe("available"));
     expect(view(await f.read(prepared)).restoreCheck).toEqual({ status: "can_restore" });
     expect(view(await f.read(complete)).allowedActions).toContain("settings_seal_upload");
     expect((await f.act(complete, { action: "settings_seal_upload", operationId: completeId, fileId: completeFile })).error).toBeUndefined();
 
     for (const item of selectionCases) {
       const current = await f.read(item.card); expect(view(current).allowedActions).toContain(item.action);
-      const input = item.action === "settings_select" ? { action: item.action, draft: { kind: "clear_read_address" } }
+      const input = item.action === "settings_select" ? { action: item.action, draft: { kind: "restore_endpoint", endpoint: "grpc" } }
+        : item.action === "settings_save_wallet_networks" ? { action: item.action, operationId: view(current).operationId, chains: ["eip155:1"], expectedChains: ["sui:mainnet"] }
         : item.action === "settings_cancel" ? { action: item.action } : { action: item.action, operationId: view(current).operationId };
       expect((await f.act(current, input)).error).toBeUndefined();
     }
@@ -565,7 +597,7 @@ it("projects and enforces the shared file reservation without blocking duplicate
     expect((await f.act(partial, { action: "settings_seal_upload", operationId: partialId, fileId })).error).toBeUndefined();
     expect(w.run(() => f.records.control())).toMatchObject({ file_io_id: null, active_operation_id: null, data_epoch: 0 });
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
-  } finally { release.resolve(); await vi.waitFor(async () => expect(view(await f.read(blocker)).result?.outcome).toBe("completed")); }
+  } finally { release.resolve(); await vi.waitFor(async () => expect(view(await f.read(blocker)).download?.availability).toBe("available")); }
 });
 
 it("projects a valid backup as unavailable while another final operation owns the slot, without consuming its input", async () => {
@@ -584,9 +616,9 @@ it("projects a valid backup as unavailable while another final operation owns th
     expect(f.wallet.run(() => f.wallet.cardRecords.get(imported.snapshot.cardId)!.acceptedInput)).toBeUndefined();
     expect(f.wallet.run(() => f.records.control().active_operation_id)).toBe(view(exported).operationId);
     release.resolve();
-    await vi.waitFor(async () => expect(view(await f.read(exported)).result?.outcome).toBe("completed"));
+    await vi.waitFor(async () => expect(view(await f.read(exported)).download?.availability).toBe("available"));
     expect(view(await f.read(imported)).restoreCheck).toEqual({ status: "can_restore" });
-  } finally { release.resolve(); await vi.waitFor(async () => expect(view(await f.read(exported)).result?.outcome).toBe("completed")); }
+  } finally { release.resolve(); await vi.waitFor(async () => expect(view(await f.read(exported)).download?.availability).toBe("available")); }
 });
 
 it.each(["file_changed", "endpoint_failed"] as const)("revokes restore availability after rejected final verification (%s) without replacing data", async (cause) => {
@@ -728,20 +760,20 @@ it.each(["sdk", "parent", "submit", "lookup", "initial_window"].flatMap((boundar
   } finally { release.resolve(); }
 });
 
-it("preserves exact completed Settings and transaction reads while an unrelated download result remains unwritable", async () => {
+it("preserves exact completed Settings and transaction reads while an unrelated download readiness remains unwritable", async () => {
   const f = await fixture(), w = f.wallet;
-  const own = await f.prepare({ kind: "clear_read_address" }), ownResult = view(await f.confirm(own)).result;
+  const own = await f.prepare({ kind: "restore_endpoint", endpoint: "grpc" }), ownResult = view(await f.confirm(own)).result;
   const { connection } = await w.approve(), ready = await w.prepare(connection.connectionId);
   await w.act(ready.card, { action: "request_signature", connectionId: connection.connectionId, account: w.account, reviewRevision: ready.session.reviewRevision });
   await vi.waitFor(() => expect(w.run(() => w.records.currentRequest(ready.session.id)?.requestStatus)).toBe("completed"));
   const completed = await w.read(ready.card);
   const other = await f.create(), otherId = view(other).operationId;
   const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => { db.close(); });
-  db.exec(`CREATE TRIGGER reject_other_result BEFORE UPDATE ON settings_operations WHEN NEW.operation_id='${otherId}' AND NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'unrelated download result refused'); END`);
+  db.exec(`CREATE TRIGGER reject_other_result BEFORE UPDATE ON settings_operations WHEN NEW.operation_id='${otherId}' AND json_extract(NEW.preparation_json,'$.download.readyAt') IS NOT NULL BEGIN SELECT RAISE(ABORT,'unrelated download readiness refused'); END`);
   await f.download(other);
   await vi.waitFor(async () => expect((await readFile(downloadPath(f, other))).length).toBeGreaterThan(0));
   // Visible bytes do not mean verification and result publication have ended.
-  await vi.waitFor(async () => { await expect(f.read(other)).rejects.toThrow("unrelated download result refused"); });
+  await vi.waitFor(async () => { await expect(f.read(other)).rejects.toThrow("unrelated download readiness refused"); });
   const overview = await f.create();
   expect(overview.error).toBeUndefined();
   expect(view(await f.read(overview)).facts).toMatchObject({ walletAvailability: { status: "available" },
@@ -749,8 +781,8 @@ it("preserves exact completed Settings and transaction reads while an unrelated 
   expect(view(await f.read(own)).result).toEqual(ownResult);
   expect((await w.read(ready.card)).snapshot).toEqual(completed.snapshot);
   expect(await w.run(() => w.activity.getActiveAccount())).toMatchObject({ address: w.account });
-  await expect(f.read(other)).rejects.toThrow("unrelated download result refused");
-  db.exec("DROP TRIGGER reject_other_result"); expect(view(await f.read(other)).result?.outcome).toBe("completed");
+  await expect(f.read(other)).rejects.toThrow("unrelated download readiness refused");
+  db.exec("DROP TRIGGER reject_other_result"); expect(view(await f.read(other)).download?.availability).toBe("available");
   expect(w.submit).toHaveBeenCalledOnce();
 });
 
@@ -760,7 +792,7 @@ it.each([-1, 0, 1])("admits a single-step download only before its declared inpu
   f.wallet.advance(Date.parse(prepared.snapshot.expiresAt) - f.wallet.now().getTime() + offset);
   const response = await f.download(prepared);
   if (offset < 0) {
-    await vi.waitFor(async () => expect(view(await f.read(prepared)).result?.outcome).toBe("completed"));
+    await vi.waitFor(async () => expect(view(await f.read(prepared)).download?.availability).toBe("available"));
     expect(publish).toHaveBeenCalledOnce();
   } else {
     expect(response.error?.code).toBe("card_conflict"); expect(view(response).result?.outcome).toBe("interrupted");
@@ -778,7 +810,7 @@ it("keeps an admitted download's result lifetime beyond input expiration without
     const current = await f.read(card); expect(view(current)).toMatchObject({ phase: "executing", observe: true });
     expect(view(current).allowedActions).toEqual([]); expect(current.snapshot.state).toBe("running");
     await f.download(card, attemptId); expect(observed).toHaveBeenCalledOnce();
-    release.resolve(); await vi.waitFor(async () => expect(view(await f.read(card)).result?.outcome).toBe("completed"));
+    release.resolve(); await vi.waitFor(async () => expect(view(await f.read(card)).download?.availability).toBe("available"));
     await f.download(card, attemptId); expect(observed).toHaveBeenCalledOnce();
   } finally { release.resolve(); }
 });
@@ -822,13 +854,12 @@ it("preserves late stopped-pairing history across a new ready observation withou
   card = await w.read(card); await w.act(card, { action: "stop_connection" });
   const connection = w.run(() => w.records.connections()[0]!.connection), restart = await f.prepare({ kind: "restart_wallet_service" });
   await f.confirm(restart); await vi.waitFor(async () => expect(view(await f.read(restart)).result?.outcome).toBe("completed"));
-  const late = { topic: "fixture-topic", accounts: [w.account], methods: ["sui_signTransaction"], chain: "sui:mainnet" as const,
-    expiresAt: new Date(w.now().getTime() + 60000).toISOString(), walletName: "Late approved wallet" };
+  const late = { topic: "fixture-topic", grants: suiGrants([w.account], ["sui_signTransaction"]), expiresAt: new Date(w.now().getTime() + 60000).toISOString(), walletName: "Late approved wallet" };
   w.approval.resolve(late); w.notify(late);
   expect(w.run(() => w.records.connection(connection.connectionId)?.connection.status)).toBe("stopped");
   expect(w.run(() => w.workflow.reconcileConnectionContext().assetReadAccount)).toEqual({ status: "address_required" });
   const context = w.run(() => w.workflow.reconcileConnectionContext());
-  expect(context.connectionReconciliationRequired).toBe(true); expect(context.manageableConnectionIds).toEqual([]);
+  expect(context.connectionReconciliationRequired).toBe(true); expect(context.canDisconnect).toBe(false);
   expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
 });
 
@@ -841,8 +872,7 @@ it("cleans up a late approval after Stop in the same available run, without rest
     await vi.waitFor(() => expect(w.connect).toHaveBeenCalledOnce());
     card = await w.read(card); await w.act(card, { action: "stop_connection" });
     const connection = w.run(() => w.records.connections()[0]!.connection), runId = w.runtime.runId;
-    const late = { topic: "fixture-topic", accounts: [w.account], methods: ["sui_signTransaction"], chain: "sui:mainnet" as const,
-      expiresAt: new Date(w.now().getTime() + 60000).toISOString(), walletName: "Late approved wallet" };
+    const late = { topic: "fixture-topic", grants: suiGrants([w.account], ["sui_signTransaction"]), expiresAt: new Date(w.now().getTime() + 60000).toISOString(), walletName: "Late approved wallet" };
     w.approval.resolve(late);
     await vi.waitFor(() => expect(w.transport.disconnect).toHaveBeenCalledExactlyOnceWith(late.topic));
     await entered.promise;
@@ -851,10 +881,11 @@ it("cleans up a late approval after Stop in the same available run, without rest
     expect(w.run(() => w.workflow.reconcileConnectionContext().assetReadAccount)).toEqual({ status: "address_required" });
     release.resolve();
     await vi.waitFor(() => expect(w.run(() => w.records.connection(connection.connectionId)?.sdkPending)).toBe(false));
-    expect(w.run(() => w.records.connection(connection.connectionId)?.connection.status)).toBe("stopped");
+    expect(w.run(() => w.records.connection(connection.connectionId)?.connection.status)).toBe("disconnected");
+    expect((await w.read(card)).snapshot.data).toMatchObject({ result: { pendingWork: "approval_response" } });
     expect(w.runtime.runId).toBe(runId); expect(w.transport.disconnect).toHaveBeenCalledExactlyOnceWith(late.topic);
     expect(w.run(() => w.activity.getActiveAccountSync())).toBeUndefined();
-    const current = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+    const current = await w.run(() => w.cards.create("connect", {}));
     expect(current.snapshot.data).toMatchObject({ allowedActions: ["cancel", "connect"] });
     expect(w.connect).toHaveBeenCalledOnce(); expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled();
   } finally { release.resolve(); }
@@ -893,7 +924,7 @@ it.each([false, true])("preserves the restart cause for a prepared Review or lat
       const quote = w.quote.getMockImplementation()!;
       w.quote.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return quote(); });
       const review = await w.run(() => w.sessions.createReviewSession([w.plan], w.now())); reviewId = review.session.id;
-      card = await w.run(() => w.cards.create("review", { reviewSessionId: reviewId }));
+      card = await w.run(() => w.cards.create("review", { reviewSessionId: reviewId, connectionId: connection.connectionId, account: w.account }));
       await w.act(card, { action: "prepare_review", connectionId: connection.connectionId, account: w.account, reviewRevision: 0 });
       await entered.promise;
       expect(spy).toHaveBeenCalledOnce();
@@ -915,14 +946,14 @@ it.each([false, true])("preserves the restart cause for a prepared Review or lat
   } finally { release.resolve(); }
 });
 
-it.each(["clear", "grpc", "graphql", "reset", "import"])("keeps one final operation while snapshot I/O is active and accepts the valid %s confirmation after completion", async (kind) => {
+it.each(["grpc", "graphql", "reset", "import"])("keeps one final operation while snapshot I/O is active and accepts the valid %s confirmation after completion", async (kind) => {
   const f = await fixture(), entered = deferred<void>(), release = deferred<void>(), publish = f.files.createDownload.bind(f.files);
   vi.spyOn(f.files, "createDownload").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return publish(...args); });
   try {
     const other = kind === "import" ? await uploadBackup(f, Buffer.from(JSON.stringify(await f.wallet.run(() => f.localData.exportLocalData(f.wallet.now())))))
       : kind === "reset" ? await f.prepare({ kind: "reset_local_data" })
       : kind === "grpc" || kind === "graphql" ? await f.prepare({ kind: "restore_endpoint", endpoint: kind })
-      : await f.prepare({ kind: "clear_read_address" });
+      : await f.prepare({ kind: "restore_endpoint", endpoint: "grpc" });
     const exporting = await f.create();
     await f.download(exporting); await entered.promise;
     const control = f.wallet.run(() => f.records.control());
@@ -930,7 +961,7 @@ it.each(["clear", "grpc", "graphql", "reset", "import"])("keeps one final operat
     expect((await f.confirm(other)).error?.code).toBe("card_conflict");
     expect(f.wallet.run(() => f.records.control())).toEqual(control);
     expect(f.wallet.run(() => f.wallet.cardRecords.get(other.snapshot.cardId)?.acceptedInput)).toBeUndefined();
-    release.resolve(); await vi.waitFor(async () => expect(view(await f.read(exporting)).result?.outcome).toBe("completed"));
+    release.resolve(); await vi.waitFor(async () => expect(view(await f.read(exporting)).download?.availability).toBe("available"));
     expect(view(await f.confirm(other)).result?.outcome).toBe("completed");
     expect(f.wallet.run(() => f.records.control().active_operation_id)).toBeNull();
   } finally { release.resolve(); }
@@ -950,23 +981,21 @@ it("blocks an otherwise eligible empty-card Connect during admitted Settings rec
   } finally { release.resolve(); }
 });
 
-it("blocks otherwise valid disconnect, use, prepare and sign actions after scoped Settings admission, then restores fresh-input access", async () => {
+it("blocks otherwise valid disconnect, prepare and sign actions after scoped Settings admission, then restores fresh-input access", async () => {
   const f = await fixture(), w = f.wallet, entered = deferred<void>(), release = deferred<void>();
   const replace = w.runtime.replace.bind(w.runtime);
   vi.spyOn(w.runtime, "replace").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return replace(...args); });
   try {
     const { connection } = await w.approve(), ready = await w.prepare(connection.connectionId);
-    const accountCard = await w.run(() => w.cards.create("connect", { intent: "manage" }));
-    const disconnectCard = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+    const disconnectCard = await w.createDisconnection();
     const review = await w.run(() => w.sessions.createReviewSession([w.plan], w.now()));
-    const prepareCard = await w.run(() => w.cards.create("review", { reviewSessionId: review.session.id }));
+    const prepareCard = await w.run(() => w.cards.create("review", { reviewSessionId: review.session.id, connectionId: connection.connectionId, account: w.account }));
     const oldRun = w.runtime.runId;
     const recover = await f.prepare({ kind: "restart_wallet_service" }); await f.confirm(recover); await entered.promise;
     expect(f.wallet.run(() => f.records.control())).toMatchObject({ active_operation_id: view(recover).operationId,
       wallet_input_blocked: 1, wallet_block_operation_id: view(recover).operationId });
     for (const [card, input] of [
       [disconnectCard, { action: "disconnect", connectionId: connection.connectionId }],
-      [accountCard, { action: "use_account", connectionId: connection.connectionId, account: w.account }],
       [prepareCard, { action: "prepare_review", connectionId: connection.connectionId, account: w.account, reviewRevision: 0 }],
       [ready.card, { action: "request_signature", connectionId: connection.connectionId, account: w.account, reviewRevision: ready.session.reviewRevision }]
     ] as const) {
@@ -976,9 +1005,7 @@ it("blocks otherwise valid disconnect, use, prepare and sign actions after scope
     expect(w.sign).not.toHaveBeenCalled(); expect(w.submit).not.toHaveBeenCalled(); expect(w.quote).toHaveBeenCalledOnce();
     expect(w.transport.disconnect).not.toHaveBeenCalled();
     release.resolve(); await vi.waitFor(async () => expect(view(await f.read(recover)).result?.outcome).toBe("completed"));
-    const fresh = await w.run(() => w.cards.create("connect", { intent: "manage" }));
-    expect((await w.act(fresh, { action: "use_account", connectionId: connection.connectionId, account: w.account })).error).toBeUndefined();
-    const freshDisconnect = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+    const freshDisconnect = await w.createDisconnection();
     expect((await w.act(freshDisconnect, { action: "disconnect", connectionId: connection.connectionId })).error).toBeUndefined();
     await vi.waitFor(() => expect(w.run(() => w.records.connection(connection.connectionId)?.connection.status)).toBe("disconnected"));
     expect(w.transport.disconnect).toHaveBeenCalledExactlyOnceWith("fixture-topic");
@@ -993,7 +1020,7 @@ it.each(["connect", "signature"] as const)("invalidates prepared Settings recove
   const sourceCard = ready?.card ?? await w.createConnection();
   const restart = await f.prepare({ kind: "restart_wallet_service" });
   const fence = vi.spyOn(w.runtime, "fence"), replace = vi.spyOn(w.runtime, "replace");
-  if (kind === "connect") w.connect.mockImplementationOnce(async () => { await held.promise; return originalConnect(); });
+  if (kind === "connect") w.connect.mockImplementationOnce(async () => { await held.promise; return originalConnect(["sui:mainnet"]); });
   else w.sign.mockImplementationOnce(() => signed.promise);
   try {
     const input = kind === "connect" ? { action: "connect" } : { action: "request_signature", connectionId: target!.connection.connectionId,
@@ -1034,7 +1061,7 @@ it.each(["connect", "signature"] as const)("rolls actual %s admission back when 
     expect(kind === "connect" ? w.connect : w.sign).not.toHaveBeenCalled();
     db.exec("DROP TRIGGER reject_settings_impact");
     const connect = w.connect.getMockImplementation()!;
-    if (kind === "connect") w.connect.mockImplementationOnce(async () => { await held.promise; return connect(); });
+    if (kind === "connect") w.connect.mockImplementationOnce(async () => { await held.promise; return connect(["sui:mainnet"]); });
     else w.sign.mockImplementationOnce(() => signed.promise);
     expect((await w.act(card, input)).error).toBeUndefined();
     await vi.waitFor(() => expect(kind === "connect" ? w.connect : w.sign).toHaveBeenCalledOnce());
@@ -1063,7 +1090,7 @@ it("rejects changing an upload during its physical write and refuses late progre
     release.resolve(); expect((await pending).error?.code).toBe("card_conflict");
     expect(f.wallet.run(() => f.records.file(fileId))).toMatchObject({ invalidated: true, receivedSize: 0 });
     expect(f.wallet.run(() => f.records.control().file_io_id)).toBeNull();
-    const fresh = await f.prepare({ kind: "clear_read_address" }); expect(view(await f.confirm(fresh)).result?.outcome).toBe("completed");
+    const fresh = await f.prepare({ kind: "restore_endpoint", endpoint: "grpc" }); expect(view(await f.confirm(fresh)).result?.outcome).toBe("completed");
   } finally { release.resolve(); }
 });
 
@@ -1089,47 +1116,49 @@ it("keeps an unconfirmed disconnect failed and management-only across Settings r
   const f = await fixture(), held = deferred<void>();
   try {
     const { connection } = await f.wallet.approve();
-    const original = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
+    const original = await f.wallet.createDisconnection();
     vi.mocked(f.wallet.transport.disconnect).mockImplementationOnce(() => held.promise);
     await f.wallet.act(original, { action: "disconnect", connectionId: connection.connectionId });
     const restart = await f.prepare({ kind: "restart_wallet_service" }); await f.confirm(restart);
     await vi.waitFor(async () => expect(view(await f.read(restart)).result?.outcome).toBe("completed"));
     const context = f.wallet.run(() => f.wallet.workflow.reconcileConnectionContext());
-    expect(context).toMatchObject({ connections: [expect.objectContaining({ connectionId: connection.connectionId, status: "failed" })],
-      manageableConnectionIds: [connection.connectionId], assetReadAccount: { status: "address_required" } });
+    expect(context).toMatchObject({ connection: expect.objectContaining({ connectionId: connection.connectionId, status: "failed" }),
+      canDisconnect: true, assetReadAccount: { status: "address_required" } });
     const old = await f.wallet.read(original);
-    expect(old.snapshot.data).toMatchObject({ connection: { status: "failed" } });
+    expect(old.snapshot).toMatchObject({ state: "closed", data: { result: { message: "The wallet service ended before this operation was confirmed." } } });
     expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
-    const manage = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
-    expect((await f.wallet.act(manage, { action: "use_account", connectionId: connection.connectionId, account: f.wallet.account })).error?.code).toBe("card_conflict");
+    const manage = await f.wallet.createDisconnection();
+    expect((await f.wallet.act(manage, { action: "connect", chains: ["sui:mainnet"] })).error?.code).toBe("card_conflict");
     held.resolve();
     await f.wallet.act(await f.wallet.read(manage), { action: "disconnect", connectionId: connection.connectionId });
     await vi.waitFor(() => expect(f.wallet.run(() => f.wallet.records.connection(connection.connectionId)?.connection.status)).toBe("disconnected"));
-    expect(f.wallet.run(() => f.wallet.workflow.reconcileConnectionContext().manageableConnectionIds)).toEqual([]);
+    expect(f.wallet.run(() => f.wallet.workflow.reconcileConnectionContext().canDisconnect)).toBe(false);
   } finally { held.resolve(); }
 });
 
-it.each(["connected", "failed"] as const)("updates current SDK metadata for %s management without changing its original outcome", async (status) => {
+it.each(["connected", "failed"] as const)("updates current SDK metadata for a %s session while preserving its ended card", async (status) => {
   const f = await fixture(), { connection } = await f.wallet.approve();
   if (status === "failed") {
-    const original = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
+    const original = await f.wallet.createDisconnection();
     vi.mocked(f.wallet.transport.disconnect).mockRejectedValueOnce(new Error("The SDK session remains present"));
     await f.wallet.act(original, { action: "disconnect", connectionId: connection.connectionId });
     await vi.waitFor(() => expect(f.wallet.run(() => f.wallet.records.connection(connection.connectionId))).toMatchObject({ sdkPending: false, connection: { status: "failed" } }));
   }
-  const card = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
+  const card = await f.wallet.run(() => f.wallet.cards.create("connect", {}));
   const restart = await f.prepare({ kind: "restart_wallet_service" });
   const account = `0x${"b".repeat(64)}`, prior = f.wallet.transport.session("fixture-topic")!;
-  f.wallet.notify({ ...prior, accounts: [account] });
+  f.wallet.notify({ ...prior, grants: suiGrants([account]) });
   const current = await f.wallet.read(card);
-  expect(current.snapshot.data).toMatchObject({ connections: [expect.objectContaining({ status, accounts: [account] })] });
-  expect(current.snapshot.revision).toBeGreaterThan(card.snapshot.revision);
+  expect(current.snapshot).toEqual(card.snapshot);
+  expect(f.wallet.run(() => f.wallet.workflow.currentConnectionContext()).connection).toMatchObject({ status,
+    grants: suiGrants([account]), chainResults: [{ chainId: "sui:mainnet", status: "bound", address: f.wallet.account }] });
+  expect(current.snapshot.revision).toBe(card.snapshot.revision);
   expect((await f.confirm(restart)).error?.code).toBe("card_conflict");
   f.wallet.observe();
   expect((await f.wallet.read(card)).snapshot.revision).toBe(current.snapshot.revision);
 });
 
-it.each(["reset", "import"].flatMap((kind) => [0, 1].map((offset) => ({ kind, offset }))))("settles the lookup deadline for $kind at +$offset ms and preserves the same upload for a new Preview", async ({ kind, offset }) => {
+it.each(["reset", "import"].flatMap((kind) => [0, 1].map((offset) => ({ kind, offset }))))("settles the lookup deadline for $kind at +$offset ms and preserves the same upload for a new backup check", async ({ kind, offset }) => {
   const f = await fixture(), w = f.wallet;
   const { connection } = await w.approve(), ready = await w.prepare(connection.connectionId);
   w.chainRead.mockRejectedValue(Object.assign(new Error("Not yet independently observed"), { name: "TimeoutError" }));
@@ -1239,7 +1268,7 @@ it.each(["grpc", "graphql"] as const)("binds %s set/restore preparation to its a
 });
 
 it("retries only its own known-ended I/O on completed reads, without replaying download or blocking the saved result", async () => {
-  const f = await fixture(), unrelated = await f.prepare({ kind: "clear_read_address" }); await f.confirm(unrelated);
+  const f = await fixture(), unrelated = await f.prepare({ kind: "restore_endpoint", endpoint: "grpc" }); await f.confirm(unrelated);
   const prepared = await f.create(); await f.download(prepared);
   const ready = await downloadReady(f, prepared), path = downloadPath(f, prepared);
   const bytes = await readFile(path);
@@ -1253,41 +1282,40 @@ it("retries only its own known-ended I/O on completed reads, without replaying d
   await vi.waitFor(() => expect(f.wallet.run(() => f.records.file(f.records.get(view(prepared).operationId)!.fileId!)?.cleanup)).toBe("complete"));
   const completed = await f.read(prepared), result = view(completed).result!;
   expect(view(completed).temporaryFileCleanup).toBe("pending");
-  expect(createHash("sha256").update(bytes).digest("hex")).toBe(result.details!.sha256);
+  expect(createHash("sha256").update(bytes).digest("hex")).toBe(view(completed).file!.sha256);
   const fileId = f.wallet.run(() => f.records.control().file_io_id);
   expect(view(await f.read(unrelated)).result?.outcome).toBe("completed");
   expect(f.wallet.run(() => f.records.control().file_io_id)).toBe(fileId);
   const blocked = await f.create();
-  expect((await f.act(blocked, { action: "settings_select", draft: { kind: "clear_read_address" } })).error?.code).toBe("card_conflict");
+  expect((await f.act(blocked, { action: "settings_select", draft: { kind: "restore_endpoint", endpoint: "grpc" } })).error?.code).toBe("card_conflict");
   expect(view(await f.read(prepared)).result).toEqual(result);
   db.exec("DROP TRIGGER reject_finished_release");
   expect(view(await f.read(unrelated)).result?.outcome).toBe("completed");
   expect(f.wallet.run(() => f.records.control().file_io_id)).toBe(fileId);
-  const settled = await f.read(prepared);
+  const settled = await f.status(prepared);
   expect(view(settled)).toMatchObject({ result, temporaryFileCleanup: "complete" });
   expect(f.wallet.run(() => f.records.control().file_io_id)).toBeNull();
   await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" }); expect(publish).not.toHaveBeenCalled();
-  const next = await f.prepare({ kind: "clear_read_address" }); expect(view(await f.confirm(next)).result?.outcome).toBe("completed");
+  const next = await f.prepare({ kind: "restore_endpoint", endpoint: "grpc" }); expect(view(await f.confirm(next)).result?.outcome).toBe("completed");
   expect(f.wallet.connect).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
 });
 
-it("preserves the private live connection journal across Reset and blocks pairing until the SDK confirms absence", async () => {
+it("preserves fixed private bindings across Reset without activating a default", async () => {
   const f = await fixture(), { connection, card: original } = await f.wallet.approve();
   const reset = await f.prepare({ kind: "reset_local_data" }); await f.confirm(reset);
   const context = f.wallet.run(() => f.wallet.workflow.reconcileConnectionContext());
-  expect(context).toMatchObject({ connections: [expect.objectContaining({ connectionId: connection.connectionId, status: "connected" })],
-    assetReadAccount: { status: "address_required" }, manageableConnectionIds: [connection.connectionId] });
+  expect(context).toMatchObject({ connection: expect.objectContaining({ connectionId: connection.connectionId, status: "connected" }),
+    assetReadAccount: { status: "address_required" }, canDisconnect: true });
   expect(f.wallet.transport.session("fixture-topic")).toBeDefined();
   await expect(f.wallet.read(original)).rejects.toThrow("access is unavailable");
-  const manage = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
-  expect(manage.snapshot.data).toMatchObject({ allowedActions: ["cancel", "disconnect", "use_account"] });
-  expect((await f.wallet.act(manage, { action: "connect" })).error?.code).toBe("card_conflict");
+  const manage = await f.wallet.createDisconnection();
+  expect(manage.snapshot.data).toMatchObject({ allowedActions: ["cancel", "disconnect"] });
   expect(f.wallet.connect).toHaveBeenCalledOnce();
   const backup = await f.wallet.run(() => f.localData.exportLocalData(f.wallet.now()));
   expect(JSON.stringify(backup)).not.toContain("fixture-topic"); expect(backup.data).not.toHaveProperty("live_wallet_connections");
   await f.wallet.act(await f.wallet.read(manage), { action: "disconnect", connectionId: connection.connectionId });
   await vi.waitFor(() => expect(f.wallet.run(() => f.wallet.records.connection(connection.connectionId)?.connection.status)).toBe("disconnected"));
-  const empty = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
+  const empty = await f.wallet.run(() => f.wallet.cards.create("connect", {}));
   expect(empty.snapshot.data).toMatchObject({ allowedActions: ["cancel", "connect"] });
   expect(f.wallet.connect).toHaveBeenCalledOnce();
 });
@@ -1306,7 +1334,7 @@ it("does not release a terminal operation's I/O while physical cleanup is still 
   expect(view(running).result?.outcome).toBe("completed"); expect(view(running).temporaryFileCleanup).toBe("pending");
   expect(f.wallet.run(() => f.records.control().file_io_id)).toBe(fileId);
   release.resolve();
-  await vi.waitFor(async () => expect(view(await f.read(prepared)).temporaryFileCleanup).toBe("complete"));
+  await vi.waitFor(async () => expect(view(await f.status(prepared)).temporaryFileCleanup).toBe("complete"));
   expect(f.wallet.run(() => f.records.control().file_io_id)).toBeNull();
   } finally { release.resolve(); await reported; }
 });
@@ -1334,14 +1362,61 @@ it("rejects a changed stored endpoint after asynchronous verification without ov
   expect(view(response).phase).toBe("draft"); expect(view(response).result).toBeUndefined();
 });
 
-it("clears read context without disconnecting the wallet or restoring it on a read", async () => {
-  const f = await fixture(); const { connection } = await f.wallet.approve();
-  const prepared = await f.prepare({ kind: "clear_read_address" }); await f.confirm(prepared);
-  expect(await f.wallet.run(() => f.wallet.activity.getActiveAccount())).toBeUndefined();
-  expect(f.wallet.run(() => f.wallet.records.connection(connection.connectionId)?.connection.status)).toBe("connected");
-  expect(f.wallet.transport.disconnect).not.toHaveBeenCalled();
-  expect(f.wallet.run(() => f.wallet.workflow.reconcileConnectionContext().assetReadAccount)).toEqual({ status: "address_required" });
+it("clears the saved read address through Settings without disconnecting or changing the wallet target", async () => {
+  const f = await fixture(), w = f.wallet, { connection } = await w.approve();
+  let card = await f.create();
+  card = { ...await f.act(card, { action: "settings_clear_read_address", operationId: view(card).operationId,
+    connectionId: connection.connectionId, account: w.account }), permission: card.permission };
+  expect(card.error).toBeUndefined(); expect(view(card).result?.outcome).toBe("completed");
+  expect(await w.run(() => w.activity.getActiveAccount())).toBeUndefined();
+  expect(w.run(() => w.records.connection(connection.connectionId)?.connection.status)).toBe("connected");
+  expect(w.run(() => w.workflow.resolveReviewTarget())).toMatchObject({ status: "available", account: w.account });
+  expect(w.transport.disconnect).not.toHaveBeenCalled();
+  expect(view(await f.create()).facts?.assetReadAccount).toEqual({ status: "address_required", reason: "read_address_cleared" });
 });
+
+it.each(["clear", "save_networks"] as const)("retires an uploaded backup when %s replaces its use in the same Settings card", async (effect) => {
+  const f = await fixture(), { connection } = await f.wallet.approve();
+  const raw = Buffer.from(JSON.stringify(await f.wallet.run(() => f.localData.exportLocalData(f.wallet.now()))));
+  const card = await uploadBackup(f, raw), operationId = view(card).operationId, fileId = view(card).file!.fileId;
+  const path = join(f.wallet.directory, ".settings-staging", `${fileId}.upload`);
+  expect(view(card).restoreCheck).toEqual({ status: "can_restore" });
+  expect(await readFile(path)).toEqual(raw);
+  const input = effect === "clear" ? { action: "settings_clear_read_address", operationId, connectionId: connection.connectionId, account: f.wallet.account }
+    : { action: "settings_save_wallet_networks", operationId, chains: ["sui:mainnet", "eip155:1"], expectedChains: ["sui:mainnet"] };
+  const applied = await f.act(card, input);
+  expect(applied.error).toBeUndefined();
+  expect(view(applied)).toMatchObject({ phase: "terminal", result: { outcome: "completed" }, temporaryFileCleanup: "pending" });
+  expect(view(await f.status(card)).temporaryFileCleanup).toBe("complete");
+  expect(f.wallet.run(() => f.records.file(fileId))).toMatchObject({ operationId, cleanupOperationId: operationId, invalidated: true, cleanup: "complete" });
+  await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(view(await f.read(card)).result).toEqual(view(applied).result);
+  expect(view(await f.act(card, input)).result).toEqual(view(applied).result);
+  expect(f.wallet.run(() => f.records.control().data_epoch)).toBe(0);
+  expect(f.wallet.transport.disconnect).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled();
+});
+
+it("rolls back upload retirement with a failed Clear result and retries the same explicit effect", async () => {
+  const f = await fixture(), w = f.wallet, { connection } = await w.approve();
+  const raw = Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData(w.now()))));
+  const card = await uploadBackup(f, raw), operationId = view(card).operationId, fileId = view(card).file!.fileId;
+  const path = join(w.directory, ".settings-staging", `${fileId}.upload`), before = w.run(() => f.records.get(operationId));
+  const input = { action: "settings_clear_read_address", operationId, connectionId: connection.connectionId, account: w.account };
+  const db = new Database(join(w.directory, "activity.sqlite")); resources.push(() => { db.close(); });
+  db.exec("CREATE TRIGGER reject_clear_result BEFORE UPDATE OF result_json ON settings_operations WHEN NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'synthetic result refusal'); END");
+  await expect(f.act(card, input)).rejects.toThrow("synthetic result refusal");
+  expect(w.run(() => f.records.get(operationId))).toEqual(before);
+  expect(w.run(() => f.records.file(fileId))).toMatchObject({ invalidated: false, cleanup: "pending" });
+  expect(w.run(() => f.records.filesForCleanup(operationId))).toEqual([]);
+  expect(w.run(() => w.records.currentConnection()?.readAddressCleared)).toBe(false);
+  expect(w.run(() => f.records.control().active_operation_id)).toBeNull();
+  expect(await readFile(path)).toEqual(raw);
+  db.exec("DROP TRIGGER reject_clear_result");
+  expect(view(await f.act(card, input))).toMatchObject({ result: { outcome: "completed" }, temporaryFileCleanup: "pending" });
+  expect(view(await f.status(card)).temporaryFileCleanup).toBe("complete");
+  await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 
 it("retains reset's own result and credential as read-only after replacing other cards", async () => {
   const f = await fixture(); const other = await f.create();
@@ -1368,8 +1443,8 @@ it("prepares one full download snapshot; repeated admission and file reads do no
   const f = await fixture(); const prepared = await f.create(), attemptId = randomUUID();
   await f.download(prepared, attemptId);
   let completed = await f.read(prepared);
-  await vi.waitFor(async () => { completed = await f.read(prepared); expect(view(completed).result?.outcome).toBe("completed"); });
-  const details = view(completed).result!.details!;
+  await vi.waitFor(async () => { completed = await f.read(prepared); expect(view(completed).download?.availability).toBe("available"); });
+  const details = view(completed).file!;
   const data = await readFile(downloadPath(f, prepared));
   const parsed = JSON.parse(data.toString("utf8"));
   expect(parsed).toMatchObject({ format: "sui-mcp.local-data", network: "mainnet" });
@@ -1406,8 +1481,8 @@ it("automatically checks the same resumed upload without endpoint contact or ext
   const confirmed = card;
   await call({ action: "settings_confirm", operationId, preparationId: view(card).preparationId });
   expect(view(card).result).toMatchObject({ outcome: "completed", details: { status: "imported" } });
-  expect(f.wallet.run(() => f.wallet.workflow.reconcileConnectionContext())).toMatchObject({ manageableConnectionIds: [connection.connectionId],
-    connections: [expect.objectContaining({ connectionId: connection.connectionId })], assetReadAccount: { status: "available", account: f.wallet.account } });
+  expect(f.wallet.run(() => f.wallet.workflow.reconcileConnectionContext())).toMatchObject({ canDisconnect: true,
+    connection: expect.objectContaining({ connectionId: connection.connectionId }), assetReadAccount: { status: "address_required" } });
   await expect(f.wallet.read(priorConnectionCard)).rejects.toThrow("access is unavailable");
   expect(f.wallet.connect).toHaveBeenCalledOnce(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
   const epoch = f.wallet.run(() => f.records.control().data_epoch);
@@ -1434,22 +1509,22 @@ it("preserves a physically prepared snapshot across result storage failure witho
   const f = await fixture(), prepared = await f.create();
   const publish = vi.spyOn(f.files, "createDownload");
   const db = new Database(join(f.wallet.directory, "activity.sqlite")); resources.push(() => { db.close(); });
-  db.exec("CREATE TRIGGER reject_export_result BEFORE UPDATE ON settings_operations WHEN NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'export result refused'); END");
+  db.exec("CREATE TRIGGER reject_export_result BEFORE UPDATE ON settings_operations WHEN json_extract(NEW.preparation_json,'$.download.readyAt') IS NOT NULL BEGIN SELECT RAISE(ABORT,'export readiness refused'); END");
   await f.download(prepared);
   await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
   const path = downloadPath(f, prepared);
   await vi.waitFor(async () => expect((await readFile(path)).length).toBeGreaterThan(0));
   // Wait for the actual result-storage failure, not just the physical write.
-  await vi.waitFor(async () => { await expect(f.read(prepared)).rejects.toThrow("export result refused"); });
+  await vi.waitFor(async () => { await expect(f.read(prepared)).rejects.toThrow("export readiness refused"); });
   db.exec("DROP TRIGGER reject_export_result");
   const completed = await f.read(prepared);
-  expect(view(completed).result?.outcome).toBe("completed");
+  expect(view(completed).download?.availability).toBe("available"); expect(completed.snapshot.state).toBe("running");
   expect(publish).toHaveBeenCalledOnce();
 });
 
 it.each(["upload", "download"] as const)("keeps replacement cleanup of an old %s with its own result and preserves the file identity", async (role) => {
   const f = await fixture(), bytes = Buffer.from("{}");
-  await f.wallet.run(() => f.wallet.activity.setActiveAccount(`0x${"a".repeat(64)}`, "wallet_connection", f.wallet.now()));
+  await f.wallet.run(() => f.wallet.activity.upsertAccount(`0x${"a".repeat(64)}`, "review_execution", f.wallet.now()));
   let previous = await f.create(), fileId: string, operationId: string, publicPath = join(f.wallet.directory, "backups", "previous-user-backup.json"), publicBytes = Buffer.from("existing user backup");
   await mkdir(join(f.wallet.directory, "backups"), { recursive: true }); await writeFile(publicPath, publicBytes);
   if (role === "upload") {
@@ -1464,7 +1539,7 @@ it.each(["upload", "download"] as const)("keeps replacement cleanup of an old %s
   } else {
     previous = await f.create(); await f.download(previous);
     let complete = await f.read(previous);
-    await vi.waitFor(async () => { complete = await f.read(previous); expect(view(complete).result?.outcome).toBe("completed"); });
+    await vi.waitFor(async () => { complete = await f.read(previous); expect(view(complete).download?.availability).toBe("available"); });
     operationId = view(previous).operationId; fileId = view(complete).file!.fileId;
 
   }
@@ -1477,13 +1552,14 @@ it.each(["upload", "download"] as const)("keeps replacement cleanup of an old %s
   const reset = await f.prepare({ kind: "reset_local_data" });
   await expect(f.confirm(reset)).rejects.toThrow();
   const applied = await f.read(reset);
-  expect(view(applied)).toMatchObject({ result: { outcome: "completed", details: { status: "reset" } }, temporaryFileCleanup: "failed" });
+  expect(view(applied)).toMatchObject({ result: { outcome: "completed", details: { status: "reset" } }, temporaryFileCleanup: "pending" });
+  expect(view(await f.status(reset)).temporaryFileCleanup).toBe("failed");
   expect(await f.wallet.run(() => f.wallet.activity.getActiveAccount())).toBeUndefined();
   await expect(f.read(previous)).rejects.toThrow("access is unavailable");
   expect(f.wallet.run(() => f.records.file(fileId))).toMatchObject({ operationId, cleanupOperationId: view(reset).operationId });
   const epoch = f.wallet.run(() => f.records.control().data_epoch);
   await rmdir(path); await rename(retained, path);
-  expect(view(await f.read(reset))).toMatchObject({ result: { outcome: "completed" }, temporaryFileCleanup: "complete" });
+  expect(view(await f.status(reset))).toMatchObject({ result: { outcome: "completed" }, temporaryFileCleanup: "complete" });
   expect(f.wallet.run(() => f.records.file(fileId)?.cleanup)).toBe("complete");
   await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
   if (publicPath) expect(await readFile(publicPath)).toEqual(publicBytes);
@@ -1515,10 +1591,10 @@ it("releases only a departed owner's terminal I/O reservation without changing i
   // Persisted old-owner rows model the next parent after that owner's exit;
   // the real file cleanup above already ended, and no old I/O is left running.
   db.prepare("UPDATE settings_operations SET owner_id=? WHERE operation_id=?").run("departed-owner", operationId);
-  db.prepare("UPDATE live_read_cards SET owner_id=?,revision=revision+1 WHERE id=?").run("departed-owner", prepared.snapshot.cardId);
+  expect(() => db.prepare("UPDATE live_read_cards SET owner_id=?,revision=revision+1 WHERE id=?").run("departed-owner", prepared.snapshot.cardId)).toThrow("immutable");
   f.wallet.run(() => f.settings.recoverOwner());
   expect(f.wallet.run(() => f.records.control().file_io_id)).toBeNull();
   expect(f.wallet.run(() => f.records.get(operationId)!.result)).toEqual(result);
-  const next = await f.prepare({ kind: "clear_read_address" });
+  const next = await f.prepare({ kind: "restore_endpoint", endpoint: "grpc" });
   expect(view(await f.confirm(next)).result?.outcome).toBe("completed");
 });

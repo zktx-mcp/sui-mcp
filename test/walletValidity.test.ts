@@ -10,12 +10,12 @@ async function ready() {
   const review = await f.prepare(connection.connectionId);
   const input = { action: "request_signature", connectionId: connection.connectionId,
     account: f.account, reviewRevision: review.session.reviewRevision };
-  return { f, review, input };
+  return { f, review, input, connection };
 }
 afterEach(() => { for (const f of fixtures.splice(0)) f.close(); });
 
 it.each([0, 1])("evaluates a read at material expiry plus %i ms after real async verification", async (after) => {
-  const { f, review } = await ready();
+  const { f, review, connection } = await ready();
   f.advance(29_999);
   const inspect = f.sessions.inspectReview.bind(f.sessions);
   const calls = vi.spyOn(f.sessions, "inspectReview").mockImplementationOnce(async (...args) => {
@@ -27,7 +27,7 @@ it.each([0, 1])("evaluates a read at material expiry plus %i ms after real async
   const result = await f.read(review.card);
   expect(result.snapshot.data).toMatchObject({ review: { status: "refresh_required", state: { refreshReason: "review_evidence_stale" } },
     allowedActions: ["cancel", "prepare_review"], observe: false });
-  expect(result.snapshot.data).not.toHaveProperty("nextStateReadAfterMs");
+  expect(result.snapshot.data).toMatchObject({ nextStateReadAfterMs: Date.parse(connection.expiresAt) - f.now().getTime() });
   expect(calls).toHaveBeenCalledOnce();
   expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
 });
@@ -200,15 +200,12 @@ it("does not clean newer private material when an older publication loses its se
   expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
 });
 
-it("excludes a connection input that expires between list selection and its DB evaluation", async () => {
+it("does not list an unadmitted expired card as work and refuses its late input", async () => {
   const f = await walletWorkflowFixture(); fixtures.push(f);
   const card = await f.createConnection();
-  f.advance(Date.parse(card.snapshot.expiresAt) - f.now().getTime() - 1);
-  const evaluate = f.records.reconcileAndEvaluate.bind(f.records);
-  vi.spyOn(f.records, "reconcileAndEvaluate").mockImplementationOnce((input) => {
-    f.advance(1); return evaluate(input);
-  });
+  f.advance(Date.parse(card.snapshot.expiresAt) - f.now().getTime());
   expect(f.run(() => f.workflow.pendingConnections())).toEqual([]);
+  expect((await f.act(card, { action: "connect" })).error?.code).toBe("card_conflict");
   expect(f.run(() => f.cardRecords.get(card.snapshot.cardId)?.state)).toMatchObject({ state: "closed", reason: "expired" });
   expect(f.connect).not.toHaveBeenCalled(); expect(f.sign).not.toHaveBeenCalled();
 });

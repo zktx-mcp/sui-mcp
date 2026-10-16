@@ -37,6 +37,7 @@ export const TOOL_NAMES = {
   settingsGetLocalSettings: "settings_get_local_settings",
   actionStartReview: "action_start_review",
   actionCreateProposalReview: "action_create_proposal_review",
+  sessionOpenWalletDisconnectionCard: "session_open_wallet_disconnection_card",
   sessionOpenWalletConnectionCard: "session_open_wallet_connection_card",
   sessionGetWalletConnectionCard: "session_get_wallet_connection_card",
   sessionWaitWalletConnectionCard: "session_wait_wallet_connection_card",

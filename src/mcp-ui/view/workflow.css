@@ -1,13 +1,11 @@
 .workflow-card { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: var(--space-4, 1rem); }
 .workflow-card form { margin-block: var(--space-3, .75rem); }
-.workflow-qr { display: block; max-width: 100%; height: auto; margin: auto; }
-.workflow-qr[hidden] { display: none; }
+.workflow-qr { display: block; max-width: 100%; height: auto; margin: var(--ui-space-4, 16px) auto; }
 
 .workflow-decision { margin-block-start: var(--space-4, 1rem); padding-block-start: var(--space-3, .75rem); border-block-start: 1px solid var(--ui-border); }
 .review-primary-action, .review-recovery-action { width: 100%; }
-.review-primary-action[hidden] { display: none; }
-.review-status[hidden] { display: grid; visibility: hidden; }
-.review-action-row { display: grid; width: 100%; grid-template-columns: minmax(0, 7fr) minmax(0, 3fr); align-items: stretch; gap: var(--ui-space-2, 8px); }
+.review-status--reserved { visibility: hidden; }
+.review-action-row { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: var(--ui-space-2, 8px); }
 .review-primary-slot { display: flex; min-width: 0; }
 .review-lifetime { display: flex; align-items: center; justify-content: space-between; gap: var(--ui-space-2, 8px); margin-block: var(--ui-space-2, 8px); }
 .review-lifetime .card-progress-hint { margin: 0; }

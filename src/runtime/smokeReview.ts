@@ -6,7 +6,7 @@ export class SmokeReviewConfigError extends Error {}
 const requiredSwapInputs = ["SUI_MCP_SMOKE_SWAP_PROTOCOL", "SUI_MCP_SMOKE_SWAP_FROM_SYMBOL", "SUI_MCP_SMOKE_SWAP_TO_SYMBOL", "SUI_MCP_SMOKE_SWAP_AMOUNT_DISPLAY"] as const;
 
 /** Optional read-only review computation. This never establishes a wallet
- * connection; the caller owns the explicit temporary read-account fixture. */
+ * connection; the caller supplies known-account history in a temporary database. */
 export async function computeSmokeReview(options: {
   env: NodeJS.ProcessEnv; account: string; sessions: SessionStore; computation: ReviewComputationDeps; now?: Date;
 }): Promise<Record<string, unknown>> {

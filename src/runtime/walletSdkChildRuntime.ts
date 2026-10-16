@@ -6,6 +6,7 @@ import { WalletUserRejectedError } from "../core/session/walletConnection.js";
 import type { WalletSessionObservation, WalletSessionInspection } from "../core/session/walletRuntime.js";
 import { acquireDataDirectoryOwner } from "./shared/ownerLease.js";
 import { walletCommandSchema, walletEventSchema, type WalletCommand, type WalletEvent, type WalletInit } from "./walletSdkIpc.js";
+import { WALLET_CHAINS, comparableGrantScope, initialGrantRevisions, walletGrantAccount, type WalletChainId } from "../core/session/chainAccounts.js";
 
 // Production and the real-SDK wire fixture run this same process lifecycle.
 // The factory is a code dependency, never a serialized command or setting.
@@ -32,22 +33,29 @@ export function runWalletSdkChild(createTransport: (input: WalletInit) => Promis
   process.on("uncaughtException", () => fail(stage));
   process.on("unhandledRejection", () => fail(stage));
   if (!process.connected) { exit(); return; }
-  const inspect = (value: WalletSessionInspection, changedTopic?: string): WalletSessionObservation => {
+  const inspect = (value: WalletSessionInspection, change?: { topic: string; chains: readonly WalletChainId[] }): WalletSessionObservation => {
     const prior = sessions.get(value.topic);
-    const priorValue = prior && (prior.status === "present" ? { topic: prior.topic, status: prior.status, session: prior.session } : { topic: prior.topic, status: prior.status });
-    const version = (prior?.version ?? 0) + Number(!prior || !isDeepStrictEqual(priorValue, value) || changedTopic === value.topic);
-    const next = { ...value, version };
+    const lifecycleChanged = !prior || prior.status !== value.status;
+    const lifecycleRevision = (prior?.lifecycleRevision ?? 0) + Number(lifecycleChanged);
+    const grantRevisions = { ...(prior?.grantRevisions ?? initialGrantRevisions()) };
+    for (const chain of WALLET_CHAINS) {
+      const before = prior?.status === "present" ? prior.session.grants.find((grant) => grant.chainId === chain) : undefined;
+      const after = value.status === "present" ? value.session.grants.find((grant) => grant.chainId === chain) : undefined;
+      if (lifecycleChanged || !isDeepStrictEqual(comparableGrantScope(before), comparableGrantScope(after)) ||
+          change?.topic === value.topic && change.chains.includes(chain)) grantRevisions[chain]++;
+    }
+    const next = { ...value, lifecycleRevision, grantRevisions };
     sessions.set(value.topic, next);
     return next;
   };
-  const snapshot = (isReady: boolean, changedTopic?: string, checkTopic?: string) => {
+  const snapshot = (isReady: boolean, change?: { topic: string; chains: readonly WalletChainId[] }, checkTopic?: string) => {
     try {
       if (!ownership || !transport) throw new Error("Wallet storage ownership is unavailable.");
       const values = transport!.inspectAll(), topics = new Set(values.map((item) => item.topic));
       for (const topic of sessions.keys()) if (!topics.has(topic)) values.push({ topic, status: "absent" });
       if (checkTopic && !values.some((item) => item.topic === checkTopic)) values.push(transport!.inspect(checkTopic));
       const value = { runId: init!.runId, sequence: ++sequence, observedAt: new Date().toISOString(),
-        sessions: values.map((item) => inspect(item, changedTopic)) };
+        sessions: values.map((item) => inspect(item, change)) };
       send({ ...envelope(), type: "snapshot", snapshot: value, ready: isReady });
       return value;
     } catch {
@@ -64,8 +72,8 @@ export function runWalletSdkChild(createTransport: (input: WalletInit) => Promis
     stage = "restoration_failed";
     send({ ...envelope(), type: "stage", stage: "session_restore" });
     await transport.restore();
-    transport.onSessionChanged((topic, selectionChanged) => {
-      try { snapshot(false, selectionChanged ? topic : undefined); } catch { fail("wallet_state_unavailable"); }
+    transport.onSessionChanged((topic, chains) => {
+      try { snapshot(false, chains ? { topic, chains } : undefined); } catch { fail("wallet_state_unavailable"); }
     });
     stage = "wallet_state_unavailable";
     snapshot(true); ready = true;
@@ -76,7 +84,7 @@ export function runWalletSdkChild(createTransport: (input: WalletInit) => Promis
       if (!ready || !transport) throw new Error("Wallet service is not ready.");
       switch (input.type) {
         case "connect": {
-          const pairing = await transport.connect();
+          const pairing = await transport.connect(input.chains);
           send({ ...reply, type: "pairing", uri: pairing.uri, expiresAt: pairing.expiresAt });
           const session = await pairing.approval;
           snapshot(false);
@@ -92,13 +100,20 @@ export function runWalletSdkChild(createTransport: (input: WalletInit) => Promis
         case "sign": {
           snapshot(false, undefined, input.topic);
           const current = sessions.get(input.topic)!;
-          if (current.status !== "present" || current.version !== input.sessionVersion ||
-              !current.session.accounts.includes(input.account) || !current.session.methods.includes("sui_signTransaction")) {
+          if (current.status !== "present" || current.lifecycleRevision !== input.lifecycleRevision ||
+              current.grantRevisions[input.chainId] !== input.grantRevision ||
+              !walletGrantAccount(current.session.grants, input.chainId, input.account)?.methods.includes("sui_signTransaction")) {
             send({ ...reply, type: "error", code: "session_changed" }); return;
           }
           const result = await transport.sign(input);
           snapshot(false, undefined, input.topic);
-          send({ ...reply, type: "signed", ...result, sessionVersion: sessions.get(input.topic)!.version }); return;
+          const after = sessions.get(input.topic)!;
+          if (after.status !== "present" || after.lifecycleRevision !== input.lifecycleRevision ||
+              after.grantRevisions[input.chainId] !== input.grantRevision) {
+            send({ ...reply, type: "error", code: "session_changed" }); return;
+          }
+          send({ ...reply, type: "signed", ...result, chainId: input.chainId,
+            lifecycleRevision: after.lifecycleRevision, grantRevision: after.grantRevisions[input.chainId] }); return;
         }
       }
     } catch (error) {

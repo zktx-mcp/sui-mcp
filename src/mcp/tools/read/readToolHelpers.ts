@@ -1,4 +1,4 @@
-import { CONNECTION_CONFLICT_MESSAGE, CONNECTION_RECONCILIATION_MESSAGE } from "../../../core/session/walletConnection.js";
+import { CONNECTION_RECONCILIATION_MESSAGE } from "../../../core/session/walletConnection.js";
 import {
   ReadServiceCacheError,
   ReadServiceInputError
@@ -65,16 +65,18 @@ export async function resolveExplicitOrActiveAccount(
         details: { ...(availability.status === "unavailable" ? { reason: availability.reason } : {}), message: availability.message, walletAvailability: availability } }) };
       return { status: "error", result: errorToolResult({ kind: active ? "input_invalid" : "active_account_not_set",
         details: { reason: "connected_account_required",
-          message: context?.connectionReconciliationRequired ? CONNECTION_RECONCILIATION_MESSAGE : context?.connectionConflict ? CONNECTION_CONFLICT_MESSAGE : "This tool requires a selected account with a usable wallet connection. An address alone cannot be used.",
-          ...(context?.connectionConflict ? { connectionConflict: context.connectionConflict } : {}),
+          message: context?.connectionReconciliationRequired ? CONNECTION_RECONCILIATION_MESSAGE
+            : context?.assetReadAccount.status === "address_required" && context.assetReadAccount.reason === "read_address_cleared"
+              ? "The saved read address was cleared in Settings. The wallet connection and transaction permissions were not changed. This tool requires a saved Sui read address with a usable connection and does not accept an address input."
+              : "This tool requires a current Sui address with a usable wallet connection. An address alone cannot be used.",
           ...(context?.connectionReconciliationRequired ? { connectionReconciliationRequired: true } : {}),
           followUp: { tool: TOOL_NAMES.sessionGetInteractionStatus,
-            answerFields: ["walletAvailability", "connections", "pendingWalletConnections", "assetReadAccount"],
-            reason: `Check current connections and pending operations. Use pendingWalletConnections.items[].cardId with ${TOOL_NAMES.sessionGetWalletConnectionCard} or ${TOOL_NAMES.sessionWaitWalletConnectionCard}. If no operation is pending and the user requests connection or account selection, open ${TOOL_NAMES.sessionOpenWalletConnectionCard}. Only the user may act in that card.` } } }) };
+            answerFields: ["walletAvailability", "connection", "pendingWalletConnections", "assetReadAccount"],
+            reason: `Check the current connection and pending operations. Use pendingWalletConnections.items[].cardId with ${TOOL_NAMES.sessionGetWalletConnectionCard} or ${TOOL_NAMES.sessionWaitWalletConnectionCard}. If no operation is pending and the user requests connection, open ${TOOL_NAMES.sessionOpenWalletConnectionCard}. Only the user may act in that card.` } } }) };
     }
-    const message = context?.connectionReconciliationRequired ? CONNECTION_RECONCILIATION_MESSAGE + " Provide a Sui address in chat for this public read." : context?.connectionConflict ? CONNECTION_CONFLICT_MESSAGE + " Provide a Sui address in chat for this public read." : availability.status !== "available"
+    const message = context?.connectionReconciliationRequired ? CONNECTION_RECONCILIATION_MESSAGE + " Provide a Sui address in chat for this public read." : availability.status !== "available"
       ? "The wallet connection cannot be checked. Please provide a Sui address in chat to view its assets."
-      : "No connected wallet is available for the selected account. Please provide a Sui address in chat.";
+      : "No usable saved Sui read address is available. Please provide a Sui address in chat.";
     return { status: "address_required", message, result: errorToolResult({ kind: "input_invalid",
       details: { field: "account", reason: "address_required", message, walletAvailability: availability } }) };
   } catch (error) {

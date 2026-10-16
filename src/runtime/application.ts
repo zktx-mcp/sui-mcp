@@ -165,7 +165,7 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
         const observedAt = context.walletObservation?.observedAt;
         return { server: { name: SERVER_NAME, version: SERVER_VERSION, network: SERVER_NETWORK },
           localSettings: localSettings.getLocalSettingsSync((key) => preferencesRepository.getLocalSettingSync(key)),
-          ...(account ? { readAddress: account.address } : {}),
+          ...(account ? { readAddress: account.address, readConnectionId: account.connectionId } : {}),
           assetReadAccount: context.assetReadAccount, walletAvailability: context.walletAvailability,
           ...(context.connectionReconciliationRequired ? { connectionReconciliationRequired: true as const } : {}),
           ...(observedAt ? { observedAt } : {}), counts: localData.getDataCountsSync() };

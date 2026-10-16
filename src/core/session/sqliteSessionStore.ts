@@ -25,7 +25,7 @@ export type LiveReviewSessionRow = {
   preparation_id: string | null;
   preparation_error: string | null;
   wallet_connection_id: string | null;
-  wallet_connection_revision: number | null;
+  wallet_grant_revision: number | null;
   current_attempt_id: string | null;
   plans_json: string;
   review_state_json: string | null;
@@ -40,11 +40,11 @@ export function insertLiveReviewSessionRow(db: SqliteDatabase, session: ReviewSe
   const serialized = serializeSessionForLiveReviewSessionRow(session);
   db.prepare(
     `INSERT INTO live_review_sessions
-       (id, token_hash, status, account, owner_id, review_revision, preparation_id, preparation_error, wallet_connection_id, wallet_connection_revision, current_attempt_id,
+       (id, token_hash, status, account, owner_id, review_revision, preparation_id, preparation_error, wallet_connection_id, wallet_grant_revision, current_attempt_id,
         plans_json, review_state_json,
         created_at, expires_at, last_activity_at, revision, write_contract_version)
      VALUES
-       (@id, @tokenHash, @status, @account, @ownerId, @reviewRevision, @preparationId, @preparationError, @walletConnectionId, @walletConnectionRevision, @currentAttemptId,
+       (@id, @tokenHash, @status, @account, @ownerId, @reviewRevision, @preparationId, @preparationError, @walletConnectionId, @walletGrantRevision, @currentAttemptId,
         @plansJson, @reviewStateJson,
         @createdAt, @expiresAt, @lastActivityAt, 0, @writeContractVersion)`
   ).run(serialized);
@@ -67,7 +67,7 @@ export function updateLiveReviewSessionRow(
            preparation_id = @preparationId,
            preparation_error = @preparationError,
            wallet_connection_id = @walletConnectionId,
-           wallet_connection_revision = @walletConnectionRevision,
+           wallet_grant_revision = @walletGrantRevision,
            current_attempt_id = @currentAttemptId,
            plans_json = @plansJson,
            review_state_json = @reviewStateJson,
@@ -206,7 +206,7 @@ export function sessionFromLiveReviewSessionRow(row: LiveReviewSessionRow): Revi
     ownerId: row.owner_id,
     reviewRevision: row.review_revision,
     ...(row.wallet_connection_id === null ? {} : { walletConnectionId: row.wallet_connection_id }),
-    ...(row.wallet_connection_revision === null ? {} : { walletConnectionRevision: row.wallet_connection_revision }),
+    ...(row.wallet_grant_revision === null ? {} : { walletGrantRevision: row.wallet_grant_revision }),
     ...(row.preparation_error === null ? {} : { preparationError: row.preparation_error }),
     ...(row.preparation_id === null ? {} : { preparationId: row.preparation_id }),
     ...(row.current_attempt_id === null ? {} : { currentAttemptId: row.current_attempt_id })
@@ -224,7 +224,7 @@ export function serializeSessionForLiveReviewSessionRow(session: ReviewSession):
     preparationId: session.preparationId ?? null,
     preparationError: session.preparationError ?? null,
     walletConnectionId: session.walletConnectionId ?? null,
-    walletConnectionRevision: session.walletConnectionRevision ?? null,
+    walletGrantRevision: session.walletGrantRevision ?? null,
     currentAttemptId: session.currentAttemptId ?? null,
     plansJson: JSON.stringify(session.plans),
     reviewStateJson: session.reviewState ? JSON.stringify(session.reviewState) : null,

@@ -130,7 +130,7 @@ it("returns the real SDK pairing once and interrupts its pending approval only a
   const f = await setup();
   await vi.waitFor(() => expect(f.runtime.availability().status).toBe("available"), { timeout: 10000 });
   let pairing;
-  try { pairing = await f.runtime.bind().connect("new-connection"); }
+  try { pairing = await f.runtime.bind().connect(["sui:mainnet"], "new-connection"); }
   catch (error) { throw new Error(JSON.stringify({ availability: f.runtime.availability(), exit: f.children[0]!.exitCode,
     signal: f.children[0]!.signalCode, methods: f.relay.calls.map((call) => call.method), events: f.events }), { cause: error }); }
   expect(pairing.uri).toMatch(/^wc:[a-f0-9]+@2\?/); expect(Date.parse(pairing.expiresAt)).toBeGreaterThan(Date.now());
@@ -154,10 +154,52 @@ it("carries the exact sign-only request and wallet response through the real SDK
   });
   await vi.waitFor(() => expect(f.runtime.availability().status).toBe("available"), { timeout: 10000 });
   const run = f.runtime.bind(), session = await run.checkSession(sdkFixtureTopic, "signature-one");
-  const result = await run.sign({ topic: sdkFixtureTopic, account: sdkFixtureAccount, transactionBytesBase64: "AQID", sessionVersion: session.version }, "signature-one");
+  const result = await run.sign({ topic: sdkFixtureTopic, account: sdkFixtureAccount, transactionBytesBase64: "AQID", chainId: "sui:mainnet", lifecycleRevision: session.lifecycleRevision, grantRevision: session.grantRevisions["sui:mainnet"] }, "signature-one");
   expect(messages.filter((message) => message.method === "wc_sessionRequest")).toHaveLength(1);
   expect(messages.find((message) => message.method === "wc_sessionRequest")?.params).toMatchObject({ chainId: "sui:mainnet",
     request: { method: "sui_signTransaction", params: { transaction: "AQID", address: sdkFixtureAccount } } });
-  expect(result).toEqual({ transactionBytes: "AQID", signature: "fixture-wallet-signature", sessionVersion: session.version });
+  expect(result).toEqual({ transactionBytes: "AQID", signature: "fixture-wallet-signature", chainId: "sui:mainnet", lifecycleRevision: session.lifecycleRevision, grantRevision: session.grantRevisions["sui:mainnet"] });
   expect(f.output.join("")).not.toMatch(/AQID|fixture-wallet-signature/);
 }, 15000);
+
+it("preserves Sui proof across another chain and ordering changes but rejects an earlier proof after Sui changes back", async () => {
+  const f = await setup("session");
+  await vi.waitFor(() => expect(f.runtime.availability().status).toBe("available"), { timeout: 10000 });
+  const run = f.runtime.bind(), initial = await run.checkSession(sdkFixtureTopic, "initial", "sui:mainnet");
+  const observed = () => f.runtime.snapshot()!.sessions.find((item) => item.topic === sdkFixtureTopic)!;
+  const proof = { chainId: "sui:mainnet" as const, lifecycleRevision: initial.lifecycleRevision, grantRevision: initial.grantRevisions["sui:mainnet"] };
+  let requestId = Date.now() * 1000;
+  const sui = (address = sdkFixtureAccount, events = ["accountsChanged", "chainChanged"]) => ({
+    accounts: [`sui:mainnet:${address}`], methods: ["sui_signTransaction"], events });
+  const ethereum = { accounts: [`eip155:1:0x${"ab".repeat(20)}`], methods: [], events: [] };
+  const update = async (namespaces: Record<string, unknown>) => {
+    const sequence = f.runtime.snapshot()!.sequence;
+    f.relay.deliver(sdkFixtureTopic, encrypt({ symKey: "cd".repeat(32), message: JSON.stringify({
+      jsonrpc: "2.0", id: ++requestId, method: "wc_sessionUpdate", params: { namespaces } }) }));
+    await vi.waitFor(() => expect(f.runtime.snapshot()!.sequence).toBeGreaterThan(sequence), { timeout: 10000 });
+  };
+  await update({ sui: sui(), eip155: ethereum });
+  expect(observed().lifecycleRevision).toBe(initial.lifecycleRevision);
+  expect(observed().grantRevisions["sui:mainnet"]).toBe(initial.grantRevisions["sui:mainnet"]);
+  expect(observed().grantRevisions["eip155:1"]).toBeGreaterThan(initial.grantRevisions["eip155:1"]);
+  await update({ eip155: ethereum, sui: sui(sdkFixtureAccount, ["chainChanged", "accountsChanged"]) });
+  expect(observed().grantRevisions["sui:mainnet"]).toBe(proof.grantRevision);
+  const signing = vi.fn();
+  f.relay.respondToPublish(({ topic, message }) => {
+    if (topic !== sdkFixtureTopic) return undefined;
+    const request = JSON.parse(decrypt({ symKey: "cd".repeat(32), encoded: message }));
+    if (request.method !== "wc_sessionRequest") return undefined;
+    signing(request.params.request.method);
+    return encrypt({ symKey: "cd".repeat(32), message: JSON.stringify({ jsonrpc: "2.0", id: request.id,
+      result: { transactionBytes: "AQID", signature: "synthetic-wallet-response" } }) });
+  });
+  expect(await run.sign({ ...proof, topic: sdkFixtureTopic, account: sdkFixtureAccount, transactionBytesBase64: "AQID" }, "unchanged-sui"))
+    .toEqual({ ...proof, transactionBytes: "AQID", signature: "synthetic-wallet-response" });
+  await update({ sui: sui(`0x${"d".repeat(64)}`), eip155: ethereum });
+  const changed = observed().grantRevisions["sui:mainnet"];
+  await update({ sui: sui(), eip155: ethereum });
+  expect(observed().grantRevisions["sui:mainnet"]).toBeGreaterThan(changed);
+  await expect(run.sign({ ...proof, topic: sdkFixtureTopic, account: sdkFixtureAccount, transactionBytesBase64: "AQID" }, "old-proof"))
+    .rejects.toThrow();
+  expect(signing).toHaveBeenCalledExactlyOnceWith("sui_signTransaction");
+}, 20000);

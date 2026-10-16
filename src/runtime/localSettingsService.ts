@@ -7,6 +7,7 @@ import {
   LocalSettingsError,
   type LocalSettingsWriteResponse,
   type LocalSettingRecord,
+  type LocalSettingKey,
   type PreferencesRepository
 } from "../core/preferences/preferencesStore.js";
 import {
@@ -22,6 +23,7 @@ import {
   verifyMainnetGrpcEndpoint
 } from "./suiEndpoint.js";
 import { resolveSuiGraphqlUrlView, resolveSuiGrpcUrlView } from "./config.js";
+import { DEFAULT_WALLET_CHAINS, walletChainsSchema } from "../core/session/chainAccounts.js";
 
 export type RuntimeLocalSettingsServiceOptions = {
   preferencesRepository: PreferencesRepository;
@@ -71,16 +73,17 @@ export class RuntimeLocalSettingsService implements LocalSettingsService {
   async getLocalSettings(): Promise<LocalSettingsView> {
     const stored = await this.options.preferencesRepository.getSuiGrpcUrl();
     const storedGraphql = await this.options.preferencesRepository.getSuiGraphqlUrl();
-    return this.settingsFromStored(stored?.value, storedGraphql?.value);
+    const networks = await this.options.preferencesRepository.getLocalSetting("walletConnectionChains");
+    return this.settingsFromStored(stored?.value, storedGraphql?.value, networks?.value);
   }
 
-  getLocalSettingsSync(read: (key: "suiGrpcUrl" | "suiGraphqlUrl") => LocalSettingRecord | undefined): LocalSettingsView {
+  getLocalSettingsSync(read: (key: LocalSettingKey) => LocalSettingRecord | undefined): LocalSettingsView {
     const grpc = read("suiGrpcUrl"), graphql = read("suiGraphqlUrl");
     if (grpc && typeof grpc.value !== "string" || graphql && typeof graphql.value !== "string") throw new LocalSettingsError("internal_error", "Stored endpoints are invalid.");
-    return this.settingsFromStored(grpc?.value as string | undefined, graphql?.value as string | undefined);
+    return this.settingsFromStored(grpc?.value as string | undefined, graphql?.value as string | undefined, read("walletConnectionChains")?.value);
   }
 
-  private settingsFromStored(stored: string | undefined, storedGraphql: string | undefined): LocalSettingsView {
+  private settingsFromStored(stored: string | undefined, storedGraphql: string | undefined, networks: unknown): LocalSettingsView {
     const currentStoredView = resolveSuiGrpcUrlView({
       defaultSuiGrpcUrl: this.defaultSuiGrpcUrl,
       storedValue: stored,
@@ -93,7 +96,8 @@ export class RuntimeLocalSettingsService implements LocalSettingsService {
     });
     return {
       suiGrpcUrl: withBootEffectiveEndpoint(currentStoredView, this.bootSuiGrpcUrl),
-      suiGraphqlUrl: withBootEffectiveEndpoint(currentStoredGraphqlView, this.bootSuiGraphqlUrl)
+      suiGraphqlUrl: withBootEffectiveEndpoint(currentStoredGraphqlView, this.bootSuiGraphqlUrl),
+      walletConnectionChains: walletChainsSchema.parse(networks ?? DEFAULT_WALLET_CHAINS)
     };
   }
 

@@ -74,8 +74,8 @@ export function input(options: {
   name?: string;
 }): HTMLInputElement {
   const node = document.createElement("input");
-  node.className = "ui-input";
   node.type = options.type ?? "text";
+  node.className = node.type === "checkbox" ? "ui-checkbox" : "ui-input";
   if (options.value !== undefined) {
     node.value = options.value;
   }
@@ -94,8 +94,11 @@ export function input(options: {
 
 export function field(labelText: string, control: HTMLElement): HTMLLabelElement {
   const node = document.createElement("label");
-  node.className = "ui-field";
-  node.append(element("span", undefined, labelText), control);
+  const checkbox = control.tagName === "INPUT" && (control as HTMLInputElement).type === "checkbox";
+  node.className = checkbox ? "ui-field ui-field--check" : "ui-field";
+  const label = element("span", undefined, labelText);
+  if (checkbox) node.append(control, label);
+  else node.append(label, control);
   return node;
 }
 

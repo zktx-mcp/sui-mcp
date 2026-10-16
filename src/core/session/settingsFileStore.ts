@@ -41,16 +41,11 @@ export class SettingsFileStore {
   }
   private stagingPath(file: SettingsFile): string {
     this.assertId(file.fileId);
-    return join(this.directory("staging"), `${file.fileId}.${file.role === "upload" ? "upload" : isSettingsDownloadFile(file) ? "download" : "stage"}`);
-  }
-  private finalPath(file: SettingsFile): string {
-    this.assertId(file.operationId);
-    if (file.role !== "export" || file.relativePath !== `backups/${file.operationId}.json`) {
-      throw new SettingsConflict("The backup location does not match this request.");
+    if (file.role === "export" && !isSettingsDownloadFile(file)) {
+      throw new SettingsConflict("The private backup path does not match this request.");
     }
-    return join(this.directory("backups"), `${file.operationId}.json`);
+    return join(this.directory("staging"), `${file.fileId}.${file.role === "upload" ? "upload" : "download"}`);
   }
-  exportPath(file: SettingsFile): string { return this.finalPath(file); }
   localBackupPath(file: SettingsFile): string {
     this.assertId(file.operationId);
     if (!isSettingsDownloadFile(file)) throw new SettingsConflict("This request does not own a download snapshot.");
@@ -213,21 +208,6 @@ export class SettingsFileStore {
   async readDownloadRange(file: SettingsFile, offset: number, length: number): Promise<Buffer> {
     if (!isSettingsDownloadFile(file)) throw new SettingsConflict("This file is not the private download snapshot.");
     return this.readVerifiedRange(file, this.directory("staging"), this.stagingPath(file), offset, length);
-  }
-  async verifyExport(file: SettingsFile): Promise<void> {
-    const directory = this.directory("backups");
-    const info = await lstat(directory);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new SettingsConflict("The local backup directory changed.");
-    const handle = await this.handle(this.finalPath(file), constants.O_RDONLY);
-    try {
-      if ((await handle.stat()).size !== file.totalSize) throw new SettingsConflict("The local backup length changed.");
-      const hash = createHash("sha256");
-      for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk as Buffer);
-      if (hash.digest("hex") !== file.sha256) throw new SettingsConflict("The local backup content changed.");
-    } finally { await handle.close(); }
-  }
-  async readExportRange(file: SettingsFile, offset: number, length: number): Promise<Buffer> {
-    return this.readVerifiedRange(file, this.directory("backups"), this.finalPath(file), offset, length);
   }
   private async readVerifiedRange(file: SettingsFile, directory: string, path: string, offset: number, length: number): Promise<Buffer> {
     if (!file.sealed || file.invalidated || !Number.isSafeInteger(offset) || !Number.isSafeInteger(length) ||

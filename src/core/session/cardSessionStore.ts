@@ -42,9 +42,10 @@ export class CardStore {
   }
   async create(kind: CardKind, input: Record<string, unknown>, execute = false): Promise<CardResponse & { permission: string }> {
     this.assertCurrent();
-    const business = kind === "connect" || kind === "review";
-    if (kind === "settings" && (!this.options.settings || execute || Object.keys(input).length)) throw new CardError("Settings cards are unavailable for this input.");
+    const business = kind === "connect" || kind === "disconnect" || kind === "review";
+    if (kind === "settings" && (!this.options.settings || execute)) throw new CardError("Settings cards are unavailable for this input.");
     if (business && (!this.options.workflow || execute)) throw new CardError("This type of card is unavailable.");
+    if (kind === "connect" || kind === "disconnect") input = await this.options.workflow!.connectionCardInput(kind, input);
     const parsed = execute ? parseCardInput(kind, input) : undefined;
     let preparation: CardPreparation = { status: "ready" };
     if (business) {
@@ -59,18 +60,24 @@ export class CardStore {
     }
     assertNoForbiddenMcpFields({ input, preparation });
     const { base, token } = createLocalSessionBase(this.now(), DEFAULT_SESSION_TTL_MS);
-    const record: CardRecord = { ownerId: this.options.ownerId, tokenHash: base.tokenHash,
-      scope: kind === "settings" ? "settings" : kind === "connect" ? "connect" : kind === "review" ? input.mode === "manage" ? "review_manage" : "review" : "read",
-      ...(kind === "settings" ? { operationId: randomUUID() } : {}),
+    const settingsTarget = input.operationStatus ?? input.backupDelivery;
+    const settingsOperationId = settingsTarget && typeof settingsTarget === "object" && "operationId" in settingsTarget ? String(settingsTarget.operationId) : randomUUID();
+    let record: CardRecord = { ownerId: this.options.ownerId, tokenHash: base.tokenHash,
+      scope: kind === "settings" ? "settings" : kind === "connect" || kind === "disconnect" ? kind : kind === "review" ? input.mode === "manage" ? "review_manage" : "review" : "read",
+      ...(kind === "settings" ? { operationId: settingsOperationId } : {}),
+      ...((kind === "connect" || kind === "disconnect") ? { operationId: String(input.operationId) } : {}),
       ...(kind === "review" && input.mode === "manage" && typeof input.attemptId === "string" ? { operationId: input.attemptId } : {}),
-      state: { cardId: base.id, kind, state: preparation.status === "failed" ? "closed" : "ready", revision: 0,
+      state: { cardId: base.id, kind, state: preparation.status !== "ready" ? "closed" : "ready", revision: 0,
         createdAt: base.createdAt, expiresAt: base.expiresAt, input,
-        ...(preparation.status === "failed" ? { reason: "failed", error: preparation.error } :
+        ...(preparation.status === "failed" ? { reason: "failed", error: preparation.error } : preparation.status === "completed" ? { reason: "completed" } :
           preparation.data === undefined ? {} : { data: preparation.data }) } };
-    if (kind === "settings") this.options.settings!.create(record);
+    if (business && record.state.state === "closed") record = this.options.workflow!.terminalCard(record);
+    if (kind === "settings") await this.options.settings!.create(record);
     else this.options.records.create(record);
+    record = this.current(base.id);
     if (preparation.status === "failed") this.reportFailure(record, "input_preparation");
-    const result = parsed === undefined ? await this.describe(record, false) : await this.submit({
+    const result = kind === "connect" || kind === "disconnect" ? { snapshot: (await this.readWalletOperation(base.id)).card }
+      : parsed === undefined ? await this.describe(record, false) : await this.submit({
       cardId: base.id, permission: token, revision: 0, input: parsed
     });
     return { ...result, permission: token };
@@ -83,19 +90,28 @@ export class CardStore {
     return this.options.settings.readFile(record, input.fileId, input.offset, limit, input.attemptId);
   }
   async readSaved(cardId: string): Promise<CardSnapshot> { return (await this.describe(this.current(cardId), false)).snapshot; }
+  async readWalletOperation(cardId: string) {
+    if (!this.options.workflow) throw new CardError("Wallet operations are unavailable.");
+    const result = this.options.workflow.readOperation(this.current(cardId));
+    return { card: this.snapshot(result.data ? { ...result.record, state: { ...result.record.state, data: result.data } } : result.record, result.evaluatedAt), operation: result.operation,
+      walletAvailability: result.walletAvailability, evaluatedAt: result.evaluatedAt };
+  }
   private async describe(record: CardRecord, uiObservation: boolean): Promise<CardResponse> {
+    if (record.state.state === "closed") return this.response(record);
     if (record.state.kind === "settings") {
       if (!this.options.settings) throw new CardError("Settings cards are unavailable.");
       const described = await this.options.settings.describe(record);
+      if (described.record.state.state === "closed") return this.response(described.record);
       return { snapshot: cardSnapshotSchema.parse({ ...described.record.state, data: described.data,
         inputRemainingMs: described.record.state.state === "ready" ? Math.max(0, Date.parse(described.record.state.expiresAt) - this.now().getTime()) : 0,
         pollAfterMs: EXECUTION_POLLING_INTERVAL_SECONDS * 1000 }) };
     }
-    if (record.state.kind !== "connect" && record.state.kind !== "review") return this.response(record);
+    if (record.state.kind !== "connect" && record.state.kind !== "disconnect" && record.state.kind !== "review") return this.response(record);
     if (!this.options.workflow) throw new CardError("Wallet actions are unavailable.");
     const view = await this.options.workflow.describe(record, uiObservation);
     const current = view.evaluated.record;
     if (!current) throw new CardError("Saved card data is unavailable.");
+    if (current.state.state === "closed") return this.response(current);
     const snapshot = cardSnapshotSchema.parse({ ...current.state, data: view.data,
       inputRemainingMs: view.evaluated.inputRemainingMs,
       pollAfterMs: (current.state.kind === "review" ? EXECUTION_POLLING_INTERVAL_SECONDS : WALLET_CONNECTION_POLL_SECONDS) * 1000 });
@@ -105,11 +121,17 @@ export class CardStore {
   }
   async act(input: CardSubmission): Promise<CardResponse> {
     const record = this.require(input);
+    if (record.state.state === "closed" && input.input.action !== "settings_report_download") {
+      const normalized = record.state.kind === "settings" ? settingsActionSchema.safeParse(input.input) : undefined;
+      if (isDeepStrictEqual(record.acceptedInput, normalized?.success ? normalized.data : input.input) || record.state.reason === "cancelled" &&
+        (input.input.action === "stop_waiting" || input.input.action === "cancel" || input.input.action === "stop_connection" && input.input.operationId === record.operationId)) return this.response(record);
+      return { ...this.response(record), error: { code: "card_conflict", message: "This card has ended. Ask in chat for a new request." } };
+    }
     if (record.state.kind === "settings") {
       if (!this.options.settings) throw new CardError("Settings cards are unavailable.");
       const parsed = settingsActionSchema.safeParse(input.input);
       if (!parsed.success) return { ...await this.describe(record, false), error: { code: "invalid_card_input", message: "This Settings action is not valid." } };
-      if ((parsed.data.action === "settings_confirm" || parsed.data.action === "settings_download_backup") && record.acceptedInput !== undefined && isDeepStrictEqual(record.acceptedInput, parsed.data)) return this.describe(record, false);
+      if ((parsed.data.action === "settings_confirm" || parsed.data.action === "settings_download_backup" || parsed.data.action === "settings_save_wallet_networks" || parsed.data.action === "settings_clear_read_address") && record.acceptedInput !== undefined && isDeepStrictEqual(record.acceptedInput, parsed.data)) return this.describe(record, false);
       if (input.revision !== record.state.revision && !isSettingsDownloadFileAction(parsed.data)) return { ...await this.describe(record, false), error: { code: "card_conflict", message: "This Settings selection changed. Review the current selection before continuing." } };
       const kind = parsed.data.action === "settings_select" ? parsed.data.draft.kind : this.options.settings.operationKind(record);
       try { await this.options.settings.act(record, parsed.data); }
@@ -123,7 +145,7 @@ export class CardStore {
       }
       return this.describe(this.current(input.cardId), false);
     }
-    if ((record.state.kind !== "connect" && record.state.kind !== "review") || !this.options.workflow) {
+    if ((record.state.kind !== "connect" && record.state.kind !== "disconnect" && record.state.kind !== "review") || !this.options.workflow) {
       return this.conflict(record, "This card does not accept wallet workflow actions.");
     }
     let parsed: ReturnType<typeof parseWorkflowAction>;
@@ -138,11 +160,11 @@ export class CardStore {
       return { ...await this.describe(this.current(input.cardId), false), error: {
         code: error instanceof WalletUnavailableError ? "wallet_unavailable" : "card_conflict", message: error.message } };
     }
-    return this.describe(this.current(input.cardId), false);
+    return this.describe(this.current(input.cardId), true);
   }
   async submit(input: CardSubmission): Promise<CardResponse> {
     const record = this.require(input);
-    if (record.state.kind === "connect" || record.state.kind === "review" || record.state.kind === "settings") throw new CardError("This card does not accept data selections.");
+    if (record.state.kind === "connect" || record.state.kind === "disconnect" || record.state.kind === "review" || record.state.kind === "settings") throw new CardError("This card does not accept data selections.");
     let parsed: Record<string, unknown>;
     try { parsed = parseCardInput(record.state.kind, input.input); }
     catch { return { ...this.response(record), error: { code: "invalid_card_input", message: "The selected information is not valid for this card." } }; }
@@ -165,7 +187,7 @@ export class CardStore {
     const complete: CardRecord = { ...admitted, ...("receiptDisplay" in projected ? { receiptDisplay: projected.receiptDisplay! } : {}),
       state: { ...admitted.state, data: projected.data, state: "closed", reason: "completed", revision: admitted.state.revision + 1 } };
     // Do not report success or replay the source call if this commit fails.
-    try { this.options.records.replace(admitted, complete); }
+    try { this.options.records.replace(admitted, complete, this.now()); }
     catch { return this.fail(admitted, "result_storage", "The result could not be saved. This request will not be repeated automatically."); }
     return this.response(this.current(record.state.cardId));
   }
@@ -175,7 +197,7 @@ export class CardStore {
     this.assertCurrent();
     this.reportFailure(record, stage);
     this.options.records.replace(record, { ...record, state: { ...record.state,
-      state: "closed", reason: "failed", error: message, revision: record.state.revision + 1 } });
+      state: "closed", reason: "failed", error: message, revision: record.state.revision + 1 } }, this.now());
     return this.response(this.current(record.state.cardId));
   }
   private reportFailure(record: CardRecord, stage: string): void {
@@ -205,8 +227,10 @@ export class CardStore {
     return snapshot;
   }
   private response(record: CardRecord): CardResponse {
+    if (["connect", "disconnect", "review"].includes(record.state.kind) && record.state.state !== "closed") record = this.options.workflow!.expireCard(record);
     const evaluated = this.options.records.evaluate(record, () => this.now());
     record = evaluated.record;
-    return { snapshot: this.snapshot(record, evaluated.evaluatedAt), ...(record.receiptDisplay === undefined ? {} : { receiptDisplay: record.receiptDisplay }) };
+    const receipt = record.state.kind === "review" && record.state.state === "closed" ? this.options.workflow?.closedReceiptDisplay(record) : undefined;
+    return { ...(receipt ?? {}), snapshot: this.snapshot(record, evaluated.evaluatedAt), ...(record.receiptDisplay === undefined ? {} : { receiptDisplay: record.receiptDisplay }) };
   }
 }

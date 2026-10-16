@@ -28,7 +28,7 @@ const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("h
 async function fixture(data: Buffer, role: "upload" | "export" = "upload") {
   const directory = await mkdtemp(join(tmpdir(), "sui-mcp-settings-file-")); directories.push(directory);
   const fileId = randomUUID(), operationId = randomUUID();
-  const file: SettingsFile = { fileId, operationId, role, relativePath: role === "upload" ? `.settings-staging/${fileId}.upload` : `backups/${operationId}.json`,
+  const file: SettingsFile = { fileId, operationId, role, relativePath: `.settings-staging/${fileId}.${role === "upload" ? "upload" : "download"}`,
     displayName: "User supplied ../資料.json", totalSize: data.length, receivedSize: 0, sha256: digest(data), sealed: false, invalidated: false, cleanup: "pending" };
   return { directory, file, files: new SettingsFileStore(directory) };
 }
@@ -56,7 +56,6 @@ it("rejects a different physical prefix and never overwrites it", async () => {
 
 it("creates one private snapshot and verifies that same artifact on range reads", async () => {
   const data = Buffer.from('{"public":"records"}'), f = await fixture(data, "export");
-  f.file.relativePath = `.settings-staging/${f.file.fileId}.download`;
   const path = join(f.directory, f.file.relativePath);
   await f.files.createDownload(f.file, data);
   const sealed = { ...f.file, sealed: true, receivedSize: data.length };
@@ -70,15 +69,20 @@ it("creates one private snapshot and verifies that same artifact on range reads"
   expect(await readdir(join(f.directory, "backups")).catch(() => [])).toEqual([]);
 });
 
-it("reads an existing public backup and never removes it during temporary cleanup", async () => {
+it("verifies a published snapshot and preserves its local backup during temporary cleanup", async () => {
   const data = Buffer.from('{"saved":"user backup"}'), f = await fixture(data, "export");
-  await mkdir(join(f.directory, "backups")); const path = join(f.directory, f.file.relativePath);
-  await writeFile(path, data, { flag: "wx" });
+  await f.files.createDownload(f.file, data);
   const sealed = { ...f.file, sealed: true, receivedSize: data.length };
-  expect(await f.files.readExportRange(sealed, 1, 4)).toEqual(data.subarray(1, 5));
-  await f.files.cleanup(sealed); expect(await readFile(path)).toEqual(data);
-  await writeFile(path, Buffer.alloc(data.length, 33));
-  await expect(f.files.readExportRange(sealed, 1, 4)).rejects.toThrow("content changed");
+  expect(await f.files.publishDownload(sealed, () => {})).toEqual({ status: "saved" });
+  const path = f.files.localBackupPath(sealed);
+  expect(await readFile(path)).toEqual(data);
+  expect(await f.files.readDownloadRange(sealed, 1, 4)).toEqual(data.subarray(1, 5));
+  const changed = Buffer.alloc(data.length, 33);
+  await writeFile(path, changed);
+  await expect(f.files.readDownloadRange(sealed, 1, 4)).rejects.toThrow("content changed");
+  await f.files.cleanup({ ...sealed, invalidated: true });
+  expect(await readFile(path)).toEqual(changed);
+  await expect(readFile(join(f.directory, f.file.relativePath))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("rejects a staging-directory symlink without following them", async () => {
@@ -92,7 +96,6 @@ it("rejects a staging-directory symlink without following them", async () => {
 
 it("does not overwrite a preexisting file at the reserved private snapshot path", async () => {
   const data = Buffer.from("new snapshot"), prior = Buffer.from("user's existing file"); const f = await fixture(data, "export");
-  f.file.relativePath = `.settings-staging/${f.file.fileId}.download`;
   await mkdir(join(f.directory, ".settings-staging"));
   const path = join(f.directory, f.file.relativePath);
   await writeFile(path, prior);

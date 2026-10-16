@@ -19,11 +19,11 @@ import { registerSuiMcpTool } from "../../registerTool.js";
 import type { McpServerDeps } from "../../server.js";
 import { successOutputSchema } from "../../schemas.js";
 import { errorToolResult } from "../../result.js";
-import { activityStoreToolError, sessionStoreToolError } from "../../toolErrors.js";
+import { sessionStoreToolError } from "../../toolErrors.js";
 import { TOOL_NAMES } from "../../toolNames.js";
 import { userAnswerUseSchema } from "../read/commonSchemas.js";
 
-export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps, "sessions" | "activityStore" | "cards" | "logger">): void {
+export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps, "sessions" | "activityStore" | "cards" | "logger" | "workflow">): void {
   server.registerTool(
     TOOL_NAMES.actionStartReview,
     {
@@ -31,7 +31,7 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
       description: "Create a local swap review session on a supported protocol. Returns an internal review card.",
       inputSchema: z.object({
         intent: swapIntentInputSchema
-      }),
+      }).strict(),
       outputSchema: successOutputSchema({
         reviewSessionId: z.string(),
         card: cardSnapshotSchema,
@@ -45,24 +45,6 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
     async ({ intent }) => {
       if (!supportsCards(server)) return errorToolResult({ kind: "ui_unavailable", details: { reason: "An internal review card is required." } });
       const now = new Date();
-      // A swap review is account-bound: its evidence (balances, transaction
-      // material, digest, simulation) is computed for a specific sender, and
-      // no transaction can be built without that account. Refuse here when no
-      // wallet account is connected instead of creating a hollow proposal that
-      // can never be computed or signed. Connect first via
-      // session_open_wallet_connection_card.
-      let activeAccount;
-      try {
-        activeAccount = await deps.activityStore.getActiveAccount();
-      } catch (error) {
-        return activityStoreToolError(error, deps.logger);
-      }
-      if (!activeAccount) {
-        return errorToolResult({
-          kind: "active_account_not_set",
-          details: { action: "connect_wallet_connection" }
-        });
-      }
       const { protocol: protocolSlug, ...swapIntent } = intent;
       const resolution = resolveIntentPlanFactory(INTENT_PLAN_FACTORIES, swapIntent.type, protocolSlug);
       if (resolution.status !== "resolved") {
@@ -87,6 +69,11 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
       const plan = resolution.factory.createPlan(swapIntent, now);
 
       try {
+        const target = deps.workflow?.resolveReviewTarget();
+        if (!target || target.status !== "available") return errorToolResult({ kind: target?.reason === "wallet_unavailable" || !target ? "wallet_unavailable"
+          : target.reason === "connection_required" ? "active_account_not_set" : "input_invalid",
+          details: { reason: target?.reason ?? "wallet_unavailable", action: "check_exact_wallet_account",
+            message: "A fixed, currently usable Sui account and its exact connection are required for this review." } });
         const { session } = await deps.sessions.createReviewSession([plan], now);
         const preliminaryChecks: ReviewCheck[] = plan.preliminaryChecks ?? [];
         const hasBlockingPreliminaryChecks = preliminaryChecks.some((check) => check.status === "fail");
@@ -96,7 +83,7 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
           preliminaryChecks,
           userAnswerUse: prepareActionReviewUserAnswerUse({ hasBlockingPreliminaryChecks })
         };
-        return await createWorkflowCard(server, deps, "review", { reviewSessionId: session.id }, payload);
+        return await createWorkflowCard(server, deps, "review", { reviewSessionId: session.id, connectionId: target.connectionId, account: target.account }, payload);
       } catch (error) {
         return sessionStoreToolError(error, deps.logger);
       }

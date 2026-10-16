@@ -116,8 +116,8 @@ Check `session_get_interaction_status.assetReadAccount`. If no usable default is
 
 `Connect my wallet.`
 Class: `tool_wait`.
-Call `session_open_wallet_connection_card` with `intent: connect` and present the internal Connect card. Its authenticated View starts one pairing after checking current state; the ordinary tool call or wait does not. Read or wait using its cardId. A connection is account context, not transaction approval or login.
-Use `session_get_interaction_status.assetReadAccount` before announcing a usable default address. Resolve `connectionConflict` through user-confirmed targeted disconnection; never pick a wallet silently.
+Call `session_open_wallet_connection_card` with empty input and present the internal Connect card. Its authenticated View starts one pairing after checking current state; the ordinary tool call or wait does not. Read or wait using its cardId. A connection is account context, not transaction approval or login.
+Use `session_get_interaction_status.assetReadAccount` before announcing an implicit read address. One current connection supplies at most one fixed address per returned requested chain. An existing session or unsettled connection work prevents another pairing. Changing wallet, account or approved networks requires confirmed disconnection and a new connection; do not propose Add connection or a default-account switch. A new Review fixes that connection and Sui address before preparation and cannot move to a replacement connection. Settings owns requested networks; clearing its saved read address neither disconnects the wallet nor changes transaction targets.
 On `timed_out`, say the wallet connection is still pending, not failed.
 
 `I want to buy $10 worth of SUI.`

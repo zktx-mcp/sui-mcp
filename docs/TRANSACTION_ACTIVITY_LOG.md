@@ -10,6 +10,10 @@ Sui MCP stores two kinds of local activity evidence:
 - User-requested bounded Sui activity facts that were looked up through GraphQL and matched a known local wallet.
 
 It does not run a background indexer and does not claim complete wallet history.
+Activity reads accept an explicit Sui account or use the saved read address.
+If that address is absent or cleared, the caller supplies an explicit account;
+no wallet connection is required for that read. These filters neither restore
+read context nor change a Review's fixed transaction target.
 
 ## Stored By Default
 

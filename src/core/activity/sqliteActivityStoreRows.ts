@@ -34,28 +34,6 @@ import {
 } from "./transactionActivityDetails.js";
 import { ActivityStoreError, type EvidenceSchema } from "./sqliteActivityStoreTypes.js";
 
-export type AccountRow = {
-  id: number;
-  sui_address: string;
-  first_seen_at: string;
-  last_used_at: string;
-  first_source: string;
-  last_source: string;
-};
-
-export type ActiveAccountRow = {
-  account_id: number;
-  address: string;
-  source: string;
-  set_at: string;
-  wallet_name: string | null;
-  wallet_id: string | null;
-};
-
-
-
-
-
 export type ReviewActivityScope = {
   account: string;
   accountId?: number | undefined;

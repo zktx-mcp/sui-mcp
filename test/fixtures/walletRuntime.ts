@@ -1,3 +1,4 @@
+import { WALLET_CHAINS, type WalletChainId } from "../../src/core/session/chainAccounts.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { walletUnavailable, type WalletAvailability, type WalletTransport, type WalletUnavailableReason } from "../../src/core/session/walletConnection.js";
@@ -26,22 +27,30 @@ export class FixtureWalletRuntime implements WalletRuntime {
     try {
       await this.transport.restore();
       if (this.closing || this.blocked || this.runId !== runId) return;
-      this.unsubscribe = this.transport.onSessionChanged((topic, selectionChanged) => {
-        try { this.publish(false, selectionChanged ? topic : undefined); } catch { this.fail("wallet_state_unavailable"); }
+      this.unsubscribe = this.transport.onSessionChanged((topic, changedChains) => {
+        try { this.publish(false, topic, changedChains); } catch { this.fail("wallet_state_unavailable"); }
       });
       this.publish(true);
     } catch {
       if (!(this.state.status === "initializing" && this.state.stage === "state_sync")) this.state = walletUnavailable("restoration_failed", this.runId);
     }
   }
-  private publish(ready: boolean, changed?: string) {
+  private publish(ready: boolean, changed?: string, changedChains: readonly WalletChainId[] = [], checkTopic?: string) {
     const previous = this.current;
     const values = this.transport!.inspectAll();
+    if (checkTopic && !values.some((item) => item.topic === checkTopic)) values.push(this.transport!.inspect(checkTopic));
     for (const old of previous?.sessions ?? []) if (!values.some((item) => item.topic === old.topic)) values.push({ topic: old.topic, status: "absent" });
     const sessions: WalletSessionObservation[] = values.map((value) => {
       const old = previous?.sessions.find((item) => item.topic === value.topic);
-      const before = old && (old.status === "present" ? { topic: old.topic, status: old.status, session: old.session } : { topic: old.topic, status: old.status });
-      return { ...value, version: (old?.version ?? 0) + Number(!old || !isDeepStrictEqual(before, value) || changed === value.topic) };
+      const lifecycleChanged = !old || old.status !== value.status;
+      const grantRevisions = { "sui:mainnet": 0, "eip155:1": 0, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 0 };
+      for (const chain of WALLET_CHAINS) {
+        const before = old?.status === "present" ? old.session.grants.find((grant) => grant.chainId === chain) : undefined;
+        const after = value.status === "present" ? value.session.grants.find((grant) => grant.chainId === chain) : undefined;
+        grantRevisions[chain] = (old?.grantRevisions[chain] ?? 0) + Number(lifecycleChanged ||
+          !isDeepStrictEqual(before, after) || changed === value.topic && changedChains.includes(chain));
+      }
+      return { ...value, lifecycleRevision: (old?.lifecycleRevision ?? 0) + Number(lifecycleChanged), grantRevisions };
     });
     this.current = { runId: this.runId, sequence: (previous?.sequence ?? 0) + 1, observedAt: new Date().toISOString(), sessions };
     if (ready) this.state = { status: "initializing", walletRunId: this.runId, stage: "state_sync", message: "Confirming wallet state…" };
@@ -101,20 +110,22 @@ export class FixtureWalletRuntime implements WalletRuntime {
       });
     });
     const check = (topic: string): WalletSessionObservation => {
-      assertCurrent(); this.publish(false);
-      return this.current!.sessions.find((item) => item.topic === topic) ?? { topic, version: 1, status: "absent" };
+      assertCurrent(); this.publish(false, undefined, [], topic);
+      return this.current!.sessions.find((item) => item.topic === topic) ?? { topic, lifecycleRevision: 1, grantRevisions: { "sui:mainnet": 1, "eip155:1": 1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 1 }, status: "absent" };
     };
     return { runId, assertCurrent,
-      connect: async () => {
-        const pairing = await wait(this.transport!.connect());
+      connect: async (chains) => {
+        const pairing = await wait(this.transport!.connect(chains));
         return { ...pairing, approval: wait(pairing.approval).then((value) => { this.publish(false); return value; }) };
       },
       disconnect: async (topic) => { await wait(this.transport!.disconnect(topic)); this.publish(false); },
       checkSession: async (topic) => check(topic),
-      sign: async ({ sessionVersion, ...input }) => {
-        if (check(input.topic).version !== sessionVersion) throw new Error("Fixture wallet session changed before dispatch");
+      sign: async ({ lifecycleRevision, grantRevision, chainId, ...input }) => {
+        const before = check(input.topic);
+        if (before.lifecycleRevision !== lifecycleRevision || before.grantRevisions[chainId] !== grantRevision) throw new Error("Fixture wallet grant changed before dispatch");
         const result = await wait(this.transport!.sign(input));
-        return { ...result, sessionVersion: check(input.topic).version };
+        const after = check(input.topic);
+        return { ...result, chainId, lifecycleRevision: after.lifecycleRevision, grantRevision: after.grantRevisions[chainId] };
       }
     };
   }

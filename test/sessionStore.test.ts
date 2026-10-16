@@ -1,3 +1,4 @@
+import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { testObjectFunding } from "./fixtures/transactionMaterial.js";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -116,7 +117,7 @@ async function setReadAccountFixture(
   account = walletAccount,
   now = new Date()
 ) {
-  return activities.get(store)!.setActiveAccount(account, "wallet_connection", now);
+  return seedCurrentReadAccount(activities.get(store)!, account, now);
 }
 
 async function recordReadyReviewStateWithPrivateMaterial(input: {

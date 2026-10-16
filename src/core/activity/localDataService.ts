@@ -1,3 +1,4 @@
+import { DEFAULT_WALLET_CHAINS } from "../session/chainAccounts.js";
 import { SETTINGS_DOWNLOAD_FILE_SQL, SETTINGS_FILE_CLEANUP_SQL } from "../session/settingsFileIdentity.js";
 import { hasUnsettledWalletWork } from "../session/sqliteWalletWorkflowStore.js";
 import type Database from "better-sqlite3";
@@ -8,7 +9,6 @@ import {
   LOCAL_DATA_NETWORK,
   LocalDataError,
   type AccountExportRow,
-  type ActiveAccountContextExportRow,
   type ExternalActivityScanExportRow,
   type ExternalActivityTransactionExportRow,
   type LocalDataCounts,
@@ -26,8 +26,6 @@ import {
   type SqliteLocalDataServiceOptions
 } from "./localDataTypes.js";
 import {
-  activeAccountChange,
-  activeAccountAddress,
   countsForPayload,
   invalidBackup,
   maxNumber,
@@ -71,7 +69,6 @@ export class SqliteLocalDataService implements LocalDataService {
         exportedAt: now.toISOString(),
         data: {
           accounts: this.selectAll<AccountExportRow>("accounts"),
-          activeAccountContext: this.selectAll<ActiveAccountContextExportRow>("active_account_context"),
           reviewSessions: this.selectAll<ReviewSessionExportRow>("review_sessions"),
           reviewStateSnapshots: this.selectAll<ReviewStateSnapshotExportRow>("review_state_snapshots"),
           reviewStatusTransitions: this.selectAll<ReviewStatusTransitionExportRow>("review_status_transitions"),
@@ -96,8 +93,6 @@ export class SqliteLocalDataService implements LocalDataService {
     });
     return this.db.transaction((): LocalDataImportPreview => {
       this.options.advanceRequestDeadlines(now);
-      const currentAccounts = this.selectAll<AccountExportRow>("accounts");
-      const currentContext = this.selectAll<ActiveAccountContextExportRow>("active_account_context");
       return {
         status: "valid",
         format: envelope.format,
@@ -106,14 +101,6 @@ export class SqliteLocalDataService implements LocalDataService {
         currentCounts: this.getDataCountsSync(),
         incomingCounts: countsForPayload(envelope.data),
         willReplace: true,
-        activeAccountChange: activeAccountChange(
-          currentAccounts,
-          currentContext,
-          envelope.data.accounts,
-          envelope.data.activeAccountContext
-        ),
-        currentReadAddress: activeAccountAddress(currentAccounts, currentContext),
-        incomingReadAddress: activeAccountAddress(envelope.data.accounts, envelope.data.activeAccountContext),
         restartRequiredAfterImport: true,
       };
     }).immediate();
@@ -140,7 +127,6 @@ export class SqliteLocalDataService implements LocalDataService {
     this.resetLocalDataTables(preserveCardId);
     if (envelope) {
       this.insertAccounts(envelope.data.accounts);
-      this.insertActiveAccountContext(envelope.data.activeAccountContext);
       this.insertReviewSessions(envelope.data.reviewSessions);
       this.insertReviewStateSnapshots(envelope.data.reviewStateSnapshots);
       this.insertReviewRequests(envelope.data.reviewRequests);
@@ -172,6 +158,7 @@ export class SqliteLocalDataService implements LocalDataService {
       this.db.prepare("DELETE FROM live_read_cards WHERE id!=?").run(preserveCardId);
     }
     else this.db.prepare("DELETE FROM live_read_cards").run();
+    this.db.prepare("DELETE FROM wallet_connection_operations WHERE sdk_pending=0 AND status!='running' AND card_id NOT IN (SELECT id FROM live_read_cards)").run();
     for (const table of [
       "live_execution_details",
       "live_request_authority",
@@ -186,7 +173,6 @@ export class SqliteLocalDataService implements LocalDataService {
       "review_requests",
       "review_sessions",
       "coin_metadata_cache",
-      "active_account_context",
       "accounts",
       "local_settings"
     ]) {
@@ -202,6 +188,7 @@ export class SqliteLocalDataService implements LocalDataService {
     );
     statement.run("suiGrpcUrl", JSON.stringify(parseGrpcUrl(this.options.suiGrpcUrl)), now.toISOString());
     statement.run("suiGraphqlUrl", JSON.stringify(parseGraphqlUrl(this.options.suiGraphqlUrl)), now.toISOString());
+    statement.run("walletConnectionChains", JSON.stringify(DEFAULT_WALLET_CHAINS), now.toISOString());
   }
 
   getDataCountsSync(): LocalDataCounts {
@@ -228,23 +215,9 @@ export class SqliteLocalDataService implements LocalDataService {
   }
 
   private insertAccounts(rows: AccountExportRow[]): void {
-    const statement = this.db.prepare(
-      `INSERT INTO accounts (id, sui_address, first_seen_at, last_used_at, first_source, last_source)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    );
-    for (const row of rows) {
-      statement.run(row.id, row.sui_address, row.first_seen_at, row.last_used_at, row.first_source, row.last_source);
-    }
-  }
-
-  private insertActiveAccountContext(rows: ActiveAccountContextExportRow[]): void {
-    const statement = this.db.prepare(
-      `INSERT INTO active_account_context (id, account_id, source, set_at, wallet_name, wallet_id)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    );
-    for (const row of rows) {
-      statement.run(row.id, row.account_id, row.source, row.set_at, row.wallet_name ?? null, row.wallet_id ?? null);
-    }
+    const statement = this.db.prepare(`INSERT INTO accounts (id,chain_id,address,first_seen_at,last_used_at,first_source,last_source)
+      VALUES (?,?,?,?,?,?,?)`);
+    for (const row of rows) statement.run(row.id,row.chain_id,row.address,row.first_seen_at,row.last_used_at,row.first_source,row.last_source);
   }
 
   private insertReviewSessions(rows: ReviewSessionExportRow[]): void {

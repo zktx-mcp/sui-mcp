@@ -14,7 +14,7 @@ import { CardError } from "../core/session/cardSessionStore.js";
 import { resolveExplicitOrActiveAccount } from "../mcp/tools/read/readToolHelpers.js";
 import type { CardResponse } from "../core/session/cardSession.js";
 import { CARD_METADATA_KEY, CARD_DISPLAY_METADATA_KEY, WALLET_DISPLAY_METADATA_KEY, SETTINGS_FILE_METADATA_KEY, CARD_RESOURCE_PREFIX, CARD_RESOURCE_URIS, CARD_TOOLS,
-  cardReceiptDisplaySchema, cardWalletDisplaySchema, cardReferenceSchema,
+  cardReceiptDisplaySchema, cardWalletDisplaySchema, cardReferenceSchema, cardReadReferenceSchema,
   cardSubmissionSchema, cardInputRequiredSchema } from "./contracts.js";
 
 const cardActionSchema = cardReferenceSchema.extend({ revision: z.number().int().nonnegative().safe(), input: z.union([workflowActionSchema, settingsActionSchema]) }).strict();
@@ -52,7 +52,7 @@ export function cardToolResult(response: CardResponse, savedLink = false): CallT
 }
 
 export async function createWorkflowCard(server: McpServer, deps: Pick<McpServerDeps, "cards">,
-  kind: "connect" | "review" | "settings", input: Record<string, unknown>, gateway?: Record<string, unknown>): Promise<CallToolResult> {
+  kind: "connect" | "disconnect" | "review" | "settings", input: Record<string, unknown>, gateway?: Record<string, unknown>): Promise<CallToolResult> {
   if (!supportsCards(server)) return errorToolResult({ kind: "ui_unavailable", details: { reason: "This MCP client does not provide an internal card." } });
   if (!deps.cards) return errorToolResult({ kind: "internal_error", details: { reason: "Card service unavailable." } });
   const created = await deps.cards.store.create(kind, input);
@@ -108,7 +108,7 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
   }, (input) => create("chart", input));
 
   const actions = [
-    { name: CARD_TOOLS.read, schema: cardReferenceSchema, run: (input: unknown) => deps.cards!.store.read(cardReferenceSchema.parse(input)) },
+    { name: CARD_TOOLS.read, schema: cardReadReferenceSchema, run: (input: unknown) => deps.cards!.store.read(cardReadReferenceSchema.parse(input)) },
     { name: CARD_TOOLS.submit, schema: cardSubmissionSchema, run: (input: unknown) => deps.cards!.store.submit(cardSubmissionSchema.parse(input)) },
     { name: CARD_TOOLS.act, schema: cardActionSchema, run: (input: unknown) => deps.cards!.store.act(cardActionSchema.parse(input)) }
   ];
@@ -130,7 +130,7 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
       }
     });
   }
-  const fileInput = cardReferenceSchema.extend({ attemptId: z.string().uuid().optional(), operationId: z.string().uuid(), fileId: z.string().uuid(), offset: z.number().int().nonnegative().safe(),
+  const fileInput = cardReferenceSchema.extend({ attemptId: z.string().uuid(), operationId: z.string().uuid(), fileId: z.string().uuid(), offset: z.number().int().nonnegative().safe(),
     limit: z.number().int().positive().safe().optional() }).strict();
   registerAppTool(server, CARD_TOOLS.readSettingsFile, { description: "Read a verified backup file for its current download attempt.", inputSchema: fileInput,
     _meta: { ui: { visibility: ["app"] } }, annotations: { readOnlyHint: true, openWorldHint: false }
@@ -140,7 +140,7 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
       // Measure the actual response shape, including its text fallback and UI
       // metadata. Reserve maximum safe-integer digit widths for size fields.
       const base = okToolResult({ status: "read", fileId: input.fileId, offset: input.offset, rangeSize: Number.MAX_SAFE_INTEGER });
-      const metadata = { ...(input.attemptId ? { attemptId: input.attemptId } : {}), cardId: input.cardId, operationId: input.operationId, fileId: input.fileId, offset: input.offset, totalSize: Number.MAX_SAFE_INTEGER,
+      const metadata = { attemptId: input.attemptId, cardId: input.cardId, operationId: input.operationId, fileId: input.fileId, offset: input.offset, totalSize: Number.MAX_SAFE_INTEGER,
         sha256: "0".repeat(64), chunkBase64: "" };
       base._meta = { [SETTINGS_FILE_METADATA_KEY]: metadata };
       const budget = settingsRawChunkBudget({ jsonrpc: "2.0", id: extra.mcpReq.id, result: base });

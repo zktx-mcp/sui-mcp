@@ -1,3 +1,4 @@
+import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -134,14 +135,14 @@ function createIncompatibleExternalActivityTables(
     PRAGMA foreign_keys=OFF;
     CREATE TABLE accounts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sui_address TEXT NOT NULL UNIQUE,
+      address TEXT NOT NULL UNIQUE,
       first_seen_at TEXT NOT NULL,
       last_used_at TEXT NOT NULL,
       first_source TEXT NOT NULL CHECK (first_source IN ('wallet_connection', 'review_execution')),
       last_source TEXT NOT NULL CHECK (last_source IN ('wallet_connection', 'review_execution'))
     );
     INSERT INTO accounts
-      (id, sui_address, first_seen_at, last_used_at, first_source, last_source)
+      (id, address, first_seen_at, last_used_at, first_source, last_source)
     VALUES
       (1, '${walletAccount}', '2026-05-11T00:00:00.000Z', '2026-05-11T00:00:00.000Z', 'wallet_connection', 'wallet_connection');
 
@@ -324,7 +325,7 @@ describe("SqliteActivityStore", () => {
         expect(tables).toEqual(
           expect.arrayContaining([
             "accounts",
-            "active_account_context",
+            "live_wallet_connections",
             "review_sessions",
             "review_state_snapshots",
             "review_status_transitions",
@@ -553,7 +554,7 @@ describe("SqliteActivityStore", () => {
 
   it("records bounded external activity only for known accounts and deduplicates transactions", async () => {
     await withTempDb(async (store) => {
-      const active = await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await expect(
         store.recordExternalActivityScan({
           scanId: "unknown_account_scan",
@@ -683,7 +684,7 @@ describe("SqliteActivityStore", () => {
 
   it("summarizes stored external activity over the full scope and orders checkpoints numerically", async () => {
     await withTempDb(async (store) => {
-      const active = await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await store.recordExternalActivityScan({
         scanId: "scan_summary_scope",
         kind: "account_scan",
@@ -736,7 +737,7 @@ describe("SqliteActivityStore", () => {
 
   it("reports no stored external activity coverage for a known account with no scans", async () => {
     await withCoverageStores(async (store) => {
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
 
       await expect(
         store.getExternalActivityCoverage({
@@ -757,7 +758,7 @@ describe("SqliteActivityStore", () => {
 
   it("treats an enclosing complete affected-account scan as complete coverage even when it found no transactions", async () => {
     await withCoverageStores(async (store) => {
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await store.recordExternalActivityScan({
         scanId: "scan_empty_complete",
         kind: "account_scan",
@@ -796,7 +797,7 @@ describe("SqliteActivityStore", () => {
 
   it("keeps sent-only and incomplete scans as partial coverage while still reporting stored transactions", async () => {
     await withCoverageStores(async (store) => {
-      const active = await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await store.recordExternalActivityScan({
         scanId: "scan_sent_only",
         kind: "account_scan",
@@ -870,7 +871,7 @@ describe("SqliteActivityStore", () => {
 
   it("does not double-count a repeated stored digest when reporting coverage transaction count", async () => {
     await withCoverageStores(async (store) => {
-      const active = await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       const repeatedDigest = "b".repeat(44);
       const scanBase = {
         kind: "account_scan" as const,
@@ -940,7 +941,7 @@ describe("SqliteActivityStore", () => {
 
   it("returns canonical half-open effect transactions for account timelines", async () => {
     await withCoverageStores(async (store) => {
-      const active = await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       const sharedDigest = "c".repeat(44);
       const endBoundaryDigest = "d".repeat(44);
       const scanBase = {
@@ -1040,7 +1041,7 @@ describe("SqliteActivityStore", () => {
 
   it("rejects forbidden external activity fields before local DB write", async () => {
     await withTempDb(async (store) => {
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
 
       await expect(
         store.recordExternalActivityScan({
@@ -1076,7 +1077,7 @@ describe("SqliteActivityStore", () => {
 
   it("rejects malformed and oversized external activity details before local DB write", async () => {
     await withTempDb(async (store) => {
-      const active = await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       const baseTransaction = {
         digest: "7".repeat(44),
         relationship: "sent" as const,
@@ -1274,7 +1275,7 @@ describe("SqliteActivityStore", () => {
             reviewRequests: 0,
             externalActivityScans: 1,
             externalActivityTransactions: 1,
-            localSettings: 2
+            localSettings: 3
           },
           willReplace: true,
           restartRequiredAfterImport: true
@@ -1351,7 +1352,7 @@ describe("SqliteActivityStore", () => {
         suiGrpcUrl: "https://fullnode.mainnet.sui.io:443",
         suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql"
       });
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date(0));
+      await seedCurrentReadAccount(store, walletAccount, new Date(0));
       const exported = await store
         .createLocalDataService(localDataOptions())
         .exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
@@ -1394,24 +1395,20 @@ describe("SqliteActivityStore", () => {
     });
   });
 
-  it("previews active account changes by Sui address across replace-only imports", async () => {
-    await withTempDb(async (source) => {
-      await source.createPreferencesRepository().ensureDefaultLocalSettings({ suiGrpcUrl: "https://fullnode.mainnet.sui.io:443", suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql" });
-      await source.setActiveAccount(otherWalletAccount, "wallet_connection", new Date(0));
-      const sourceLocalData = source.createLocalDataService(localDataOptions());
-      const exported = await sourceLocalData.exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
-
-      await withTempDb(async (target) => {
-        await target.createPreferencesRepository().ensureDefaultLocalSettings({ suiGrpcUrl: "https://fullnode.mainnet.sui.io:443", suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql" });
-        await target.setActiveAccount(walletAccount, "wallet_connection", new Date(0));
-        const targetLocalData = target.createLocalDataService(localDataOptions());
-
-        await expect(targetLocalData.previewImportLocalData(exported)).resolves.toMatchObject({
-          activeAccountChange: "set"
-        });
-      });
+  it("previews address history counts without inventing active connection changes", async () => {
+  await withTempDb(async (source) => {
+    await source.createPreferencesRepository().ensureDefaultLocalSettings({ suiGrpcUrl: "https://fullnode.mainnet.sui.io:443", suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql" });
+    await seedCurrentReadAccount(source, otherWalletAccount, new Date(0));
+    const exported = await source.createLocalDataService(localDataOptions()).exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
+    await withTempDb(async (target) => {
+      await seedCurrentReadAccount(target, walletAccount, new Date(0));
+      const preview = await target.createLocalDataService(localDataOptions()).previewImportLocalData(exported);
+      expect(preview.currentCounts.accounts).toBe(1); expect(preview.incomingCounts.accounts).toBe(1);
+      expect(preview).not.toHaveProperty("accountContextChanges");
+      expect(await target.getActiveAccount()).toMatchObject({ address: walletAccount });
     });
   });
+});
 
   it("rejects old or incomplete backups without filling fields or replacing current settings", async () => {
     await withTempDb(async (source) => {
@@ -1419,7 +1416,7 @@ describe("SqliteActivityStore", () => {
         suiGrpcUrl: "https://fullnode.mainnet.sui.io:443",
         suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql"
       });
-      await source.setActiveAccount(walletAccount, "wallet_connection", new Date(0));
+      await seedCurrentReadAccount(source, walletAccount, new Date(0));
       const exported = await source.createLocalDataService(localDataOptions()).exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
       const legacyData = {
         ...exported.data,
@@ -1454,7 +1451,7 @@ describe("SqliteActivityStore", () => {
   it("rolls back invalid local data imports before replacing existing data", async () => {
     await withTempDb(async (store) => {
       await store.createPreferencesRepository().ensureDefaultLocalSettings({ suiGrpcUrl: "https://fullnode.mainnet.sui.io:443", suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql" });
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date(0));
+      await seedCurrentReadAccount(store, walletAccount, new Date(0));
       const service = store.createLocalDataService(localDataOptions());
       const exported = await service.exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
       const invalid = {
@@ -1484,7 +1481,7 @@ describe("SqliteActivityStore", () => {
   it("does not contact imported Sui gRPC endpoints while previewing local data", async () => {
     await withTempDb(async (store) => {
       await store.createPreferencesRepository().ensureDefaultLocalSettings({ suiGrpcUrl: "https://fullnode.mainnet.sui.io:443", suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql" });
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date(0));
+      await seedCurrentReadAccount(store, walletAccount, new Date(0));
       const exported = await store
         .createLocalDataService(localDataOptions())
         .exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
@@ -1543,7 +1540,7 @@ describe("SqliteActivityStore", () => {
         createdAtSeconds: 1,
         state: "blocked"
       });
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date(10));
+      await seedCurrentReadAccount(store, walletAccount, new Date(10));
       const service = store.createLocalDataService(localDataOptions());
       const exported = await service.exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
 
@@ -1552,7 +1549,7 @@ describe("SqliteActivityStore", () => {
           ...exported,
           data: {
             ...exported.data,
-            accounts: [{ ...exported.data.accounts[0], sui_address: "not-an-address" }]
+            accounts: [{ ...exported.data.accounts[0], address: "not-an-address" }]
           }
         })
       ).rejects.toMatchObject({ kind: "input_invalid" });
@@ -1577,7 +1574,7 @@ describe("SqliteActivityStore", () => {
         suiGrpcUrl: "https://fullnode.mainnet.sui.io:443",
         suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql"
       });
-      const active = await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await store.recordExternalActivityScan({
         scanId: "scan_payload_reject",
         kind: "digest_lookup",
@@ -1625,7 +1622,7 @@ describe("SqliteActivityStore", () => {
         suiGrpcUrl: "https://fullnode.mainnet.sui.io:443",
         suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql"
       });
-      const active = await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await store.recordExternalActivityScan({
         scanId: "scan_detail_shape_reject",
         kind: "digest_lookup",
@@ -1849,16 +1846,16 @@ describe("SqliteActivityStore", () => {
     });
   });
 
-  it("sets, replaces, and clears active account read context", async () => {
+  it("projects the current connection read address and honors Settings clearing", async () => {
     await withTempDb(async (store) => {
-      const first = await store.setActiveAccount(walletAccount.toUpperCase(), "wallet_connection", new Date(0));
+      const first = await seedCurrentReadAccount(store, walletAccount.toUpperCase(), new Date(0));
       expect(first).toMatchObject({
         address: walletAccount,
         source: "wallet_connection",
         setAt: new Date(0).toISOString()
       });
 
-      const second = await store.setActiveAccount(otherWalletAccount, "wallet_connection", new Date(1));
+      const second = await seedCurrentReadAccount(store, otherWalletAccount, new Date(1));
       expect(second.address).toBe(otherWalletAccount);
       expect(await store.getActiveAccount()).toMatchObject({
         accountId: second.accountId,
@@ -1866,7 +1863,8 @@ describe("SqliteActivityStore", () => {
         setAt: new Date(1).toISOString()
       });
 
-      await store.clearActiveAccount(new Date(2));
+      const target = await store.getActiveAccount();
+      store.createSettingsWorkflowStore("read-fixture").clearReadAddress(target!.connectionId!, target!.address);
       expect(await store.getActiveAccount()).toBeUndefined();
     });
   });
@@ -1890,31 +1888,15 @@ describe("SqliteActivityStore", () => {
     });
   });
 
-  it("rejects inconsistent active account context rows", async () => {
+  it("enforces the singleton connection slot and the read-address suppression flag", async () => {
     await withTempDb(async (store, dbPath) => {
-      const account = await store.upsertAccount(walletAccount, "wallet_connection", new Date(0));
+      await seedCurrentReadAccount(store, walletAccount, new Date(0));
       const db = new Database(dbPath);
       try {
-        db.exec("PRAGMA foreign_keys=ON");
-        expect(() =>
-          db
-            .prepare(
-              `INSERT INTO active_account_context (id, account_id, source, set_at)
-               VALUES (1, ?, 'cleared', '2026-05-11T00:00:00.000Z')`
-            )
-            .run(account.id)
-        ).toThrow();
-        expect(() =>
-          db
-            .prepare(
-              `INSERT INTO active_account_context (id, account_id, source, set_at)
-               VALUES (1, NULL, 'wallet_connection', '2026-05-11T00:00:00.000Z')`
-            )
-            .run()
-        ).toThrow();
-      } finally {
-        db.close();
-      }
+        expect(() => db.prepare("UPDATE live_wallet_connections SET current_slot=2").run()).toThrow(/CHECK constraint/);
+        expect(() => db.prepare("UPDATE live_wallet_connections SET read_address_cleared=2").run()).toThrow(/CHECK constraint/);
+        expect(await store.getActiveAccount()).toMatchObject({ address: walletAccount });
+      } finally { db.close(); }
     });
   });
 
@@ -2067,7 +2049,7 @@ describe("SqliteActivityStore", () => {
 
   it("lists review activity with active fallback, explicit filters, inclusive ranges, and stable sorting", async () => {
     await withTempDb(async (store) => {
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date(0));
+      await seedCurrentReadAccount(store, walletAccount, new Date(0));
       await recordConnectedReview(store, {
         reviewSessionId: "review_old",
         planId: "plan_old",
@@ -2160,7 +2142,7 @@ describe("SqliteActivityStore", () => {
 
   it("summarizes review funnel counts and timing from transition evidence", async () => {
     await withTempDb(async (store) => {
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date(0));
+      await seedCurrentReadAccount(store, walletAccount, new Date(0));
       await recordConnectedReview(store, {
         reviewSessionId: "review_success",
         planId: "plan_success",
@@ -2224,7 +2206,7 @@ describe("SqliteActivityStore", () => {
 
   it("returns scoped review session detail with capped append-only evidence", async () => {
     await withTempDb(async (store) => {
-      await store.setActiveAccount(walletAccount, "wallet_connection", new Date(0));
+      await seedCurrentReadAccount(store, walletAccount, new Date(0));
       await recordConnectedReview(store, {
         reviewSessionId: "review_detail",
         planId: "plan_detail",
@@ -2291,7 +2273,7 @@ describe("SqliteActivityStore", () => {
     for (const testCase of cases) {
       await withTempDb(async (store, dbPath) => {
         const reviewSessionId = `review_bad_json_${testCase.name.replaceAll(/[^a-z]+/g, "_")}`;
-        await store.setActiveAccount(walletAccount, "wallet_connection", new Date(0));
+        await seedCurrentReadAccount(store, walletAccount, new Date(0));
         await recordConnectedReview(store, {
           reviewSessionId,
           planId: `plan_${reviewSessionId}`,
@@ -2462,7 +2444,7 @@ it("rejects a previous-package backup without replacing current data", async () 
       suiGrpcUrl: "https://fullnode.mainnet.sui.io:443",
       suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql"
     });
-    await store.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const localData = store.createLocalDataService(localDataOptions());
     const at = new Date("2026-05-11T00:00:00.000Z");
     const exported = await localData.exportLocalData(at);

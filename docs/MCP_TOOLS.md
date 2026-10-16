@@ -68,7 +68,7 @@ Read-only tools split by address requirement.
 
 Address-free reads do not need wallet connection. Examples include DeepBook pool lists, orderbook snapshots, mid price, and quote facts.
 
-Current asset reads need either an explicit public Sui address supplied by the user or a selected account with a usable current wallet connection. Stored activity and transaction-result reads retain their own read-context rules.
+Current asset reads need either an explicit public Sui address supplied by the user or the saved Sui read address with a usable current wallet connection. Stored activity and transaction-result reads retain their own read-context rules.
 
 An explicit public-address read does not prove ownership, create active account context, or authorize active-account-only tools.
 
@@ -166,13 +166,13 @@ Internal read cards are opened with `ui_open_account`, `ui_open_receipt`, and `u
 
 | Tool | Input and result |
 | --- | --- |
-| `ui_open_account` | Optional explicit Sui address; otherwise use the selected read account only when its wallet connection is currently usable. Missing input returns `input_required` with no card or source query. Shows name, address, coin totals, Display NFTs, other-object count, fetched time and enumeration limits; no address form. |
+| `ui_open_account` | Optional explicit Sui address; otherwise use the saved Sui read address only when its wallet connection is currently usable. Missing input returns `input_required` with no card or source query. Shows name, address, coin totals, Display NFTs, other-object count, fetched time and enumeration limits; no address form. |
 | `ui_open_receipt` | A transaction digest is required for a query. Omission returns `input_required` with no card or source query. The result view shows execution outcome, balance changes, net gas, sender, digest and fetched time; no hash form. No wallet or active account is needed. Normalized receipt evidence and private display metadata remain available under their existing boundaries. |
 | `ui_open_chart` | Optional `poolName`, official Indexer interval, UTC `startTimeMs`/`endTimeMs`, and candle `limit`. Shows one selected USDC pool as candlesticks and volume. Range shortcuts fill these query fields. The initial time axis uses the saved request boundaries, with price-free whitespace at boundaries without candles; omitted boundaries use the returned data. |
 
 A missing Account/Receipt target returns `data: { kind, status: "input_required", field, message }`, with no permission, card ID, saved resource or query. A host-rendered view shows the message without input controls or polling. Other errors remain errors.
 
-A successful card-creating response contains a `cardId`, `kind`, `state`, `revision`, timestamps, original `input`, and available `data`. `inputRemainingMs` is computed by the backend; `pollAfterMs` controls sequential observation of a running read. Card `ready` permits a read selection, not signing or payment readiness. An initial supplied input uses the same admission path as a form submission. DB states are `ready`, `running`, and `closed`, with terminal reasons `completed`, `expired`, `failed`, or `server_restarted`.
+A successful card-creating response contains a `cardId`, `kind`, `state`, `revision`, timestamps, original `input`, and available `data`. `inputRemainingMs` is computed by the backend; `pollAfterMs` controls sequential observation of a running read. Card `ready` permits a read selection, not signing or payment readiness. An initial supplied input uses the same admission path as a form submission. DB states are `ready`, `running`, and `closed`, with terminal reasons `completed`, `expired`, `failed`, `server_restarted`, or `cancelled`.
 
 When Chart pool choices cannot be prepared, the backend creates a `closed`/`failed` card with a readable error. No selection is admitted and no candles are requested. Reading that card again returns the stored failure; retrying the source requires an explicit request for a new card. A database access or write failure is a tool error, not a successfully stored failure card.
 
@@ -210,8 +210,8 @@ current instruction or proof that a cancellation succeeded.
 A failed Request delivery never triggers a repeated signature request. Same-card
 reads still follow the existing expiry hints; a confirmed unadmitted stale review
 may prepare new conditions, which require a new Request click. Failed initial
-preparation can be retried for the displayed current wallet/account after another
-state check. A delayed action response does not clear an intervening read failure:
+preparation can be retried for the Review's original wallet/account after another
+state check, while that exact connection remains usable. A delayed action response does not clear an intervening read failure:
 the card retains explicit state-read recovery until a current read succeeds.
 
 Overlapping successful responses for the same card may arrive out of order.
@@ -219,7 +219,7 @@ A lower revision does not replace displayed facts or create a read error, and
 required observations continue from the retained current state. Equal revisions
 are validated rather than discarded. Actual error responses remain failures.
 
-An unconfirmed Cancel review, wallet disconnection, account selection or stop
+An unconfirmed Cancel review, wallet disconnection or stop
 request retains its error and pauses new automatic preparation/pairing in that
 View. State reads still report already admitted work. Existing permitted actions
 can be retried explicitly. An unconfirmed Cancel review followed by expired
@@ -231,12 +231,12 @@ pause does not claim that the backend or other frames stopped; new frames use
 the actual saved state.
 
 Connect eligibility and its SQLite admission use the same current-owner
-connection set. An unexpired connected wallet, pending approval or pending disconnection
+connection and SDK observation. An unexpired connected wallet, pending approval or pending disconnection
 removes `connect` from `allowedActions` and prevents a second pairing even when
 different cards race with current revisions. The losing card gets the existing
-conflict response and its own snapshot, without another card's private QR or
-permission. Later availability requires an explicit Retry for that failed
-attempt; a saved-state read does not repeat it.
+fixed no-request result, without another card's private QR or permission. It ends
+without pairing; later availability requires a new prompted Connect card. A saved
+result read cannot reopen it.
 
 Failed attempts whose exact target or command authority has ended are shown as
 earlier attempts, without a command retry or a saved-read button solely for that
@@ -244,11 +244,13 @@ old failure. The current stored result remains authoritative; natural completion
 is not proof that an earlier stop was accepted. This includes failed automatic
 connection/preparation and an unadmitted Request when its card or review expires.
 Card action expiry does not end an already admitted request or result lookup.
-For unadmitted disconnection or account selection, the exact target in
-`connections` can establish that the earlier attempt has ended even while the
-card input remains available. An account returning later does not revive that
-attempt or clear its local automatic pause; the user can make a new selection.
-If an unknown result needs another lookup after the card's action period, request
+For an unadmitted disconnection, compare the attempted connection ID with the
+current `connection` and confirmed SDK facts. A replacement connection cannot
+be the target of that earlier attempt. Missing or unavailable observations alone
+do not establish termination. A later state change does not revive the attempt
+or clear its local automatic pause. A dedicated Disconnect card remains limited
+to its original connection; a new purpose card is required for an operation on the current connection.
+Once a result card has ended, request another lookup when needed through
 `session_open_review_management` with the same `reviewSessionId` and `attemptId`.
 It adds no signing authority and does not repeat the transaction.
 
@@ -258,7 +260,7 @@ an actual read failure instead requires explicit recovery. A valid current read
 also clears an identified card's earlier opening-projection error. Neither path
 repairs malformed permissions or changes the card's target.
 
-Review displays one current wallet candidate without a dropdown. Its current authenticated View executes the backend-projected `automaticAction` to prepare or renew stale verified conditions. Multiple valid connections block preparation and signing until the user resolves them with targeted Disconnect actions. A failed computation requires explicit retry. `review_evidence_stale` distinguishes invalidated verified material from a failed quote/computation. Only Request wallet approval authorizes a signature request for the displayed revision. Result cards show the correct PTB, actual chain facts and one Details slide; Review keeps earlier estimates in its Reviewed conditions section.
+Review displays its exact account and wallet connection without a dropdown. Its current authenticated View executes the backend-projected `automaticAction` to prepare or renew stale verified conditions. A new Review uses the one current fixed Sui account and connection. Its public input has no account/connection selector. Disconnecting requires a new Review for the replacement connection. A failed computation requires explicit retry. `review_evidence_stale` distinguishes invalidated verified material from a failed quote/computation. Only Request wallet approval authorizes a signature request for the displayed revision. Result cards show the correct PTB, actual chain facts and one Details slide; Review keeps earlier estimates in its Reviewed conditions section.
 
 Cards provide no clipboard actions or copy buttons. Their text remains readable and selectable. Chart values remain USDC-denominated source candles, not fiat USD, peg guarantees, route advice, portfolio valuation or P&L. Cards do not fetch chain/Indexer endpoints directly or poll completed results.
 
@@ -310,7 +312,7 @@ This quote is not a settlement asset choice.
 
 ### DeepBook account inventory
 
-`read_summarize_deepbook_account_inventory` uses the selected account only when its current wallet connection is usable, to discover DeepBook BalanceManager addresses. It has no explicit public-address input. Without a usable default, a missing selection returns `active_account_not_set`, and a stored but ineligible selection returns `input_invalid`; both carry `details.reason: "connected_account_required"` and `details.followUp` naming `session_get_interaction_status` and its connection/availability/pending/default-account fields. These responses do not request an address. Unavailable wallet operations return `wallet_unavailable` with the existing safe reason and recovery message.
+`read_summarize_deepbook_account_inventory` uses the saved Sui read address only when its current wallet connection is usable, to discover DeepBook BalanceManager addresses. It has no explicit public-address input. A missing or cleared read address returns `active_account_not_set`; a stored but ineligible address returns `input_invalid`. Both carry `details.reason: "connected_account_required"` and `details.followUp` naming `session_get_interaction_status` and its wallet availability, current connection, pending operations and `assetReadAccount`. A cleared read address is reported separately from disconnection and cannot be bypassed with a typed address. These responses do not request an address. Unavailable wallet operations return `wallet_unavailable` with the existing safe reason and recovery message.
 
 With both `poolKey` and `managerAddress`, it checks pool account existence and returns display-like account inventory:
 
@@ -334,7 +336,7 @@ They are not raw balances, route liquidity, funding sources, withdrawal readines
 
 `read_summarize_wallet_assets` accepts an optional `account` input for public-address coin balance snapshots.
 
-When `account` is omitted, it uses the same connection-qualified default as `session_get_interaction_status.assetReadAccount`. No stored selection returns `active_account_not_set` with `details.action: "provide_account"`; a stored but ineligible selection returns `input_invalid` with `details.reason: "address_required"`. Both request an explicit address. SDK unavailability is not reported as absence of a stored account.
+When `account` is omitted, it uses the same connection-qualified read address as `session_get_interaction_status.assetReadAccount`. A missing or cleared read address returns `active_account_not_set` with `details.action: "provide_account"`; a stored but ineligible address returns `input_invalid` with `details.reason: "address_required"`. Both request an explicit address. SDK unavailability is not reported as absence of a stored account.
 
 An explicit `account` read does not prove ownership, store the address as a known wallet, or create active account context.
 
@@ -404,7 +406,7 @@ Use it this way:
 
 - Coverage question: `intentKind: "cover_payment_like_amount"`, `denomination: "dollar"`, and `requiredDisplayAmount: "1000"`.
 - AssetGroup-total question: `intentKind: "summarize_settlement_asset_group_balance"` and `denomination: "dollar"` without a target amount.
-- Account scope: explicit public `account` or a selected account with a usable current wallet connection.
+- Account scope: explicit public `account` or the saved Sui read address with a usable current wallet connection.
 
 For settlement-asset-only coverage, shortfall, and balance-total answers, use `responseSummary`.
 
@@ -452,7 +454,7 @@ Review activity tools read only local Sui MCP review evidence.
 
 They are not complete wallet transaction history, gas history, P&L, or external wallet activity.
 
-The optional `account` input is a read filter and does not change the active account context. If `account` is omitted, the tools use the active account context.
+The optional `account` input is a read filter and does not change the saved read address. If `account` is omitted, the tools use stored read context without requiring a live wallet. If that context is absent or cleared, they return `active_account_not_set` with `details.action: "provide_account"`. Supply an explicit Sui address for the read; this error does not establish that the wallet is disconnected.
 
 Successful review activity responses include `dataScope`, `accountSource`, `lowSampleWarning`, and `lowSampleThreshold`.
 
@@ -529,8 +531,9 @@ Coverage and pagination boundaries:
 
 Local persistence boundaries:
 
-- The default account is the active account.
-- An explicit account is allowed as a read filter.
+- An omitted account uses the saved read address without a live-wallet requirement.
+- A missing or cleared address returns `active_account_not_set` with `details.action: "provide_account"`; it does not establish wallet disconnection.
+- An explicit account is allowed as a read filter and does not restore implicit context.
 - The local DB stores only normalized facts for transactions tied to a known account by returned sender or balance-change owner facts.
 - Function activity scans store only sender-matching rows for known accounts.
 - Provider-returned account scan rows that cannot prove the local relation can appear in the current response but are counted as skipped for storage.
@@ -686,7 +689,7 @@ If stored or summary details are missing or capped, use the digest metadata with
 
 Inputs:
 
-- `account` is optional. If omitted, the tool uses active account context. Supplying an explicit public account does not create active account context or prove ownership.
+- `account` is optional. If omitted, the tool uses saved Sui read context with `accountSource: "active_account_context"`, without requiring a live wallet. Missing or cleared context returns `active_account_not_set` with `details.action: "provide_account"`; supply an explicit Sui address for this read. That error does not establish wallet disconnection. Supplying an explicit public account does not create saved read context or prove ownership.
 - `start` and `end` are ISO 8601 UTC timestamps. The requested range is half-open: `start` is included and `end` is excluded.
 - `interval` is optional and uses the same official Indexer interval values as DeepBook USDC price tools. Omitted `interval` uses `15m`.
 
@@ -711,14 +714,17 @@ This tool does not run scans, start a background indexer, create a price cache, 
 | `action_start_review` | Internal swap Review card | Creates a local review session and internal Review card for a supported swap action proposal. Account-bound DeepBook reviews may build local unsigned transaction material inside the review server, internally bind a Sui transaction digest to it, and derive object ownership, quote/policy, human-readable review, review-time simulation, and PTB visualization evidence. When every required evidence stage completes, an explicit Review card selection can admit backend-mediated WalletConnect approval for that exact transaction. The MCP tool does not return transaction bytes, signing data, or signing readiness. |
 | `action_create_proposal_review` | Non-signable review | Creates a local review session and internal Review card from an untrusted structured external proposal. It does not return transaction bytes. |
 
-`action_start_review` is account-bound: a swap review computes
-its evidence (balances, transaction material, digest, simulation) for a
-specific sender, so the tool requires an active wallet account. Connect first
-with `session_open_wallet_connection_card`; with no active account the tool returns
-`active_account_not_set` with `details.action: "connect_wallet_connection"`
-instead of creating a proposal that can never be computed or signed. The
-Review card reads that account from the server as the single source of truth
-and never connects a wallet itself.
+`action_start_review` accepts only `intent` and verifies the requested adapter
+before resolving the current connection's fixed Sui address. Public `account` or
+`connectionId` selectors are not accepted. No usable current target returns
+`active_account_not_set` with `details.reason: "connection_required"`. An unexpected
+retained SDK session returns `input_invalid` with
+`details.reason: "connection_state_unconfirmed"`; inspect connection status and
+remove the unwanted session in the wallet app. An unavailable service returns
+`wallet_unavailable`. These errors create no empty Review or wallet effect.
+The accepted account and connection are fixed in the initial card, before
+preparation. Preparation, display and retry retain that same target, including
+when it becomes unavailable or its saved read address is cleared.
 
 `action_start_review` accepts a protocol-neutral swap `intent`
 (`type: "swap"`, `from.symbol`, `from.amount`, `to.symbol`,
@@ -944,28 +950,95 @@ It is not a signing readiness signal. Review-state checks are pre-signing review
 
 | Tool | Input and result |
 | --- | --- |
-| `session_open_wallet_connection_card` | Opens an internal card with `intent: connect`, `disconnect` or `manage` (default). A connect-intent View automatically starts pairing after authenticated state confirmation; manage pairs only after the user chooses Connect wallet. A disconnect-intent card opens confirmation for a unique connected target. Disconnection requires target-specific confirmation and does not revoke onchain permissions. |
-| `session_get_wallet_connection_card` | Reads one `cardId`; public response excludes pairing and permission. |
-| `session_wait_wallet_connection_card` | Waits on one `cardId`, with an optional timeout up to 55 seconds; stops when user input is needed or the admitted connection/disconnection operation ends. |
+| `session_open_wallet_connection_card` | Opens one Connect card with empty input. Authenticated View confirmation admits its one pairing. A current session or unsettled SDK work prevents another pairing. |
+| `session_open_wallet_disconnection_card` | Opens one Disconnect card bound to the exact current manageable session. The user confirms removal or cancels this card. It never starts pairing or targets a replacement session. |
+| `session_get_wallet_connection_card` | Reads one `cardId`, returning `{card, operation, walletAvailability, evaluatedAt}` without UI authority or QR data. `card` is the stored snapshot; `operation` is that card's exact current public journal entry or null before admission. |
+| `session_wait_wallet_connection_card` | Uses `cardId` and an optional timeout up to 55 seconds. Returns the same envelope plus `waitOutcome`, when that exact operation and SDK settlement end, no operation is admitted, service is unavailable, or the bounded wait ends. It accepts no operation selector. |
 | `session_open_review_management` | Opens management for exact `reviewSessionId` + `attemptId`; no refresh or signing authority. |
-| `session_get_interaction_status` | Stored `activeAccount`, current-owner `connections`, `assetReadAccount`, wallet availability, and bounded pending connection/review lists. `assetReadAccount` is `available` with an account only when that selected address has a usable current connection; otherwise `address_required`. Stored `activeAccount` does not prove a live connection. `address_required` reports that no implicit default is available; it does not add an address input to connected-account-only tools. When wallet availability is unavailable, connection rows are last recorded facts, not proof of presence or absence. |
+| `session_get_interaction_status` | Stored `activeAccount`, current `connection`, optional `pendingOperation`, `assetReadAccount`, wallet availability, and bounded pending connection/review lists. `assetReadAccount` is `available` with an account only when the saved Sui read address has a usable current connection; otherwise `address_required`. Stored `activeAccount` does not prove a live connection. `address_required` reports that no implicit default is available; it does not add an address input to connected-account-only tools. When wallet availability is unavailable, connection rows are last recorded facts, not proof of presence or absence. |
 | `session_get_review_status` | Current preparation status, review revision, optional current request and chain execution. |
 | `session_get_execution_result` | Observes the current explicitly referenced attempt and may read its known digest; never submits again. |
 | `session_wait_execution_result` | Bounded wait on the same request, separate from its signing and chain-observation deadlines. |
 
-`pendingWalletConnections.items[].status` is `input_required`,
-`awaiting_approval`, or `disconnect_pending`. The last value describes an
-admitted, running disconnect card, not a new wallet connection state. In card
-workflow data, a connection's optional `pendingAction: "disconnect"` is derived
-from that stored card operation. Its `status` remains the last confirmed
-connection fact. Such a connection is unavailable for a new account selection,
-review or signature request. `observe` remains true while disconnection can be
-observed, and becomes false on completion or unavailable wallet progress.
-While its SDK callback remains pending, unavailable progress preserves the
-operation and its last recorded connection state. Repeating the same selection
-does not send another SDK request.
+`pendingWalletConnections.items[]` identifies each admitted `operationId`, its
+card and connection. Status is `awaiting_approval`, `disconnect_pending` or
+`cleanup_pending`. Unadmitted cards are not pending effects. These statuses
+describe management work, not a new wallet connection state. Interaction status has an optional top-level `pendingOperation` describing the current connection's
+outstanding operation. It contains `operationId`, `action`
+(`connect` or `disconnect`), `status` (`running`, `completed`, `failed` or
+`stopped`) and `settlementPending`. It is derived from that connection's existing
+operation when it is running or still has pending SDK work; it is not another
+operation or authorization. Connection `status` remains the last confirmed
+connection fact. Pending work makes that connection unavailable for a new review
+or signature request. `observe` follows the operation's remaining progress and
+wallet availability. SDK settlement remains observable through get/wait independently of the immutable
+terminal card result. Unavailable progress preserves the operation and its last
+recorded connection state. Repeating the same selection does not send another
+SDK request.
 
-`session_get_interaction_status` reconciles stored connections against current SDK sessions before reading dependent review/request facts. This can record a connection change and invalidate a review or interrupt an unsubmitted request under the existing rules. It preserves the stored account selection and submitted chain results; it does not start pairing, SDK disconnect, signing or submission.
+Match `pendingOperation.operationId` to the one operation fixed to that card,
+rather than inferring ownership from the action name. Closed card data is a
+recorded snapshot; the get/wait envelope's `operation` reports current settlement.
+A running disconnect is disconnecting; a completed disconnect is disconnected
+with any outstanding cleanup reported separately. It is not another connection
+request, and pending cleanup does not turn completion into failure or reopen a
+cancelled card.
+
+`connection.sessionPresence` reports whether the current connection has an SDK
+session: `present`, `absent`, `unusable`, or `unconfirmed`. Absence includes an
+exact current-session absence observation or a settled attempt without an approved
+session or recorded session reference. The latter requires confirmed current-run
+ownership, no pending connection work and no unrecorded SDK session. A missing
+observation for a recorded session is not absence. Unavailable service or an
+unconfirmed current-run observation is `unconfirmed`, never evidence of absence.
+This field does not change the saved connection status or grant input authority.
+A failed or expired connection may still need explicit disconnection. Once
+absence is confirmed and cleanup ends, the user can request a new Connect card.
+An ended card never offers a new connection. An existing Review bound to the ended connection requires a new Review
+after reconnection. A declined connection alone does not require a transaction
+Review. Stored connection messages in Details are historical facts, not current
+recovery instructions.
+
+Live card data is purpose-specific. Connect includes fixed `requestedChains`,
+its optional `operation` and permitted initial `automaticAction`. Disconnect
+includes its exact `connection` confirmation and optional `operation`. Review
+includes `review`, `reviewTarget`, optional exact `request`/receipt facts, and
+permitted preparation action. All expose `allowedActions`, progress, service
+availability and `nextStep` (`kind`, optional safe `message`/`reason`). This is
+advisory guidance, never authorization. Read-address overview and current
+`pendingOperation` belong to interaction status, not the live card payloads.
+
+| `nextStep.kind` | Meaning |
+| --- | --- |
+| `none` | No additional business recovery step is required by this evaluation. |
+| `wait` | Service startup or existing wallet/account work must finish before continuing. |
+| `check_status` | Read the indicated existing request or session; no new wallet effect is authorized. |
+| `open_settings` | Open the named Settings section for configuration or explicit service recovery. |
+| `request_disconnect` | Ask for a new exact-target Disconnect card before changing the connection. |
+| `request_review` | Ask for a new transaction Review; the old target cannot be replaced. |
+
+The backend's message identifies the applicable condition. A saved preparation
+error does not override this guidance. Reasons such as `operation_busy`,
+`connection_state_unconfirmed`, `connection_target_changed`,
+`wallet_networks_required` and `no_session_to_disconnect` describe the particular
+refusal; they grant no input or effect authority. Service `initializing` and
+`recovering` mean wait, not another restart request.
+
+A closed wallet card has no operation copy. Optional `result.pendingWork` records
+`approval_response`, `session_removal` or `session_status` at closure. Normal
+success does not create a recovery obligation from callback bookkeeping.
+Exact-operation get/wait still reports current `settlementPending`, including
+failed bookkeeping writes, without changing the card or replaying effects.
+A Connect card that sends no request has no network approval result or wallet
+name copied from another connection.
+
+Every Connect and Disconnect terminal snapshot is address-free from the moment
+it is recorded: no address, account, address-bearing chain states or QR payload
+is included. Its result, recorded time, wallet name and network approval statuses
+stay fixed. Current `connection.chainResults` belong to interaction status;
+stored history and transaction targets keep their exact addresses.
+
+`session_get_interaction_status` reconciles stored connections against current SDK sessions before reading dependent review/request facts. This can record a connection change and invalidate a review or interrupt an unsubmitted request under the existing rules. It preserves fixed addresses, read-address suppression and submitted chain results; it does not start pairing, SDK disconnect, signing or submission.
 
 When a disconnect callback ended but its completion write failed, current reads
 reconcile that stored operation without another SDK disconnect. If the SDK is
@@ -999,8 +1072,9 @@ neither a completed result nor a wait timeout. A command already committed
 before its response fails remains recorded and is recovered by reading it.
 
 Wallet startup and restoration are asynchronous dependencies of the parent
-service. Connect/manage cards remain available during initialization or failure
-so the user can inspect state. They do not provide service-restart input. Ordinary evidence
+service. Connect can explain service initialization or failure; Disconnect
+creation instead returns its applicable availability error without issuing a
+card. Neither card provides service-restart input. Ordinary evidence
 and saved-result reads do not await the SDK. The package supplies its project
 identifier; these failures do not ask the user for a project ID. SDK error bodies
 and private configuration values are not returned.
@@ -1013,19 +1087,16 @@ Review status is preparation state (`proposed`, `awaiting_wallet`,
 otherwise the preparation state. The `user_action_required` category and
 `pollingHint.userActionRequiredStatuses` identify states where the model-facing
 wait returns; they do not require a manual preparation click. A permitted live
-card can prepare automatically, while an ambiguous selection or failed update
-can require user input. Preparation is not an already pending wallet signature.
+card can prepare automatically, while a failed update
+can require an explicit retry. Preparation is not an already pending wallet signature.
 
-A review's bound account is fixed; changing the active read account does not
-rebind it. Preparation choices and final admission use the same account rule.
-To update a review bound to A, select A again in a new Connect card. To review
-for B, request a new Review. An absent or incompatible read account removes the
-preparation choice without recording a preparation failure. The existing
-`review.error` card text distinguishes `Current account selection` guidance from
-a quoted saved review message. It does not decide permissions. Changing
-read context alone does not revoke an already valid A review's signing choice.
-Once a signing request consumes its card, retrying needs a new Review; a
-management card only refers to its existing exact attempt.
+A Review keeps its exact account and connection. Clearing the saved read address does not change its target. Disconnecting means
+a replacement connection needs a new Review. A new target requires
+a new Review; another connection with the same address cannot take over.
+Preparation and signing still require that original binding's current grant,
+method/event scope, revision and material. Saved preparation errors remain
+separate from current eligibility. After signing admission, a management card
+only refers to its exact attempt and grants no new preparation or signature.
 
 Only `completed` has `executionResult`, with `attemptId`, review/plan IDs,
 `status: success | failure`, the exact digest, verified `chainReceipt` and time.
@@ -1033,7 +1104,10 @@ Only failed chain effects have `failureReason: chain_execution_failed`. Wallet
 rejection, local timeout, unavailable receipts and lost submission responses
 never fabricate a chain failure. An unknown result retains the digest for later
 reads. An explicit user stop after submission stops observation, not an on-chain
-transaction. Wallet connection changes or a requested disconnect stop pending
+transaction. Accepted `stop_waiting` also closes that card's business input;
+a new `session_open_review_management` card may explicitly inspect the same
+attempt later. A duplicate stop on the cancelled card does not stop work started
+from a newer card. Wallet connection changes or a requested disconnect stop pending
 submission permission with their own recorded reason; they do not claim that the
 user stopped waiting or that disconnection already succeeded. After submission,
 those connection events preserve independent observation of the same digest,
@@ -1068,80 +1142,70 @@ for the last confirmed local SDK observation. Ordinary reads do not perform a
 fresh SDK check or prove that the wallet app is online. Implicit asset reads
 require an available service and a usable observation in that same run.
 
-Wallet-dependent app inputs (`connect`, `disconnect`, `use_account`,
-`prepare_review`, `request_signature`) carry the displayed `walletRunId`. A stale
-run cannot be transferred to a replacement SDK. Backend commands verify the
-session, account, chain, method and stored authority at their decision boundary.
-`acceptedWalletRunId` identifies a card's stored wallet input, when present; it
-is not new permission.
+Wallet-dependent app inputs (`connect`, `disconnect`, `prepare_review`,
+`request_signature`) carry the displayed `walletRunId`. A stale run cannot be
+transferred to a replacement SDK. Exact account, chain, method, grant revision
+and stored request authority are rechecked at admission. `acceptedWalletRunId`
+is a stored fact, not new permission.
 
-Connect workflow data includes optional `connectionAction: "connect" | "disconnect"`
-only when that action was admitted on the card. The connection's current status
-is separate from the card's original operation. In particular, failed disconnect
-means remote removal was not confirmed, including after local service recovery.
+In `session_get_interaction_status`, `requestedChains` is the Settings scope for new connections. Singular `connection`
+publishes its frozen requested scope and `chainResults`: exactly one result per
+requested chain, either `bound` with an address, `not_approved`, `multiple_accounts`
+or `invalid_response`. One valid distinct address binds automatically. There is
+no account selector. Only that chain becomes unavailable on multiple/invalid data.
+Later observations cannot change those results. Current `grants`, `grantRevisions`
+and `chainStates` describe availability separately; methods remain account-local.
+Sui actions require the fixed Sui address and exact Sui method/event scope.
+Ethereum/Solana address fields do not provide financial authority.
 
-`connectionConflict`, when present, is
-`{ reason: "multiple_connections", connectionIds: [...] }`. It contains distinct
-IDs for the multiple live, known connections that prevent selecting a usable
-wallet. It appears in Connect/Review `data`, the connection wait's `card.data`,
-interaction status and relevant review-status responses. Its shared schema and
-backend evaluation own the meaning; the View does not count rows to grant authority.
-`walletAvailability: available` only confirms the SDK dependency, not the absence
-of this conflict. `connections` describes recorded targets, not signing choices.
-In conflict, `assetReadAccount` is `address_required`; explicit-address reads and
-saved transaction results retain their independent access rules.
+Both wallet gateways accept empty input. Disconnect creation checks the current
+exact session before issuing any card or permission. No recorded session or a
+confirmed absent settled session returns `input_invalid` with reason
+`no_session_to_disconnect`; unconfirmed or unrecorded presence uses
+`connection_state_unconfirmed`, and outstanding SDK work uses `operation_busy`.
+An unavailable service returns `wallet_unavailable` with its actual cause.
+These refusals create no card, operation or wallet effect. A present or unusable
+manageable session is fixed to the new Disconnect card; admission rechecks its
+run and impact. Changing wallet, address or approved network scope requires
+confirmed disconnection and a new explicit connection.
 
-A valid Connect card can still offer exact-target `disconnect` during conflict.
-`connect`, `use_account`, `prepare_review` and `request_signature` remain blocked.
-Each disconnection uses the same scoped UI permission, current run and revision,
-atomic admission and saved result as an ordinary single-connection disconnect.
-No first/newest/default wallet is silently selected. When one valid connection
-remains and no connection operation is pending, normal account use can resume;
-with no recorded or SDK-present connection and no pending operation, pairing is
-available. A failed disconnect does not prove remote removal.
-A failed or stopped product connection is not restored merely because its SDK
-session remains saved.
+Connect fixes requested networks and expected connection identity at creation.
+A confirmed change before admission closes it failed, sends no wallet request,
+and asks for a new card; restoring the earlier Settings value does not reopen it.
+Transient service initialization is not proof of such a change.
 
-`connectionConflict` is optional. Its absence alone is not proof of a usable
-connection or permission, especially in a historical result that does not need
-current wallet eligibility. Filling optional context never adds global cleanup
-writes or SDK requests to independent saved-result reads. `allowedActions`
-identifies permitted action types; it is not a list of visible buttons or model
-authority. Only the exact current target, UI permission and final admission
-checks allow a user action.
+`reviewTarget` retains the Review's original account and connection before,
+during and after preparation, even when that target is no longer usable.
+`allowedActions` lists currently permitted app input, computed for that exact
+target. A live Review's `nextStep` names the applicable recovery action and safe
+message; the view does not infer it from another connection's status. A replacement
+connection is never substituted for the original Review target.
+The interaction-status field `assetReadAccount` independently describes the fixed Sui read address as
+`available` with `account`, or `address_required`. Reason `read_address_cleared`
+means the user cleared the saved read address in Settings; this does not change
+fixed addresses or financial targets. `account_get_active_account` reports stored
+read context, not current eligibility. Restored public accounts never restore
+wallet or card authority.
 
-Current Connect/Review `data` also publishes `usableConnectionId` and
-`assetReadAccount`. The first identifies the single connection eligible for
-account use at the backend's evaluation time; it is absent during conflict,
-pending connection work, unavailable service, or when no unexpired connection
-qualifies. It does not authorize a signature. `assetReadAccount` uses the same
-`available`/`address_required` shape as interaction status. Availability requires
-the stored default's source connection ID to match this connection and its
-address to remain approved. Matching the address in a different connection is
-insufficient. A source-less stored selection requires explicit Use address.
+The status overview returns `connection: null` when no current connection is recorded.
+`canDisconnect` qualifies the current exact nonpending cleanup target, including
+terminal or older-generation records whose SDK session is present/unusable.
+Current-run confirmed absence and ended I/O permit a new explicit Connect; a
+historical failed/expired row alone is not absence evidence. Recovery can transfer
+cleanup ownership without restoring usage or old card/signing authority.
 
-`manageableConnectionIds` identifies exact recorded targets for a new scoped
-Disconnect, separately from account use. It includes nonpending connected records
-(including expired ones) and known terminal records whose current SDK session
-remains present. `connectionReconciliationRequired: true` identifies a present SDK
-session without a journal target after normal registration/cleanup ends. It
-blocks pairing, account use, preparation and signing while preserving SDK
-availability and saved outcomes. Remove the retained connection in the wallet
-app, then confirm absence through a complete current service observation.
-Settings/Troubleshooting can explicitly restart the service to inspect it again;
-restart alone does not remove or approve that connection. No private topic or synthetic target ID
-is exposed. Both fields also appear in interaction status; review status includes
-the reconciliation flag when current eligibility is needed.
+In interaction status, `connectionReconciliationRequired: true` means current SDK presence has no approved
+product target after pending registration/cleanup. New pairing and financial
+inputs are blocked; saved evidence remains readable. Unrecorded sessions are not
+adopted by address or ordering. Remove unwanted retained sessions in the wallet
+app, then check again. Restarting inspects but neither approves nor removes them.
+Private topics are not exposed. An already admitted transaction still uses its
+original exact grant and submission checks.
 
-These fields are emitted together for current wallet eligibility. Independent
-historical or completed-result reads may omit them; omission does not establish
-current eligibility. Recorded `connections` and `activeAccount` remain facts,
-including expired records and a stored default that cannot currently be used.
-Views consume the published selection instead of counting recorded rows or
-using their own clock. An expired record may remain a disconnection target;
-expiry alone does not confirm remote removal. Final admission checks current
-backend facts again. Changing a read default never changes an existing review's
-account or grants new authority to an admitted transaction.
+These are backend-evaluated facts, not View row counts or clock decisions.
+`allowedActions` is not model authority. Scoped UI permission and the exact target
+remain required at atomic admission. Reconnection cannot retarget a Review or an
+admitted transaction.
 
 Views additionally know whether their own confirmation read or command response
 is pending. They show neutral communication guidance without synthesizing DB
@@ -1190,7 +1254,9 @@ as uncertain without resending them. Neither event establishes cancellation or
 chain failure, and verified chain outcomes remain unchanged.
 
 Wallet-dependent commands rejected for dependency failure use the error kind
-`wallet_unavailable`, with a safe reason and message. Invalid input and domain
+`wallet_unavailable`, with the actual safe `walletAvailability` and message.
+An unavailable service includes its recorded `reason`; initializing/recovering
+states have no failure reason, so none is invented in error details. Invalid input and domain
 conflicts retain their own meaning. Validated app actions can also return a
 current snapshot with `error.code: "wallet_unavailable"`; invalid permissions
 and storage failures do not receive a success snapshot. Review creation can
@@ -1253,27 +1319,64 @@ facts actually exist.
 | --- | --- | --- |
 | `account_get_active_account` | Implemented | Reads the active wallet-account read context. |
 
-The user clears the default read address through a confirmed Settings card action. Ordinary MCP calls do not clear it.
+Settings provides Clear saved read address for the current Sui read context.
+The explicit app-only action `settings_clear_read_address` binds the displayed
+connection and address and records its effect atomically. It suppresses implicit
+read context for that connection across restarts, without disconnecting the wallet,
+changing fixed addresses or cancelling transaction requests. A fresh connection
+can supply its new fixed read address. Ordinary MCP calls cannot apply this effect.
+Changing from a restore upload to this effect invalidates the unused upload
+atomically with the saved result. File cleanup runs separately; a cleanup failure
+does not repeat the address-clearing effect or change its stored outcome.
 
 ## Settings Tools
 
 | Tool | Status | Purpose |
 | --- | --- | --- |
-| `settings_create_local_settings_session` | Implemented | Opens one internal Settings card with an unsubmitted draft. |
-| `settings_get_local_settings` | Implemented | Reads stored/effective Sui gRPC and GraphQL endpoints, sources and pending restart information. |
+| `settings_create_local_settings_session` | Implemented | Empty input opens Settings. `operationStatus: {operationId}` records a read-only status card. `backupDelivery: {operationId, fileId}` opens a new delivery-purpose card for the exact retained backup. These strict input forms cannot be mixed. |
+| `settings_get_local_settings` | Implemented | Reads requested wallet networks and stored/effective Sui endpoints, sources and pending restart information. |
 
 The result is a `kind: "settings"` card snapshot
 and a public saved-result link. Card permission is only in `sui-mcp/card` UI
-metadata. There is no `settingsUrl`, `openTarget`, external page, HTTP mutation
+metadata. Every closed Settings card keeps its recorded result and has empty
+`allowedActions` and `allowedFileActions`. A fresh `operationStatus` card records
+current operation/cleanup facts once; its `createdAt` is that query's timestamp,
+and any stored operation result retains its original `recordedAt`. A current
+backup-delivery summary is recorded at the query time; do not infer a delivery
+completion time from that read timestamp. It issues no settings
+or file effect authority. A new `backupDelivery` card uses the original artifact,
+owner, epoch and expiry; creating it performs no transfer. Only its explicit Retry
+download or Save a local copy admits one attempt. A late exact Host report updates
+the domain journal only; it cannot change a closed card or initiate local saving. There is no `settingsUrl`, `openTarget`, external page, HTTP mutation
 API or compatibility alias. A client without internal cards receives
 `ui_unavailable`; ordinary model calls never apply a Settings change.
 
-Settings groups Address for viewing assets, Local records, Troubleshooting and Advanced
-settings. Confirmed changes are `clear_read_address`, `set_endpoint`,
-`restore_endpoint` (gRPC or GraphQL), `import_local_data`, `reset_local_data`
-and `restart_wallet_service`. Their preparation and confirmation use app-only
+Settings groups Address for viewing assets, Wallet networks, Local records,
+Troubleshooting and Advanced settings. Address for viewing assets owns the
+`settings_clear_read_address` action described under Account Tools; clearing
+does not disconnect the wallet or change transaction targets.
+
+Wallet networks uses one explicit Save networks action:
+`settings_save_wallet_networks` with `operationId`, the selected `chains`, and
+`expectedChains` containing the saved scope displayed to the user. App-only
+`ui_act_card` checks the card permission, owner, data epoch, revision and expiry,
+compares the current saved scope with `expectedChains`, and reserves, saves and
+records the exact selection in one transaction. Its `data.draft.kind` is
+`set_wallet_networks`. There is no selection/preparation/confirmation
+sequence for this setting. An identical admitted save returns its stored result;
+a conflicting selection cannot replace it. Editing checkboxes does not save,
+pair a wallet or update an existing connection. Saving a changed scope atomically
+ends unsent Connect cards with different captured networks; restoring the earlier
+setting does not reopen those cards. Already admitted wallet requests retain their
+original scope.
+
+Endpoint changes (`set_endpoint`, `restore_endpoint` for gRPC or GraphQL),
+`import_local_data`, `reset_local_data` and `restart_wallet_service` retain a
+concrete impact confirmation. Selecting an endpoint change, reset or restart
+starts preparation directly; no intermediate Continue action is required.
+Selecting a backup file starts its checks. Final confirmation uses app-only
 `ui_act_card` with card permission, revision, operation identity and the exact
-preparation identity. Choosing or checking data does not apply it, contact a
+preparation identity. Preparing or checking data does not apply it, contact a
 wallet or restart the SDK. Duplicate confirmation returns the same admitted
 result; MCP JSON-RPC request IDs do not authorize another operation.
 
@@ -1281,8 +1384,7 @@ Download backup uses one `settings_download_backup` action with `operationId`
 and an `attemptId` UUID, admitted atomically through the same scoped card input.
 It creates a `download_backup` operation and one immutable snapshot. It requires
 no separate selection, preparation or confirmation action. The same admitted
-start returns the same request; a different start cannot replace it. New
-`export_local_data` selection/preparation/confirmation is not accepted.
+start returns the same request; a different start cannot replace it.
 
 The card uses plain-language display labels without changing wire fields or
 enums. Wallet-service `available`, `initializing`, `recovering` and `unavailable`
@@ -1320,16 +1422,21 @@ failure-recovery policy.
 `file.sealed` records complete, integrity-checked transfer; it does not by itself
 establish a supported backup or permission to restore it. `settings_back` and user-data
 changes invalidate preparation while preserving a reusable complete file.
-The explicit `settings_prepare` action rechecks such a file; normal file
-selection requires no separate Preview action. A failed check preserves its
+The explicit `settings_prepare` action rechecks such a file; selecting a file
+starts its backup check without another action. A failed check preserves its
 current file/operation identity and correction path. Owner replacement ends old
 input; a new card must receive a new explicit file selection.
 
-A download's `result.completionScope: "backup_snapshot"` identifies the immutable
-preparation result, not a saved user file. `data.download` separately carries
+Physical snapshot readiness is intermediate: the delivery card stays running.
+Its final `result.completionScope: "backup_delivery"` records a Host report,
+verified local publication, cancellation, expiry or failure, not merely snapshot
+preparation. A Host acknowledgment is not proof that a user file was saved. `data.download` separately carries
 `availability` (`preparing`, `available`, `ended`), `currentAttemptId`, an optional
-`hostReport` (`acknowledged`, `not_completed`, `unconfirmed`, `unsupported`), `previousUnconfirmed`,
-`expiresAt`, `remainingMs`, `endReason` and `allowedFileActions`. End reasons are
+`hostReport` (`acknowledged`, `not_completed`, `unconfirmed`, `unsupported`, `not_sent`), `previousUnconfirmed`,
+`expiresAt`, `remainingMs`, `endReason` and `allowedFileActions`. `not_sent` is the
+View's report that transfer verification failed before any Host download request;
+it is not a Host rejection or non-support response. Like `unsupported`, it
+establishes no earlier Host copy for local-copy consent. End reasons are
 `acknowledged`, `cancelled`, `expired`, `server_restarted`, `data_replaced`,
 `source_unavailable`, `stored_locally` or `local_save_failed`. Replacement revokes the old card rather than preserving
 its input. The transfer period is thirty minutes from physical readiness;
@@ -1345,13 +1452,12 @@ absence was not established, including an unreported or not-completed request.
 
 A verified local `saved` result provides `data.backupLocation.directory` and
 `filename` for `<SUI_MCP_DATA_DIR>/backups/<operationId>.json`. Snapshot preparation
-and Host acknowledgment do not provide that local success. A recorded
-`export_local_data` result can also identify its existing file. These fields
-never identify the destination chosen by a Host download dialog. Existing user
+and Host acknowledgment do not provide that local success. These fields never
+identify the destination chosen by a Host download dialog. Existing user
 files are never deleted by private snapshot cleanup. Private publication
 identities and source inode/device facts are not public projection fields.
 
-Current `data.facts` uses the same connection selection and qualification rules
+Current `data.facts` uses the same fixed-address and connection qualification rules
 as interaction status, through a fact reader that does not settle another
 request's deadlines or callback writes. General counts describe stored records;
 reset/import preparation and confirmation independently settle deadlines and
@@ -1384,8 +1490,10 @@ recorded idempotently without resending bytes. Public fields include
 local operation, not a transaction's chain outcome. Optional
 `temporaryFileCleanup` separately reports `pending`, `failed` or `complete`;
 reading/checking it never repeats data replacement, backup creation, Host delivery or SDK
-replacement. Terminal business input remains closed; only the separate scoped
-file continuations in `data.download.allowedFileActions` may remain available. Public fields contain no raw file, transaction bytes, signatures,
+replacement. Terminal business input remains closed; the separate scoped
+file continuations in `data.download.allowedFileActions` are also closed. A new
+`backupDelivery` card is required for another attempt, while `operationStatus`
+reads current cleanup without granting a file effect. Public fields contain no raw file, transaction bytes, signatures,
 SDK credentials or card permission.
 
 A user-data writer invalidates its affected prepared confirmation atomically.
@@ -1404,8 +1512,8 @@ rejection can report a smaller raw chunk limit before any write. The backup chec
 strict current backup shape/references without endpoint contact. Confirmation
 verifies imported endpoints report Sui mainnet and rechecks current data and
 unsettled wallet/transaction work before atomic replacement.
-The prepared import includes `currentReadAddress` and `incomingReadAddress`
-(`null` when unset), the corresponding change and current/incoming record counts.
+The prepared import includes current/incoming record counts. Accounts and records
+are restored as history, never as active connection or signing authority.
 Both preparation and final admission settle request deadlines before capturing
 or comparing that decision basis. A newly unknown outcome requires a new backup check.
 Reset/import revoke other live permissions and preserve only their own read-only card/result.
@@ -1417,8 +1525,9 @@ automatic result checks. Stopping those checks does not shorten that window.
 They cannot cancel a transaction on Sui or disconnect a remote wallet session.
 The private connection-service journal is preserved; it is not imported from
 the public backup and cannot restore old permissions or signing authority.
-Reset clears the default address. A restored default requires its exact current
-connection ID and approved address. Outstanding connection SDK callbacks block
+Reset and restore invalidate the retained connection for financial use. Neither
+restores a live connection reference; the retained session remains a cleanup
+target until disconnected. A new explicit connection establishes new fixed addresses. Outstanding connection SDK callbacks block
 replacement along with unsettled transaction work.
 
 Endpoint preparation records the gRPC/GraphQL kind, current stored/effective
@@ -1439,9 +1548,10 @@ The View checks the complete hash before standard Host delivery.
 File continuations also use app-only `ui_act_card`:
 
 - `settings_retry_download`: `operationId`, `fileId`, `previousAttemptId` and a
-  new `attemptId`; atomically advances one attempt on the same live snapshot.
+  new `attemptId`; only a new backup-delivery card may admit this attempt on the
+  same retained snapshot. It consumes that card's one delivery input.
 - `settings_report_download`: `operationId`, `fileId`, `attemptId` and `status`
-  (`acknowledged`, `not_completed`, `unconfirmed`, `unsupported`); the same report is idempotent,
+  (`acknowledged`, `not_completed`, `unconfirmed`, `unsupported`, `not_sent`); the same report is idempotent,
   and conflicting reports for one attempt are rejected. A late older report
   cannot change the current attempt or end its retention. `unsupported` requires
   exactly `failure: {method: "ui/download-file", code: -32601}`; other statuses
@@ -1454,34 +1564,39 @@ File continuations also use app-only `ui_act_card`:
 - `settings_cancel_download`: `operationId`, `fileId` and `attemptId`; ends
   further delivery of that snapshot, not a Host dialog or a user-saved file.
   Cancellation is refused while a local save is in progress or its outcome is
-  uncertain. After a failure recorded as `not_published`, cancellation remains
-  available within the transfer period for the current authorized request.
+  uncertain. A finished failed delivery has no further cancellation or retry input;
+  another attempt requires a new delivery card.
 - `settings_store_backup`: `operationId`, `fileId`, current `attemptId`, a new
   `saveAttemptId`, required boolean `allowPossibleCopy`, and optional
   `previousSaveAttemptId`. It is available only for that snapshot's recorded
-  unsupported result. Possible earlier delivery requires explicit true consent;
+  unsupported result and a new delivery-purpose card. Possible earlier delivery requires explicit true consent;
   otherwise false is required. Initial consent has no previous save ID. A retry
   of a confirmed no-publication failure must name the current failed save ID.
   IDs and consent are immutable per admission; duplicates do not repeat effects.
   It accepts no arbitrary path, name or bytes.
 
 These actions validate current owner, epoch, credential and exact file/attempt
-identity independently of terminal business input. Retry/read requires a live
-transfer period. A late report can record a fact after that period ends but
+identity. Effect admissions and file reads require an active purpose card and the
+original live transfer period. Closed cards grant none of these effect permissions.
+Only an exact late result report may update an already-admitted attempt's journal,
+without modifying its closed card or starting publication. A late report can record a fact after that period ends but
 cannot restore the file or authority. Host acknowledgment ends retention and
 requests cleanup; it does not prove a save location or completed disk storage.
 `isError` does not distinguish cancellation, denial or failure. A lost response
 is unconfirmed and never triggers automatic retransmission. Cleanup failure is
-reported separately and is retried through Check status or owner recovery.
+reported separately; a new operation-status card or owner recovery can settle
+known cleanup without repeating the original effect.
 Local publication closes further Host reads/retries for that snapshot. Its
-final/file-I/O reservations survive the immutable terminal snapshot result.
+file-I/O reservation lasts until the actual admitted file work ends, independently
+of the immutable card result.
 New save admissions and retries require the original live period; admitted
 file work settles even if it outlives that period. A process restart verifies
 only an existing target bound to its recorded source identity/content. It never
 publishes a missing target or restores the departed card's action authority.
 A missing or changed source ends that private transfer; a new explicit request
-is required. An existing public backup is verified on the same descriptor used
-for each range and is never truncated or removed by temporary cleanup.
+is required. Private snapshot reads verify the artifact on the same descriptor
+used for each range. Temporary cleanup never truncates or removes a saved
+local backup.
 
 Troubleshooting recovery confirms a precise SDK run and affected unsubmitted
 requests. Admission revokes their submission authority before stopping the old

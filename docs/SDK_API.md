@@ -59,7 +59,7 @@ single serialized `CallToolResult` carrier validated with the pinned SDK
 schema. Conflicting payloads or private metadata are rejected. Ordinary data
 does not supply input permission, and saved resource links remain read-only.
 
-`@modelcontextprotocol/ext-apps` is pinned to `2.0.3`, with the MCP client/core/server packages at `2.3.1` and Node transport at `2.1.1`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
+`@modelcontextprotocol/ext-apps` is pinned to `2.0.3`, with the MCP client/core/server packages at `2.3.1` and Node transport at `2.1.1`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Disconnect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
 
 Settings completes a selected upload's verification and restore preparation on
 the backend. The card renders the stored `restoreCheck` result and collects one
@@ -71,6 +71,9 @@ needing a new check, a current confirmation and actual rejection. Definite
 file/mainnet rejection is independent of local-data confirmation revision and
 survives Back until explicit file selection changes. The View's current file-job
 progress describes communication only; it cannot grant restoration authority.
+An operation change that ends use of an upload records invalidation with the
+stored effect/result. Physical cleanup follows without repeating that effect.
+A valid file retained by Back remains eligible for another explicit check.
 
 Download backup prepares one verified snapshot and calls `App.downloadFile`.
 Only that function's exact method-not-found result selects local publication of
@@ -210,7 +213,10 @@ The pinned SDK accepts `number | bigint` quote inputs. Its high-level quote quer
 The SDK child initializes pinned SignClient with its public `storage` injection,
 private session persistence, silent SDK logging and telemetry disabled. It uses
 `connect`, `session.getAll`, `session_update/session_delete/session_expire` events,
-and `request` on chain `sui:mainnet`, method `sui_signTransaction`.
+and `request` on chain `sui:mainnet`, method `sui_signTransaction`. Connection
+requests send the saved mainnet chain set as optional namespaces. The pinned SDK
+already treats required namespaces as optional; the product directly supplies
+the intended request shape. Ethereum/Solana requests contain no financial methods.
 Pinned `session_event` does not update approved namespaces itself: account/chain
 selection events explicitly invalidate stored review/submission authority even
 when the approved account set stays unchanged. Requests carry
@@ -238,10 +244,13 @@ not own restart. A new explicit Settings operation can supersede a startup
 still pending; known failure and its first timestamp remain immutable.
 Late callbacks cannot reopen old authority or submit another transaction.
 
-Snapshots and per-session versions distinguish present, absent and unusable
-sessions. Source inspection failure disables the service instead of becoming an
-empty session list. `accountsChanged` and `chainChanged` invalidate selection
-even if namespace values are unchanged. The final pre-submission session check
+Snapshots separate session lifecycle revisions from per-chain grant revisions.
+Presence/status changes affect all grants; an identified chain event affects only
+that chain. Normalized account/method/event scope excludes list order and display
+metadata. Within each SDK run, revisions are monotonic across change-and-revert. Source inspection failure disables the service instead of becoming an
+empty session list. `accountsChanged` and `chainChanged` invalidate their chain
+even if namespace values are unchanged; unknown event scope invalidates the
+connection. The IPC proof and pre/post-signing checks carry the Sui grant revision. The final pre-submission session check
 runs after asynchronous digest/signature/network checks. Responses from another
 SDK run cannot satisfy that check or restore submission authority.
 Actual target-wallet acceptance of the serialization is an integration

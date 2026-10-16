@@ -1,5 +1,5 @@
-import { CONNECTION_CONFLICT_MESSAGE, CONNECTION_RECONCILIATION_MESSAGE } from "../../core/session/walletConnection.js";
-import { workflowViewSchema, reviewWalletChoices, type WorkflowView } from "../../core/session/workflowView.js";
+import type { TransactionRequest } from "../../core/session/transactionRequest.js";
+import { reviewViewSchema, closedReviewCardSchema, type ReviewView, type ClosedReviewCard } from "../../core/session/workflowView.js";
 import { section, element, row, accordion, button, mono, monoShort, timeValue } from "../../../review-app/src/ui/ui.js";
 import { rawToDisplay, signedRawToDisplay, suiAmount } from "../../../review-app/src/format.js";
 import { gasRows } from "../../../review-app/src/ui/chainReceiptView.js";
@@ -7,24 +7,24 @@ import { receiptView } from "../../../review-app/src/ui/receiptView.js";
 import { transactionGraph, createTransactionGraph, disposePtbGraphs } from "../../../review-app/src/ui/ptbDiagram.js";
 import { receiptForCard } from "./receiptData.js";
 import type { CardSnapshot, CardReceiptDisplay } from "../contracts.js";
-import { walletCommandGuidance, type CardRenderer, type CardViewContext } from "./lifecycle.js";
+import { walletCommandGuidance, type CardRenderer, type CardContent, type CardViewContext } from "./lifecycle.js";
 import type { ProposalReviewModel } from "../../core/proposal/types.js";
 import { t } from "../../../review-app/src/i18n/i18n.js";
 import { REVIEW_UI_LABELS } from "../../core/action/types.js";
 import "./workflow.css";
 
 // Labels describe backend facts; they never grant an action or infer an outcome.
-const reviewSessionLabels: Record<NonNullable<WorkflowView["review"]>["status"], string> = {
+const reviewSessionLabels: Record<NonNullable<ReviewView["review"]>["status"], string> = {
   ...REVIEW_UI_LABELS,
   proposed: "Review not prepared", awaiting_wallet: "Wallet connection needed",
   wallet_connected: "Review not prepared", expired: "Review expired"
 };
-const transactionRequestLabels: Record<NonNullable<WorkflowView["request"]>["requestStatus"], string> = {
+const transactionRequestLabels: Record<NonNullable<ReviewView["request"]>["requestStatus"], string> = {
   awaiting_signature: "Waiting for approval in your wallet", submitting: "Submitting transaction",
   awaiting_chain_result: "Waiting for transaction result", stopped: "Approval request stopped",
   request_failed: "Approval request ended", outcome_unknown: "Transaction result not confirmed", completed: "Transaction result confirmed"
 };
-type Review = NonNullable<WorkflowView["review"]>;
+type Review = NonNullable<ReviewView["review"]>;
 
 function proposalFacts(proposal: ProposalReviewModel, checks: NonNullable<Review["plan"]["preliminaryChecks"]>): HTMLElement {
   const node = section("External proposal — view only");
@@ -86,11 +86,12 @@ function proposalFacts(proposal: ProposalReviewModel, checks: NonNullable<Review
   return node;
 }
 
-function displayedReviewAccount(data: WorkflowView): string | undefined {
-  return data.review?.account ?? (data.assetReadAccount?.status === "available" ? data.assetReadAccount.account : undefined);
+type ReviewFacts = Pick<ClosedReviewCard, "review" | "reviewTarget" | "netGasMist">;
+function displayedReviewAccount(data: ReviewFacts): string | undefined {
+  return data.review?.account ?? data.reviewTarget?.account;
 }
 
-function reviewedConditions(data: WorkflowView): HTMLElement {
+function reviewedConditions(data: ReviewFacts): HTMLElement {
   const review = data.review!, human = review.state?.humanReadableReview, plan = review.plan;
   const node = section(human?.proposedAction.title ?? plan.title);
 
@@ -149,7 +150,7 @@ function reviewDetails(review: Review, historical = false): HTMLElement {
   return node;
 }
 
-function pendingReviewDecision(snapshot: CardSnapshot, data: WorkflowView, act?: (input: Record<string, unknown>) => void, context?: CardViewContext, approvalVisible = true): HTMLDivElement {
+function pendingReviewDecision(snapshot: CardSnapshot, data: ReviewView, act?: (input: Record<string, unknown>) => void, context?: CardViewContext, approvalVisible = true): HTMLDivElement {
   const review = data.review!, proposal = review.plan.reviewModel;
   const checks = review.state?.checks ?? review.plan.preliminaryChecks ?? [];
   const decision = element("div", "workflow-decision");
@@ -157,7 +158,6 @@ function pendingReviewDecision(snapshot: CardSnapshot, data: WorkflowView, act?:
   if (!proposal) status.classList.add("review-status");
   status.setAttribute("role", "status"); decision.append(status);
   if (!proposal && data.walletAvailability.status !== "available") decision.append(element("p", "ui-note", data.walletAvailability.message));
-  if (!proposal && data.connectionConflict) decision.append(element("p", "ui-note", CONNECTION_CONFLICT_MESSAGE));
   if (review.accountRequestPending) decision.append(element("p", "ui-note", "An earlier transaction request for this account is still being processed. This review can continue when that work finishes."));
   const feedback = element("div", "review-action-feedback");
   if (!proposal && act && data.mode === "review" && snapshot.state === "ready") {
@@ -180,7 +180,7 @@ function pendingReviewDecision(snapshot: CardSnapshot, data: WorkflowView, act?:
 
 // A live review owns its displayed material separately from the latest action
 // projection. Renewal never turns retained display facts into current authority.
-function liveReviewView(initial: CardSnapshot, initialData: WorkflowView, act: (input: Record<string, unknown>) => void, initialContext?: CardViewContext) {
+function liveReviewView(initial: CardSnapshot, initialData: ReviewView, act: (input: Record<string, unknown>) => void, initialContext?: CardViewContext) {
   const node = element("div", "workflow-card"), graphSlot = element("div"), primary = section();
   const materialStatus = element("p", "ui-note review-material-status"), facts = element("div", "review-material-facts"), controls = element("div");
   const detail = accordion("Details");
@@ -189,13 +189,13 @@ function liveReviewView(initial: CardSnapshot, initialData: WorkflowView, act: (
   let graph: ReturnType<typeof createTransactionGraph> | undefined;
   const dispose = () => { if (!disposed) { disposed = true; drawSerial += 1; graph?.dispose(); } };
   try {
-    const materialKey = (value: WorkflowView) => JSON.stringify(value.review?.state);
+    const materialKey = (value: ReviewView) => JSON.stringify(value.review?.state);
     let shownKey = materialKey(shown), pendingKey: string | undefined;
     const graphData = initialData.review!.state?.ptbVisualization?.mermaid;
     if (graphData) { graph = createTransactionGraph({ source: "review", mermaid: graphData }); graphSlot.append(graph.node); }
     else graphSlot.append(element("p", "ui-note", "The transaction graph appears when reviewed material is available."));
     const action = (input: Record<string, unknown>) => {
-      if (disposed || !data.allowedActions.includes(input.action as WorkflowView["allowedActions"][number])) return;
+      if (disposed || !data.allowedActions.includes(input.action as ReviewView["allowedActions"][number])) return;
       if (input.action === "request_signature" && (drawing || materialKey(data) !== shownKey || input.reviewRevision !== data.review!.reviewRevision)) return;
       act(input);
     };
@@ -219,15 +219,16 @@ function liveReviewView(initial: CardSnapshot, initialData: WorkflowView, act: (
       try { renderDetails(); }
       catch { detail.body.replaceChildren(element("p", "ui-error", "These details could not be displayed. Close and reopen the details to try again.")); }
     });
-    const commit = (next: WorkflowView, key: string, notify = false) => {
+    const commit = (next: ReviewView, key: string, notify = false) => {
       shown = next; shownKey = key; drawing = false; pendingKey = undefined;
       facts.replaceChildren(reviewedConditions(shown));
       if (detail.details.open) renderDetails(); else { detail.body.replaceChildren(); detailsRendered = false; }
       renderControls(); if (notify) context?.onDisplayChange?.();
     };
     return { node, pending: () => drawing, update(next: CardSnapshot, nextContext: CardViewContext): boolean {
-      const parsed = workflowViewSchema.parse(next.data), review = parsed.review;
-      if (disposed || next.state !== "ready" || parsed.mode !== "review" || parsed.request || !review || review.plan.reviewModel ||
+      if (disposed || next.state !== "ready") return false;
+      const parsed = reviewViewSchema.parse(next.data), review = parsed.review;
+      if (parsed.mode !== "review" || parsed.request || !review || review.plan.reviewModel ||
         review.reviewSessionId !== data.review!.reviewSessionId || review.plan.id !== data.review!.plan.id || review.account !== data.review!.account ||
         displayedReviewAccount(parsed) !== displayedReviewAccount(data)) return false;
       snapshot = next; data = parsed; context = nextContext;
@@ -258,8 +259,39 @@ function liveReviewView(initial: CardSnapshot, initialData: WorkflowView, act: (
   } catch (error) { dispose(); throw error; }
 }
 
-function reviewView(snapshot: CardSnapshot, display?: CardReceiptDisplay, act?: (input: Record<string, unknown>) => void, context?: CardViewContext) {
-  const data = workflowViewSchema.parse(snapshot.data), review = data.review;
+function transactionFacts(request: TransactionRequest): HTMLElement {
+  const facts = section();
+  facts.append(row("Transaction hash", mono(request.transactionDigest)));
+  if (request.execution) {
+    const receipt = request.execution.chainReceipt;
+    const outcome = row("Result", request.execution.status === "success" ? "Transaction succeeded on Sui" : "Transaction failed on Sui");
+    outcome.setAttribute("role", "status");
+    facts.append(outcome, row("Sender", mono(receipt.sender)), row(t.common.retrievedAt, timeValue(receipt.source.fetchedAt)),
+      element("p", "ui-note", "Additional amount and fee details are unavailable. The verified result is retained."));
+  }
+  return facts;
+}
+
+function reviewView(snapshot: CardSnapshot, display?: CardReceiptDisplay, act?: (input: Record<string, unknown>) => void, context?: CardViewContext): CardContent {
+  if (snapshot.state === "closed") {
+    const data = closedReviewCardSchema.parse(snapshot.data), node = element("div", "workflow-card"), review = data.review;
+    if (data.request?.execution && data.receipt && typeof data.receipt === "object" && "status" in data.receipt && data.receipt.status === "found") {
+      const history = section("Reviewed conditions");
+      if (review) history.append(reviewedConditions(data), reviewDetails(review, true));
+      return receiptView(receiptForCard(snapshot, display), history);
+    }
+    if (review?.plan.reviewModel) node.append(proposalFacts(review.plan.reviewModel, review.plan.preliminaryChecks ?? []));
+    else if (review) {
+      if (review.state?.ptbVisualization) node.append(transactionGraph({ source: "review", mermaid: review.state.ptbVisualization.mermaid }));
+      node.append(reviewedConditions(data));
+      const detail = accordion("Details"); detail.body.append(reviewDetails(review, !!data.request)); node.append(detail.details);
+    }
+    const label = data.observationStopped ? "Result checking stopped" : data.request ? transactionRequestLabels[data.request.requestStatus] : snapshot.reason === "cancelled" ? "Review cancelled" : snapshot.reason === "expired" ? "Review expired" : "Review ended";
+    node.append(row("Status", label), element("p", "ui-note", data.result.message), row("Recorded at", timeValue(data.result.recordedAt)));
+    if (data.request) node.append(transactionFacts(data.request));
+    return { node, dispose: () => disposePtbGraphs(node) };
+  }
+  const data = reviewViewSchema.parse(snapshot.data), review = data.review;
   if (!review) throw new Error("Review data is unavailable.");
   if (act && snapshot.state === "ready" && data.mode === "review" && !data.request && !review.plan.reviewModel) return liveReviewView(snapshot, data, act, context);
   const node = element("div", "workflow-card");
@@ -288,11 +320,7 @@ function reviewView(snapshot: CardSnapshot, display?: CardReceiptDisplay, act?: 
         const rendered = receiptView(receiptForCard(snapshot, display), historical);
         return { ...rendered, dispose: () => { disposed = true; rendered.dispose(); } };
       } else {
-        const facts = section(), receipt = execution.chainReceipt;
-        const outcome = row("Result", execution.status === "success" ? "Transaction succeeded on Sui" : "Transaction failed on Sui");
-        outcome.setAttribute("role", "status");
-        facts.append(outcome, row("Sender", mono(receipt.sender)), row("Transaction hash", mono(request.transactionDigest)),
-          row(t.common.retrievedAt, timeValue(receipt.source.fetchedAt)), element("p", "ui-note", "Additional amount and fee details are unavailable. The verified result is retained."));
+        const facts = transactionFacts(request), receipt = execution.chainReceipt;
         node.append(facts, details("Details", (body) => {
           for (const change of receipt.accountBalanceChanges) body.append(row(change.coinType, `${change.amountRaw} raw units`));
           for (const call of receipt.packageCalls) body.append(row("Package call", call.target));
@@ -337,98 +365,72 @@ function reviewView(snapshot: CardSnapshot, display?: CardReceiptDisplay, act?: 
   } catch (error) { disposed = true; disposePtbGraphs(node); throw error; }
 }
 
-function appendReviewActions(node: HTMLElement, feedback: HTMLElement, data: WorkflowView, act?: (input: Record<string, unknown>) => void, automaticPaused = false, approvalVisible = true): void {
+function appendReviewActions(node: HTMLElement, feedback: HTMLElement, data: ReviewView, act?: (input: Record<string, unknown>) => void, automaticPaused = false, approvalVisible = true): void {
   if (!act) return;
   const review = data.review!;
   const slot = element("div", "review-primary-slot");
   const actions = element("div", "review-action-row");
-  const cancel = button("Cancel", () => act({ action: "cancel" }), "danger");
-  cancel.setAttribute("aria-label", "Cancel review");
-  cancel.dataset.cardAction = "cancel"; cancel.disabled = !data.allowedActions.includes("cancel");
-  actions.append(slot, cancel);
-  const shownWallets = new Set<string>();
-  const choose = (action: "prepare_review" | "request_signature", label: string, account: string, choices: WorkflowView["connections"], primary: boolean) => {
-    const send = (connectionId: string) => act?.({ action, connectionId, account, walletRunId: data.walletAvailability.walletRunId, reviewRevision: review.reviewRevision });
-    const control = button(label, () => { if (choices.length === 1) send(choices[0]!.connectionId); }, primary ? "primary" : "secondary");
-    control.dataset.cardAction = action; control.disabled = !act;
-    control.classList.add("review-primary-action");
-    if (choices.length === 1) {
-      // The displayed target and this explicit click form the selection. No action
-      // runs merely because this is the only candidate or the frame was recreated.
-      if (!shownWallets.has(choices[0]!.connectionId)) {
-        node.append(row("Wallet", choices[0]!.walletName ?? "Connected wallet")); shownWallets.add(choices[0]!.connectionId);
-      }
-      slot.append(control); node.append(actions);
-      return;
-    }
-  };
-  const canRequestApproval = !data.connectionConflict && approvalVisible && data.allowedActions.includes("request_signature") && !!review.account && data.walletAvailability.status === "available";
-  const preparationAccount = data.assetReadAccount?.status === "available" ? data.assetReadAccount.account : undefined;
-  const canPrepare = data.allowedActions.includes("prepare_review") && !!preparationAccount && data.walletAvailability.status === "available";
-  const approvalChoices = canRequestApproval ? reviewWalletChoices(data, review.account!, true) : [];
-  const preparationChoices = canPrepare ? reviewWalletChoices(data, preparationAccount!) : [];
-  const automatic = data.automaticAction;
-  if (!automaticPaused && !approvalChoices.length && automatic?.action === "prepare_review") {
-    const target = preparationChoices.find((item) => item.connectionId === automatic.connectionId);
-    if (target) { node.append(row("Wallet", target.walletName ?? "Connected wallet")); shownWallets.add(target.connectionId); }
+  actions.append(slot);
+  if (data.allowedActions.includes("cancel")) {
+    const cancel = button("Cancel", () => act({ action: "cancel" }), "danger");
+    cancel.setAttribute("aria-label", "Cancel review");
+    cancel.dataset.cardAction = "cancel";
+    actions.append(cancel);
   }
-  if (canRequestApproval && canPrepare && review.account === preparationAccount && !approvalChoices.length && !preparationChoices.length) {
-    node.append(element("p", "ui-note", "No wallet connection is available for this account."));
-  } else {
-    if (canRequestApproval && !approvalChoices.length) node.append(element("p", "ui-note", "No connected wallet is available for this transaction."));
-    if (canPrepare && !preparationChoices.length) node.append(element("p", "ui-note", "No wallet connection is available to update the review for the selected account."));
+  const target = data.reviewTarget;
+  if (target && data.walletName) node.append(row("Wallet", data.walletName));
+  const canApprove = approvalVisible && target && data.allowedActions.includes("request_signature") && review.account === target.account;
+  const canPrepare = approvalVisible && target && data.allowedActions.includes("prepare_review") && (!data.automaticAction || automaticPaused);
+  if (canApprove || canPrepare) {
+    const action = canApprove ? "request_signature" : "prepare_review";
+    const label = canApprove ? "Request wallet approval" : automaticPaused ? "Continue review" : review.state || review.error ? "Retry review" : "Update review";
+    const control = button(label, () => act({ action, connectionId: target!.connectionId, account: target!.account,
+      walletRunId: data.walletAvailability.walletRunId, reviewRevision: review.reviewRevision }), "primary");
+    control.dataset.cardAction = action; control.classList.add("review-primary-action"); slot.append(control);
   }
-  if (approvalChoices.length) choose("request_signature", "Request wallet approval", review.account!, approvalChoices, true);
-  else if (approvalVisible && preparationChoices.length && (!data.automaticAction || automaticPaused)) {
-    choose("prepare_review", automaticPaused ? "Continue review" : review.state || review.error ? "Retry review" : "Update review", preparationAccount!, preparationChoices, true);
-  }
-  else {
-    const wallet = reviewWalletChoices(data, review.account ?? preparationAccount ?? "");
-    if (wallet.length === 1 && !shownWallets.has(wallet[0]!.connectionId)) {
-      node.append(row("Wallet", wallet[0]!.walletName ?? "Connected wallet")); shownWallets.add(wallet[0]!.connectionId);
-    }
-    const unavailable = button("Request wallet approval", () => {}, "primary");
-    unavailable.classList.add("review-primary-action"); unavailable.disabled = true;
-    if (!data.connectionConflict) slot.append(unavailable); node.append(actions);
-  }
-  // One primary action occupies this position; its feedback stays below it.
+  // The action position remains available for current-state recovery without
+  // retaining an unavailable approval control.
   const lifetime = element("div", "review-lifetime");
   const remaining = element("span", "review-time-remaining", "Review time remaining");
   remaining.setAttribute("role", "timer");
-  lifetime.append(remaining); node.append(lifetime, feedback);
+  lifetime.append(remaining); node.append(actions, lifetime, feedback);
 
 }
 
 export const reviewRenderer = {
   title: "Review transaction",
   guidance(snapshot, context) {
+    if (snapshot?.state === "closed") {
+      const result = closedReviewCardSchema.safeParse(snapshot.data);
+      if (result.success && (result.data.review?.plan.reviewModel || result.data.request?.execution)) return undefined;
+      if (result.success && !result.data.request && snapshot.reason === "failed") return result.data.result.message;
+      return result.success && result.data.request && !["stopped", "request_failed"].includes(result.data.request.requestStatus)
+        ? "This card is closed. To check this transaction later, ask in chat for a new result card."
+        : "Ask in chat for a new transaction review.";
+    }
     const command = walletCommandGuidance(context);
     if (command) return command;
-    const parsed = workflowViewSchema.safeParse(snapshot?.data);
+    const parsed = reviewViewSchema.safeParse(snapshot?.data);
     if (context.approvalUnresolved) return "Ask in chat to check the status of this same transaction request.";
     if (!context.confirmed || !parsed.success) return context.recoveryNeeded
       ? "Ask in chat to check this review's status before starting another review." : undefined;
     const data = parsed.data, review = data.review;
+    if (snapshot?.reason === "cancelled") return data.request
+      ? "This card is closed. To check this transaction later, ask in chat for a new result card."
+      : "This card is closed. Ask in chat for a new transaction review.";
     if (!data.request && !snapshot?.input.attemptId && review && !review.plan.reviewModel &&
-        (review.status === "expired" || snapshot?.state === "closed" && snapshot.reason !== "completed")) {
+        (review.status === "expired")) {
       return "Ask in chat for a new transaction review.";
     }
     if (data.request || snapshot?.input.attemptId) return context.recoveryNeeded
       ? "Ask in chat to check the status of this same transaction request." : undefined;
     if (!review || review.plan.reviewModel) return undefined;
-    if (data.walletAvailability.status === "unavailable") return t.common.walletStatusRecovery;
-    if (data.connectionReconciliationRequired) return CONNECTION_RECONCILIATION_MESSAGE;
-    if (data.connectionConflict) return "Ask in chat to open wallet connection controls, then disconnect the connections you no longer need.";
-    if (!data.usableConnectionId && data.manageableConnectionIds.length) return "A recorded wallet connection cannot be used for this review. Ask in chat to open wallet connection controls and disconnect the retained connection before connecting again.";
+    if (data.nextStep.message) return data.nextStep.message;
     if (context.readOnly) return "Ask in chat for a new transaction review.";
-    if (review.error && data.mode === "review" && snapshot?.state === "ready" &&
-        !data.allowedActions.includes("prepare_review") && !review.preparing) {
-      return "You can check or change your selected account in the wallet connection card. Ask in chat to open it.";
-    }
     return context.recoveryNeeded && !data.allowedActions.length ? "Ask in chat to check this review's status." : undefined;
   },
   titleFor: (snapshot) => {
-    const view = workflowViewSchema.safeParse(snapshot.data);
+    const view = snapshot.state === "closed" ? closedReviewCardSchema.safeParse(snapshot.data) : reviewViewSchema.safeParse(snapshot.data);
     return view.success && view.data.request?.execution ? "Transaction result" : "Review transaction";
   },
   controls: (snapshot, act, display, _wallet = undefined, context = undefined) => reviewView(snapshot, display, act, context),

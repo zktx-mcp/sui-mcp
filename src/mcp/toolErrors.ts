@@ -1,3 +1,4 @@
+import { SettingsConflict } from "../core/session/settingsOperation.js";
 import { WalletUnavailableError } from "../core/session/walletConnection.js";
 import { WorkflowConflict } from "../core/session/sqliteWalletWorkflowStore.js";
 import { CardError } from "../core/session/cardSessionStore.js";
@@ -59,9 +60,10 @@ export function transactionActivityToolError(error: unknown, logger: ToolErrorLo
 
 export function sessionDomainToolError(error: unknown) {
   if (error instanceof WalletUnavailableError) return errorToolResult({ kind: "wallet_unavailable",
-    details: { reason: error.reason, message: error.message } });
-  if (error instanceof WorkflowConflict || error instanceof CardError) {
-    return errorToolResult({ kind: "input_invalid", details: { reason: error.message } });
+    details: { ...(error.availability.status === "unavailable" ? { reason: error.availability.reason } : {}),
+      message: error.message, walletAvailability: error.availability } });
+  if (error instanceof WorkflowConflict || error instanceof CardError || error instanceof SettingsConflict) {
+    return errorToolResult({ kind: "input_invalid", details: { reason: error instanceof WorkflowConflict ? error.reason ?? error.message : error.message, message: error.message } });
   }
   if (error instanceof WaitRequestAbortedError) {
     return errorToolResult({

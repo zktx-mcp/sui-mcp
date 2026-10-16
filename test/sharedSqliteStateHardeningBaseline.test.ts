@@ -1,3 +1,4 @@
+import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -300,7 +301,7 @@ describe("shared SQLite state hardening baseline", () => {
     }
   });
 
-  it("checks the active account inside the wallet-binding transaction", async () => {
+  it("binds the reviewed account without retargeting it to a concurrent default change", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sui-mcp-active-account-binding-"));
     const dbPath = join(dir, "sui-mcp.sqlite");
     const firstStore = new SqliteActivityStore({
@@ -326,13 +327,9 @@ describe("shared SQLite state hardening baseline", () => {
           { next: initial }
         )
       ).toBe(true);
-      await firstStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-06-26T00:00:01.000Z"));
+      await seedCurrentReadAccount(firstStore, walletAccount, new Date("2026-06-26T00:00:01.000Z"));
       const staleExpected = sessions.get(initial.id)!;
-      await secondStore.setActiveAccount(
-        `0x${"b".repeat(64)}`,
-        "wallet_connection",
-        new Date("2026-06-26T00:00:02.000Z")
-      );
+      await seedCurrentReadAccount(secondStore, `0x${"b".repeat(64)}`, new Date("2026-06-26T00:00:02.000Z"));
 
       await expect(
         firstStore.recordReviewTransitionWithLiveSession?.(
@@ -354,16 +351,17 @@ describe("shared SQLite state hardening baseline", () => {
             }
           }
         )
-      ).rejects.toThrow("active account changed");
+      ).resolves.toBe(true);
 
-      expect(sessions.get(initial.id)).toMatchObject({ status: "awaiting_wallet" });
+      expect(sessions.get(initial.id)).toMatchObject({ status: "wallet_connected", account: walletAccount });
+      expect((await firstStore.getActiveAccount())?.address).toBe(`0x${"b".repeat(64)}`);
       expect(
         (
           observerDb
             .prepare(`SELECT COUNT(*) AS count FROM review_status_transitions WHERE event = 'wallet_connected'`)
             .get() as { count: number }
         ).count
-      ).toBe(0);
+      ).toBe(1);
     } finally {
       observerDb.close();
       firstStore.close();

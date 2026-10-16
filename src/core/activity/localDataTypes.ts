@@ -1,3 +1,4 @@
+import type { WalletChainId } from "../session/chainAccounts.js";
 export const LOCAL_DATA_EXPORT_FORMAT = "sui-mcp.local-data" as const;
 export const LOCAL_DATA_NETWORK = "mainnet" as const;
 
@@ -23,7 +24,6 @@ export type LocalDataEnvelope = {
 
 export type LocalDataPayload = {
   accounts: AccountExportRow[];
-  activeAccountContext: ActiveAccountContextExportRow[];
   reviewSessions: ReviewSessionExportRow[];
   reviewStateSnapshots: ReviewStateSnapshotExportRow[];
   reviewStatusTransitions: ReviewStatusTransitionExportRow[];
@@ -36,20 +36,12 @@ export type LocalDataPayload = {
 
 export type AccountExportRow = {
   id: number;
-  sui_address: string;
+  chain_id: WalletChainId;
+  address: string;
   first_seen_at: string;
   last_used_at: string;
   first_source: string;
   last_source: string;
-};
-
-export type ActiveAccountContextExportRow = {
-  id: number;
-  account_id: number | null;
-  source: string;
-  set_at: string;
-  wallet_name?: string | null | undefined;
-  wallet_id?: string | null | undefined;
 };
 
 export type ReviewSessionExportRow = {
@@ -169,9 +161,6 @@ export type LocalDataImportPreview = {
   currentCounts: LocalDataCounts;
   incomingCounts: LocalDataCounts;
   willReplace: true;
-  activeAccountChange: "unchanged" | "set" | "cleared";
-  currentReadAddress: string | null;
-  incomingReadAddress: string | null;
   restartRequiredAfterImport: boolean;
 };
 

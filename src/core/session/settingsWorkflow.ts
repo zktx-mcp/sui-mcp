@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { basename, dirname } from "node:path";
-import { TextDecoder } from "node:util";
+import { TextDecoder, isDeepStrictEqual } from "node:util";
 import type { SqliteActivityStore } from "../activity/sqliteActivityStore.js";
 import type { SqliteLocalDataService } from "../activity/localDataService.js";
 import { LocalDataError } from "../activity/localDataTypes.js";
@@ -14,7 +14,7 @@ import { DEFAULT_SESSION_TTL_MS } from "./localSession.js";
 import { isSettingsDownloadFile, settingsDownloadPath } from "./settingsFileIdentity.js";
 import { SettingsFileStore, SettingsDownloadPathExists, settingsFileDigest, decodeSettingsChunk } from "./settingsFileStore.js";
 import { SqliteSettingsWorkflowStore, settingsIdentity } from "./sqliteSettingsWorkflowStore.js";
-import { SettingsConflict, settingsDownload, isSettingsDownloadFileAction, type SettingsDownloadFileAction, settingsViewSchema, endpointPreparationSchema, storedRestoreCheckSchema, retainedBackupRejection, permitsBackupRecheck, type RestoreCheck, type SettingsAction, type SettingsDraft, type SettingsFile, type SettingsOperation, type SettingsResult, type SettingsView } from "./settingsOperation.js";
+import { SettingsConflict, settingsCardInputSchema, settingsDownload, isSettingsDownloadFileAction, type SettingsDownloadFileAction, settingsViewSchema, endpointPreparationSchema, storedRestoreCheckSchema, retainedBackupRejection, permitsBackupRecheck, type RestoreCheck, type SettingsAction, type SettingsDraft, type SettingsFile, type SettingsOperation, type SettingsResult, type SettingsView } from "./settingsOperation.js";
 import type { WalletWorkflow } from "./walletWorkflow.js";
 import type { WalletRuntimeEvent } from "./walletRuntime.js";
 import type { SettingsLocalSaveOutcome } from "./settingsOperation.js";
@@ -47,7 +47,27 @@ export class SettingsWorkflow {
       runtimeEvent: (event) => this.runtimeEvent(event), readyPublished: (runId) => this.readyPublished(runId) });
   }
   private get records() { this.options.assertCurrent(); return this.options.records; }
-  create(record: CardRecord): void { this.records.create(record); }
+  async create(record: CardRecord): Promise<void> {
+    const input = settingsCardInputSchema.parse(record.state.input);
+    if (!input.operationStatus) { this.records.create(record); return; }
+    const operation = this.records.get(input.operationStatus.operationId);
+    if (!operation || operation.dataEpoch !== this.records.control().data_epoch) {
+      throw new SettingsConflict("This Settings request is not available in the current profile and server run.");
+    }
+    const original = this.records.cards.get(operation.cardId);
+    if (!original) throw new SettingsConflict("This Settings request is unavailable.");
+    const download = settingsDownload(operation);
+    const targetId = download?.localSave?.attempts.find((a) => a.saveAttemptId === download.localSave?.currentSaveAttemptId)?.cardId ??
+      download?.attempts.find((a) => a.attemptId === download.currentAttemptId)?.cardId;
+    const target = targetId ? this.records.cards.get(targetId) ?? original : original;
+    const current = await this.describe(target, true);
+    const { restoreCheck: _restoreCheck, ...status } = current.data;
+
+    const data = { ...status, allowedActions: [], observe: false,
+      ...(current.data.download ? { download: { ...current.data.download, allowedFileActions: [] } } : {}) };
+    // A status card is a recorded read, never a new Settings operation or input permission.
+    this.records.cards.create({ ...record, state: { ...record.state, state: "closed", reason: "completed", data } });
+  }
   operationKind(record: CardRecord): SettingsDraft["kind"] | undefined { return this.records.forCard(record).draft?.kind; }
   recoverOwner(): void {
     // Invalidate old input synchronously. Verifying a prior backup and removing
@@ -61,6 +81,7 @@ export class SettingsWorkflow {
           // Inherit settlement, never the departed card's input permission.
           // Keep its final/file reservation until the existing artifact is checked.
           this.records.db.prepare("UPDATE settings_operations SET owner_id=? WHERE operation_id=?").run(this.records.ownerId, operation.operationId);
+
         } else this.records.endDownload(row.operation_id, "server_restarted");
       }
       const rows = this.records.db.prepare("SELECT operation_id FROM settings_operations WHERE owner_id!=? AND phase!='terminal'")
@@ -70,24 +91,35 @@ export class SettingsWorkflow {
         const file = operation.fileId ? this.records.file(operation.fileId) : undefined;
         const card = this.records.cards.get(operation.cardId);
         if (!card) continue;
-        const verifyExport = operation.draft?.kind === "export_local_data" && file?.role === "export" && !!operation.admittedAt;
         const result: SettingsResult = { outcome: "interrupted", recordedAt: this.now().toISOString(),
           message: operation.admittedAt
             ? "Sui MCP restarted before this confirmed change finished. It will not be repeated. Check the result of the original request separately."
             : "Sui MCP restarted before you confirmed this change. It will not be repeated." };
-        this.records.db.prepare(`UPDATE settings_operations SET owner_id=?,phase=?,result_json=?,checkpoint=? WHERE operation_id=?`)
-          .run(this.records.ownerId, verifyExport ? "executing" : "terminal", verifyExport ? null : JSON.stringify(result),
-            verifyExport ? "verify_export_after_owner_change" : null, operation.operationId);
+        this.records.db.prepare(`UPDATE settings_operations SET owner_id=?,phase='terminal',result_json=? WHERE operation_id=?`)
+          .run(this.records.ownerId, JSON.stringify(result), operation.operationId);
         const reason = card.state.reason ?? (card.state.state === "ready" && Date.parse(card.state.expiresAt) <= this.now().getTime() ? "expired" : "server_restarted");
-        if (this.records.db.prepare(`UPDATE live_read_cards SET owner_id=?,state=?,reason=?,revision=revision+1
-          WHERE id=? AND owner_id=? AND token_hash=? AND revision=?`).run(this.records.ownerId, verifyExport ? "running" : "closed",
-            verifyExport ? null : reason, card.state.cardId, card.ownerId, card.tokenHash, card.state.revision).changes !== 1) {
+        this.records.invalidateUpload(operation);
+        if (card.state.state !== "closed" && !this.records.cards.replace(card, { ...card, ownerId: this.records.ownerId,
+          state: { ...card.state, state: "closed", reason, revision: card.state.revision + 1,
+            data: this.records.resultView(operation, result) } }, this.now())) {
           throw new SettingsConflict("The interrupted Settings card changed while its status was being updated.");
         }
-        if (file?.role === "upload") this.records.writeFile({ ...file, invalidated: true });
         this.records.db.prepare(`UPDATE settings_control SET active_operation_id=NULL,wallet_input_blocked=0,wallet_block_operation_id=NULL
           WHERE id=1 AND active_operation_id=?`).run(operation.operationId);
         if (file) this.records.releaseFileIO(file.fileId);
+      }
+      // Every purpose card loses input when its owner ends, including an
+      // unadmitted redelivery and a save still owned by its domain journal.
+      const pendingCards = this.records.db.prepare("SELECT id FROM live_read_cards WHERE kind='settings' AND state!='closed' AND owner_id!=?")
+        .all(this.records.ownerId) as { id: string }[];
+      for (const { id } of pendingCards) {
+        const card = this.records.cards.get(id)!, operation = this.records.get(card.operationId!);
+        if (!operation) throw new SettingsConflict("The interrupted Settings operation is unavailable.");
+        const result: SettingsResult = { outcome: "interrupted", recordedAt: this.now().toISOString(),
+          message: "This card ended when the server restarted. Check the original operation's current result in a new status card; no effect will be repeated." };
+        if (!this.records.cards.replace(card, { ...card, ownerId: this.records.ownerId,
+          state: { ...card.state, state: "closed", reason: "server_restarted", revision: card.state.revision + 1,
+            data: this.records.resultView(operation, result) } }, this.now())) throw new SettingsConflict("The interrupted Settings card changed during recovery.");
       }
       // The departed owner may have committed a terminal result and finished
       // physical I/O, but failed to persist its final I/O release. Terminal
@@ -161,22 +193,8 @@ export class SettingsWorkflow {
       await this.cleanupTemporaryFiles();
     });
   }
-  private async verifyPriorExport(operation: SettingsOperation): Promise<void> {
-    const file = operation.fileId ? this.records.file(operation.fileId) : undefined;
-    let result: SettingsResult = { outcome: "interrupted", recordedAt: this.now().toISOString(),
-      message: "Sui MCP restarted and the backup file could not be checked. Open a new Settings card to create another backup." };
-    if (file) {
-      try {
-        await this.options.files.verifyExport(file);
-        result = { outcome: "completed", recordedAt: this.now().toISOString(), message: "The previously created local backup was verified.",
-          details: { path: this.options.files.exportPath(file), filename: file.displayName, fileId: file.fileId, sha256: file.sha256, totalSize: file.totalSize } };
-      } catch { /* A missing artifact is never regenerated on a read. */ }
-    }
-    this.options.assertCurrent();
-    this.retainResult(operation.operationId, result, false, file && result.outcome === "completed" ? { ...file, sealed: true, receivedSize: file.totalSize } : undefined);
-  }
   async readFile(record: CardRecord, fileId: string, offset: number, limit: number, attemptId?: string): Promise<{ file: SettingsFile; offset: number; chunkBase64: string }> {
-    const operation = this.records.forCard(record), file = this.records.file(fileId);
+    const operation = this.records.forCard(record);
     if (operation.draft?.kind === "download_backup") {
       if (this.closing) throw new SettingsConflict("This server is closing; the download cannot continue.");
       this.records.expireDownloads(operation.operationId);
@@ -201,11 +219,7 @@ export class SettingsWorkflow {
         await this.cleanupTemporaryFiles(operation.operationId);
       }
     }
-    if (operation.result?.outcome !== "completed" || operation.draft?.kind !== "export_local_data" || operation.fileId !== fileId ||
-        !file || file.operationId !== operation.operationId || !file.sealed || file.invalidated || attemptId !== undefined) throw new SettingsConflict("This completed backup is not available for download.");
-    const length = Math.min(limit, file.totalSize - offset);
-    const data = await this.options.files.readExportRange(file, offset, length);
-    this.options.assertCurrent(); return { file, offset, chunkBase64: data.toString("base64") };
+    throw new SettingsConflict("This Settings request does not provide a download.");
   }
   private async startDownload(expected: CardRecord, input: Extract<SettingsAction, { action: "settings_download_backup" }>): Promise<void> {
     let bytes!: Buffer;
@@ -225,7 +239,7 @@ export class SettingsWorkflow {
     try {
       await this.trackDownloadIO(file.fileId, () => this.options.files.createDownload(file, data)); this.options.assertCurrent();
       readyAt = this.now().toISOString();
-      result = { outcome: "completed", completionScope: "backup_snapshot", recordedAt: readyAt,
+      result = { outcome: "completed", completionScope: "backup_delivery", recordedAt: readyAt,
         message: "The backup is ready for download. This does not confirm that a file was saved.",
         details: { filename: file.displayName, fileId: file.fileId, sha256: file.sha256, totalSize: file.totalSize } };
     } catch (error) {
@@ -237,7 +251,7 @@ export class SettingsWorkflow {
         // file's owner. Do not delete that pre-existing item as cleanup.
         this.records.writeFile({ ...existing, invalidated: true, cleanup: "complete" });
       });
-      result = { outcome: "failed", completionScope: "backup_snapshot", recordedAt: this.now().toISOString(),
+      result = { outcome: "failed", completionScope: "backup_delivery", recordedAt: this.now().toISOString(),
         message: "The backup could not be prepared. Open a new Settings card to try again." };
     }
     this.finishedFileIO.add(file.fileId);
@@ -286,7 +300,9 @@ export class SettingsWorkflow {
     }
     // Retain the ended physical outcome if the DB write fails. A read retries
     // this same settlement, not link(), a new snapshot, or a Host request.
-    this.records.settleLocalSave(file.operationId, retained.saveAttemptId, retained.outcome);
+    const path = retained.outcome.status === "saved" ? this.options.files.localBackupPath(file) : undefined;
+    this.records.settleLocalSave(file.operationId, retained.saveAttemptId, retained.outcome,
+      path ? { directory: dirname(path), filename: basename(path) } : undefined);
     this.localSaveResults.delete(file.operationId);
     this.scheduleDownloadExpiry(); await this.cleanupTemporaryFiles(file.operationId);
   }
@@ -326,8 +342,8 @@ export class SettingsWorkflow {
     }
     if (draft.kind === "set_endpoint" || draft.kind === "restore_endpoint") return settingsIdentity({ ...common, target: this.options.resolveEndpoint(draft),
       current: this.options.preferences.getLocalSettingSync(draft.endpoint === "grpc" ? "suiGrpcUrl" : "suiGraphqlUrl") });
-    if (draft.kind === "clear_read_address") return settingsIdentity({ ...common,
-      current: this.records.db.prepare("SELECT * FROM active_account_context WHERE id=1").get() ?? null });
+    if (draft.kind === "set_wallet_networks") return settingsIdentity({ ...common,
+      current: this.options.preferences.getLocalSettingSync("walletConnectionChains") });
     if (draft.kind === "import_local_data" || draft.kind === "reset_local_data") return settingsIdentity({ ...common,
       userDataRevision: control.user_data_revision, file: operation.fileId ? this.records.file(operation.fileId) : null });
     return settingsIdentity(common);
@@ -352,7 +368,7 @@ export class SettingsWorkflow {
     return previous;
   }
   private requireConfirmation(record: CardRecord, operation: SettingsOperation): void {
-    if (["export_local_data", "download_backup"].includes(operation.draft?.kind ?? "")) throw new SettingsConflict("Open a new Settings card and use Download backup.");
+    if (["set_wallet_networks", "clear_read_address", "download_backup"].includes(operation.draft?.kind ?? "")) throw new SettingsConflict("This action is applied by its explicit save or download request.");
     const replacing = operation.draft?.kind === "restart_wallet_service" && typeof operation.preparation?.supersedesOperationId === "string"
       ? operation.preparation.supersedesOperationId : undefined;
     this.records.requireAdmission(record, { action: "settings_confirm", operationId: operation.operationId,
@@ -416,8 +432,21 @@ export class SettingsWorkflow {
     }
     return file.sealed ? required("Check this backup again before restoring.") : { status: "receiving" };
   }
-  async describe(record: CardRecord): Promise<{ record: CardRecord; data: SettingsView }> {
+  private expireInput(record: CardRecord): CardRecord {
+    if (record.state.state !== "ready" || Date.parse(record.state.expiresAt) > this.now().getTime()) return record;
+    const operation = this.records.forCard(record);
+    const result: SettingsResult = { outcome: "interrupted", recordedAt: this.now().toISOString(),
+      message: record.state.input.backupDelivery ? "This delivery card expired. Ask in chat for a new delivery card if the backup is still available."
+        : "The time to confirm this Settings change has ended." };
+    if (record.state.input.backupDelivery) {
+      if (!this.records.cards.replace(record, { ...record, state: { ...record.state, state: "closed", reason: "expired",
+        revision: record.state.revision + 1, data: this.records.resultView(operation, result) } }, this.now())) throw new SettingsConflict("This delivery card changed before it could expire.");
+    } else this.records.finish(operation.operationId, result, undefined, "expired");
+    return this.records.cards.get(record.state.cardId)!;
+  }
+  async describe(record: CardRecord, currentOperation = false): Promise<{ record: CardRecord; data: SettingsView }> {
     this.options.assertCurrent();
+    record = this.expireInput(record);
     let operation = this.records.forCard(record);
     this.observeLocalSave(operation);
     let downloadExpiryPending = false;
@@ -430,15 +459,13 @@ export class SettingsWorkflow {
     if (operation.result === undefined) {
       this.synchronize(operation.operationId);
       operation = this.records.get(operation.operationId)!;
-      if (operation.checkpoint === "verify_export_after_owner_change" && !operation.result) await this.verifyPriorExport(operation);
       if (operation.draft?.kind === "restart_wallet_service" && operation.admittedAt) {
         this.options.wallet.recoveryContext();
         this.assertRecoveryRecorded();
       }
       this.records.transaction(() => {
-        record = this.records.cards.evaluate(record, () => this.now()).record;
-        if (record.state.state === "closed" && record.state.reason === "expired") {
-          if (operation.fileId) this.invalidateFile(operation.fileId);
+        record = this.expireInput(record);
+        if (!record.state.input.backupDelivery && record.state.state === "closed" && record.state.reason === "expired") {
           this.records.finish(operation.operationId, { outcome: "interrupted", recordedAt: this.now().toISOString(), message: "The time to confirm this Settings change has ended." });
         }
       });
@@ -447,7 +474,7 @@ export class SettingsWorkflow {
     try { this.records.expireDownloads(operation.operationId); }
     catch (error) {
       this.options.assertCurrent();
-      if (!operation.result) throw error;
+      if (!operation.result && !settingsDownload(operation)?.readyAt) throw error;
       downloadExpiryPending = true;
     }
     operation = this.records.get(operation.operationId)!;
@@ -465,11 +492,12 @@ export class SettingsWorkflow {
     const restoreCheck = operation.draft?.kind === "import_local_data" && !operation.result
       ? this.restoreCheck(operation, record, file) : undefined;
     const allowed: SettingsAction["action"][] = [];
-    if (record.state.state === "ready" && record.ownerId === this.records.ownerId && operation.dataEpoch === this.records.control().data_epoch && !operation.result) {
+    if (!record.state.input.backupDelivery && record.state.state === "ready" && record.ownerId === this.records.ownerId && operation.dataEpoch === this.records.control().data_epoch && !operation.result) {
       const fileIOAvailable = this.records.fileIOAvailable();
       if (fileIOAvailable) {
         allowed.push("settings_select", "settings_cancel");
-        if (this.records.control().active_operation_id === null) allowed.push("settings_download_backup");
+        if (this.records.control().active_operation_id === null) allowed.push("settings_download_backup", "settings_save_wallet_networks");
+        if (facts?.readAddress && facts.readConnectionId && this.records.control().active_operation_id === null) allowed.push("settings_clear_read_address");
         if (operation.draft) allowed.push("settings_back");
       }
       if (operation.phase === "prepared" && (restoreCheck ? restoreCheck.status === "can_restore" : this.canConfirm(record, operation))) {
@@ -482,7 +510,7 @@ export class SettingsWorkflow {
         // writes still require the shared reservation check at their admission.
         if (fileIOAvailable && ["draft", "uploading"].includes(operation.phase) &&
             (file && !file.invalidated || this.records.canReserveFileIO(operation.operationId))) allowed.push("settings_begin_upload");
-      } else if (operation.phase !== "prepared" && operation.draft && !["export_local_data", "download_backup"].includes(operation.draft.kind) &&
+      } else if (operation.phase !== "prepared" && operation.draft && !["set_wallet_networks", "clear_read_address", "download_backup"].includes(operation.draft.kind) &&
           (operation.draft.kind !== "restart_wallet_service" || this.canPrepareRestart())) allowed.push("settings_prepare");
       if (operation.phase === "uploading" && file && !file.invalidated && !file.sealed) {
         if (file.receivedSize > 0 || file.receivedSize < file.totalSize && this.records.canReserveFileIO(operation.operationId)) {
@@ -506,30 +534,45 @@ export class SettingsWorkflow {
         ...(localSave.failure ? { failure: localSave.failure } : {}), ...(localSave.savedAt ? { savedAt: localSave.savedAt } : {}) } } : {}),
       ...(downloadEnd ? { endReason: downloadEnd } : {}),
       ...(storedDownload.expiresAt ? { expiresAt: storedDownload.expiresAt, remainingMs: Math.max(0, Date.parse(storedDownload.expiresAt) - this.now().getTime()) } : {}),
-      allowedFileActions: currentDownloadOwner && !this.closing ? [
-        ...(storedDownload.readyAt ? ["settings_report_download" as const] : []),
-        ...(!downloadEnd && file && !file.invalidated && localSave?.status !== "saving" ? ["settings_cancel_download" as const,
-          ...(!localSave && storedDownload.readyAt ? ["settings_retry_download" as const] : []),
-          ...(localSave && (localSave.status === "needs_consent" || localSave.status === "failed" && localSave.failure === "not_published") &&
+      allowedFileActions: currentDownloadOwner && record.state.state !== "closed" && !this.closing ? [
+        ...(storedDownload.readyAt && currentAttempt?.cardId === record.state.cardId ? ["settings_report_download" as const] : []),
+        ...(!downloadEnd && file && !file.invalidated && localSave?.status !== "saving" ? [
+          ...(currentAttempt?.cardId === record.state.cardId ? ["settings_cancel_download" as const] : []),
+          ...(record.state.state === "ready" && record.state.input.backupDelivery && !localSave && storedDownload.readyAt ? ["settings_retry_download" as const] : []),
+          ...(record.state.state === "ready" && record.state.input.backupDelivery && localSave && (localSave.status === "needs_consent" || localSave.status === "failed" && localSave.failure === "not_published") &&
             this.records.canReserveFileIO(operation.operationId) ? ["settings_store_backup" as const] : [])] : [])] : []
     } : undefined;
     if (storedDownload && !downloadExpiryPending) this.scheduleDownloadExpiry();
-    const cleanup = operation.result ? downloadExpiryPending ? "pending" : this.records.temporaryFileCleanup(operation.operationId) : undefined;
-    const backupPath = localSave?.status === "saved" && file ? this.options.files.localBackupPath(file)
-      : operation.draft?.kind === "export_local_data" && operation.result?.outcome === "completed" ? operation.result.details?.path : undefined;
-    const data: SettingsView = { kind: "settings", operationId: operation.operationId, phase: operation.phase, allowedActions: allowed,
-      observe: !operation.result && (["executing", "stopping", "starting"].includes(operation.phase) || restoreCheck?.status === "checking"),
+    const backupPath = localSave?.status === "saved" && file ? this.options.files.localBackupPath(file) : undefined;
+    const readingDownloadStatus = currentOperation && storedDownload !== undefined;
+    const activeDelivery = storedDownload && !currentOperation && record.state.state !== "closed";
+    const deliveryPending = storedDownload && (localSave?.status === "saving" || !downloadEnd &&
+      (!storedDownload.readyAt || !currentAttempt?.hostReport && !localSave));
+    const recordedResult = currentOperation && storedDownload
+      ? (deliveryPending ? undefined : this.records.downloadResult(operation))
+      : operation.result;
+    const cleanup = recordedResult ? downloadExpiryPending ? "pending" : this.records.temporaryFileCleanup(operation.operationId) : undefined;
+    const data: SettingsView = { kind: "settings", operationId: operation.operationId,
+      phase: readingDownloadStatus ? recordedResult ? "terminal" : "executing"
+        : activeDelivery ? record.state.state === "ready" ? "draft" : "executing" : operation.phase, allowedActions: readingDownloadStatus ? [] : allowed,
+      observe: !readingDownloadStatus && (activeDelivery ? !storedDownload.readyAt || localSave?.status === "saving" : !operation.result && (["executing", "stopping", "starting"].includes(operation.phase) || restoreCheck?.status === "checking")),
       ...(restoreCheck ? { restoreCheck } : {}), ...(download ? { download } : {}),
       ...(typeof backupPath === "string" ? { backupLocation: { directory: dirname(backupPath), filename: basename(backupPath) } } : {}),
       ...(operation.draft ? { draft: operation.draft } : {}), ...(operation.preparationId ? { preparationId: operation.preparationId } : {}),
-      ...(operation.preparation && !storedDownload ? { preparation: operation.preparation } : {}), ...(operation.result ? { result: operation.result } : {}),
-      ...(cleanup ? { temporaryFileCleanup: cleanup } : {}),
+      ...(operation.preparation && !storedDownload ? { preparation: operation.preparation } : {}), ...(recordedResult && !activeDelivery ? { result: recordedResult } : {}),
+      ...(cleanup && !activeDelivery ? { temporaryFileCleanup: cleanup } : {}),
       ...(file ? { file: { fileId: file.fileId, displayName: file.displayName, totalSize: file.totalSize, receivedSize: file.receivedSize, sha256: file.sha256, sealed: file.sealed, cleanup: file.cleanup } } : {}),
       ...(facts ? { facts } : {}), ...(operation.priorRunId ? { priorRunId: operation.priorRunId } : {}),
       ...(operation.nextRunId ? { nextRunId: operation.nextRunId } : {}),
       ...(operation.supersedesOperationId ? { supersedesOperationId: operation.supersedesOperationId } : {}),
       ...(operation.supersededByOperationId ? { supersededByOperationId: operation.supersededByOperationId } : {}) };
     assertNoForbiddenMcpFields(data);
+    if (!currentOperation && record.state.state === "closed" && record.state.data !== undefined) return { record, data: settingsViewSchema.parse(record.state.data) };
+    if (!currentOperation && record.state.input.backupDelivery && downloadEnd) {
+      this.records.transaction(() => this.records.finishDownloadCard(operation.operationId, record.state.cardId));
+      record = this.records.cards.get(record.state.cardId)!;
+      return { record, data: settingsViewSchema.parse(record.state.data) };
+    }
     return { record, data: settingsViewSchema.parse(data) };
   }
   async act(expected: CardRecord, action: SettingsAction): Promise<void> {
@@ -541,8 +584,37 @@ export class SettingsWorkflow {
       await this.startDownload(expected, action); return;
     }
     if (isSettingsDownloadFileAction(action)) { await this.continueDownload(expected, action); return; }
-    if (action.action === "settings_select" && ["export_local_data", "download_backup"].includes(action.draft.kind)) {
-      throw new SettingsConflict("Use Download backup to request a backup in one step.");
+    if (action.action === "settings_clear_read_address" || action.action === "settings_save_wallet_networks") {
+      const input = action;
+      if (stored.acceptedDigest === settingsIdentity(input)) return;
+      this.records.transaction(() => {
+        const { card, operation } = this.records.requireInput(expected, input.operationId);
+        this.records.requireFinalSlot();
+        const previous = input.action === "settings_save_wallet_networks" ? this.options.preferences.getWalletConnectionChainsSync() : undefined;
+        if (input.action === "settings_save_wallet_networks" && !isDeepStrictEqual(previous, input.expectedChains)) {
+          throw new SettingsConflict("The saved networks changed. Check the current settings before saving your selection.");
+        }
+        this.records.claimFinal(operation.operationId);
+        const next: SettingsOperation = { operationId: operation.operationId, cardId: operation.cardId, ownerId: operation.ownerId,
+          dataEpoch: operation.dataEpoch, phase: "executing", draft: input.action === "settings_clear_read_address"
+            ? { kind: "clear_read_address" } : { kind: "set_wallet_networks", chains: input.chains },
+          acceptedDigest: settingsIdentity(input), admittedAt: this.now().toISOString() };
+        this.records.write(operation, next, card, { ...card, acceptedInput: input,
+          state: { ...card.state, state: "running", revision: card.state.revision + 1 } });
+        if (input.action === "settings_clear_read_address") {
+          this.records.clearReadAddress(input.connectionId, input.account);
+          this.records.finish(operation.operationId, { outcome: "completed", recordedAt: this.now().toISOString(),
+            message: "The saved read address was cleared. Your wallet connection and transaction requests are unchanged." });
+        } else {
+          this.options.preferences.setLocalSettingSync("walletConnectionChains", input.chains, this.now());
+          this.options.wallet.closeConnectionCardsWithChangedNetworks(input.chains);
+          this.records.finish(operation.operationId, { outcome: "completed", recordedAt: this.now().toISOString(),
+            message: "Wallet networks were saved. They apply to new connections; existing connections are unchanged.",
+            details: { walletConnectionChains: input.chains, previousWalletConnectionChains: previous, appliesTo: "new_connections" } });
+        }
+      });
+      await this.cleanupTemporaryFiles(input.operationId);
+      return;
     }
     if (action.action === "settings_confirm" && stored.acceptedDigest === settingsIdentity(action)) return;
     if (action.action === "settings_confirm") { await this.confirm(expected, action); return; }
@@ -550,11 +622,11 @@ export class SettingsWorkflow {
     if (action.action === "settings_begin_upload") { await this.beginUpload(expected, action); return; }
     if (action.action === "settings_upload_chunk") { await this.upload(expected, action); return; }
     if (action.action === "settings_seal_upload") { await this.seal(expected, action); return; }
+    let selected: CardRecord | undefined;
     this.records.transaction(() => {
       const { card, operation } = this.records.requireInput(expected, "operationId" in action ? action.operationId : undefined);
       if (!this.records.fileIOAvailable()) throw new SettingsConflict("Wait for the file transfer to finish before changing your selection.");
       if (action.action === "settings_cancel") {
-        if (operation.fileId) this.invalidateFile(operation.fileId);
         this.records.finish(operation.operationId, { outcome: "interrupted", recordedAt: this.now().toISOString(), message: "This Settings change was cancelled. Nothing was applied." });
         return;
       }
@@ -567,24 +639,21 @@ export class SettingsWorkflow {
       if (action.action === "settings_back") { this.records.resetPreparation(operation, card); return; }
       const next = this.withoutPreparation(operation);
       if (action.action === "settings_select") {
-        if (operation.fileId) this.invalidateFile(operation.fileId);
         delete next.fileId;
         delete next.preparation;
         next.draft = action.draft; next.phase = "draft";
       }
       this.records.write(operation, next, card);
+      if (action.action === "settings_select" && action.draft.kind !== "import_local_data") selected = this.records.cards.get(card.state.cardId);
     });
     await this.cleanupTemporaryFiles(stored.operationId);
-  }
-  private invalidateFile(id: string): void {
-    const file = this.records.file(id);
-    if (file?.role === "upload") this.records.writeFile({ ...file, invalidated: true, cleanup: "pending" });
+    if (selected) await this.prepare(selected, stored.operationId);
   }
   private async prepare(expected: CardRecord, id: string): Promise<void> {
     const initial = this.records.requireInput(expected, id);
     const draft = initial.operation.draft;
     if (!draft) throw new SettingsConflict("Choose what you want to change in Settings first.");
-    if (["export_local_data", "download_backup"].includes(draft.kind)) throw new SettingsConflict("Open a new Settings card and use Download backup.");
+    if (["set_wallet_networks", "clear_read_address", "download_backup"].includes(draft.kind)) throw new SettingsConflict("This action is applied by its explicit save or download request.");
     let preparation: Record<string, unknown>;
     if (draft.kind === "import_local_data") {
       await this.checkImport(expected, id);
@@ -632,7 +701,6 @@ export class SettingsWorkflow {
         if (!existing.sealed && operation.phase !== "uploading") this.records.write(operation, { ...this.withoutPreparation(operation), phase: "uploading" }, card);
         return;
       }
-      if (operation.fileId) this.invalidateFile(operation.fileId);
       const fileId = randomUUID();
       file = { fileId, operationId: operation.operationId, role: "upload", relativePath: `.settings-staging/${fileId}.upload`, displayName: action.name,
         totalSize: action.totalSize, receivedSize: 0, sha256: action.sha256, sealed: false, invalidated: false, cleanup: "pending" };
@@ -767,7 +835,7 @@ export class SettingsWorkflow {
   private async confirm(expected: CardRecord, action: Extract<SettingsAction, { action: "settings_confirm" }>): Promise<void> {
     const initial = this.records.requireInput(expected, action.operationId), draft = initial.operation.draft;
     if (!draft || initial.operation.preparationId !== action.preparationId) throw new SettingsConflict("Review the current Settings change before confirming it.");
-    if (["export_local_data", "download_backup"].includes(draft.kind)) throw new SettingsConflict("Open a new Settings card and use Download backup.");
+    if (draft.kind === "download_backup" || draft.kind === "set_wallet_networks" || draft.kind === "clear_read_address") throw new SettingsConflict("This action is applied by its explicit save or download request.");
     if (draft.kind === "restart_wallet_service") { this.restart(expected, action); return; }
     let endpoint: EndpointChange | undefined;
     let imported: Awaited<ReturnType<SqliteLocalDataService["parseAndVerifyImportEnvelope"]>> | undefined;
@@ -827,11 +895,9 @@ export class SettingsWorkflow {
           endpoint: draft.kind === "set_endpoint" || draft.kind === "restore_endpoint" ? draft.endpoint : undefined,
           effectiveValueAtSave: prepared.effectiveValue, effectiveSourceAtSave: prepared.source,
           appliesAfter: SETTINGS_APPLIES_AFTER_RESTART };
-      } else if (draft.kind === "clear_read_address") this.options.activity.clearActiveAccountSync(this.now());
-      else if (replacement) details = this.options.localData.applyValidatedReplacement(imported, decisionTime, expected.state.cardId);
+      } else if (replacement) details = this.options.localData.applyValidatedReplacement(imported, decisionTime, expected.state.cardId);
       this.records.finish(operation.operationId, { outcome: "completed", recordedAt: this.now().toISOString(),
         message: endpoint ? "The network address was saved. This result describes the settings at save time."
-          : draft.kind === "clear_read_address" ? "The default address for viewing assets was cleared. Your wallet connection and transaction requests are unchanged."
           : draft.kind === "import_local_data" ? "Local records were replaced. Restart the apps using Sui MCP before continuing."
           : "Local data was reset. This does not cancel a transaction on Sui or disconnect your wallet app.", details });
     });
@@ -903,11 +969,13 @@ export class SettingsWorkflow {
           ? { ...retained.file, invalidated: current.invalidated, cleanup: current.cleanup } : retained.file);
       }
       if (retained.downloadReadyAt) this.records.recordDownloadReady(id, retained.downloadReadyAt, DOWNLOAD_RETRY_WINDOW_MS);
-      else if (this.records.get(id)?.draft?.kind === "download_backup" && retained.result.outcome !== "completed") this.records.endDownload(id, "source_unavailable");
+      else if (this.records.get(id)?.draft?.kind === "download_backup" && retained.result.outcome !== "completed") this.records.endDownload(id, "source_unavailable", retained.result);
       const fileId = retained.file?.fileId ?? this.records.get(id)?.fileId;
       if (fileId && this.finishedFileIO.has(fileId)) {
         this.records.releaseFileIO(fileId); settledFileId = fileId;
       }
+      if (retained.downloadReadyAt) { this.records.releaseFinal(id); return true; }
+      if (this.records.get(id)?.draft?.kind === "download_backup") return true;
       return this.records.finish(id, retained.result);
     });
     // A later cleanup can reserve this same file. The ended publication must

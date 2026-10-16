@@ -1,11 +1,18 @@
+import { walletCardResult, reviewCardResult, endedCardMessage, type WalletPendingWork } from "./cardResult.js";
+import { readStoredWalletConnectionOperation } from "./sqliteWalletConnectionOperation.js";
+import { readStoredTransactionRequest } from "./sqliteTransactionRequest.js";
 import type { EventLogRecord } from "../eventlog/sink.js";
-import { walletRecoverySchema, type WalletRecovery, type WalletSnapshot } from "./walletRuntime.js";
+import { type WalletSnapshot } from "./walletRuntime.js";
 import { materialStillMatches, type ValidatedReviewMaterial } from "./reviewValidity.js";
 import type { LocalTransactionMaterialStore } from "./transactionMaterialStore.js";
 import { SqliteSessionRecordStore, SqlitePrivateReviewArtifactStore } from "./sqliteSessionStore.js";
-import { reviewPreparationAccount, workflowEligibility, type ConnectionFacts, type ReviewReadTarget, type WorkflowEvaluationInput, type EvaluatedWorkflowState, type WorkflowAction, type ConnectionView } from "./workflowState.js";
+import { fixedReviewTarget, workflowEligibility, walletActionDecision, type ConnectionFacts, type ReviewReadTarget, type WorkflowEvaluationInput, type EvaluatedWorkflowState, type WorkflowAction } from "./workflowState.js";
 import { SessionStoreError } from "./sessionErrors.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { SqliteAccountStore } from "../activity/sqliteAccountStore.js";
+import { SqlitePreferencesRepository } from "../preferences/sqlitePreferencesRepository.js";
+import { pendingWalletConnectionOperationSchema, publicConnectionOperation, type WalletConnectionAction, type WalletConnectionOperationRecord } from "./walletConnectionOperations.js";
+import { initialGrantRevisions, fixedChainAccount, approvedChainResults, type WalletChainId } from "./chainAccounts.js";
 import { isDeepStrictEqual } from "node:util";
 import type { SqliteDatabase } from "../activity/sqliteActivityStoreTypes.js";
 import { assertNoForbiddenMcpFields } from "../action/forbiddenFields.js";
@@ -13,42 +20,36 @@ import { reviewStateOutputSchema } from "../action/schemas.js";
 import { LIVE_REVIEW_SESSION_WRITE_CONTRACT_VERSION } from "./liveReviewSessionContract.js";
 import { SqliteCardRecordStore } from "./sqliteCardStore.js";
 import { receiptDisplaySchema, type CardRecord, type ReceiptDisplay } from "./cardSession.js";
-import { isOwnedConnectedWallet, walletConnectionSelection, walletConnectionSchema, walletRecoveryImpactSchema, SUI_MAINNET_WALLET_CHAIN, SUI_SIGN_TRANSACTION_METHOD,
-  type WalletConnection, type WalletConnectionRecord, type WalletSession, type StoredReadAccount, type WalletConnectionPresence, type WalletRecoveryImpact } from "./walletConnection.js";
-import { SIGNATURE_WAIT_MS, CHAIN_RECEIPT_LOOKUP_MAX_AGE_MS, INITIAL_CHAIN_OBSERVATION_STATUSES, isInitialChainObservation, transactionRequestSchema,
+import { isOwnedConnectedWallet, usableWalletConnection, connectionHasSuiSigningScope, walletConnectionEligibility, walletConnectionSchema, walletRecoveryImpactSchema, SUI_MAINNET_WALLET_CHAIN,
+  type WalletConnection, type WalletConnectionRecord, type WalletSession, type WalletConnectionPresence, type WalletRecoveryImpact } from "./walletConnection.js";
+import { SIGNATURE_WAIT_MS, CHAIN_RECEIPT_LOOKUP_MAX_AGE_MS, INITIAL_CHAIN_OBSERVATION_STATUSES, isInitialChainObservation,
   transactionExecutionSummarySchema, requestTransitions, type TransactionRequest,
   type TransactionRequestStatus, type TransactionExecutionSummary } from "./transactionRequest.js";
 
 export class WorkflowConflict extends Error {
-  constructor(message: string, readonly events: EventLogRecord[] = []) { super(message); }
+  constructor(message: string, readonly events: EventLogRecord[] = [], readonly reason?: string) { super(message); }
 }
+export type ConnectionResponseOwner = { id: string; operationId: string; cardId: string; runId: string };
+type ConnectionPublication = "published" | "already_published" | "cleanup_required" | "not_owned";
 export type RequestAuthority = {
-  attempt_id: string; owner_id: string; run_id: string | null; connection_id: string; connection_revision: number;
+  attempt_id: string; owner_id: string; run_id: string | null; connection_id: string; grant_revision: number;
   can_submit: number; sdk_pending: number; submit_pending: number; lookup_pending: number;
   signature_deadline: string; lookup_deadline: string | null; observation_stopped: number;
 };
-type RequestRow = {
-  attempt_id: string; review_session_id: string; plan_id: string; review_revision: number;
-  account: string; transaction_digest: string; request_status: TransactionRequestStatus;
-  revision: number; created_at: string; updated_at: string; reason: string | null;
-  signature_verified_at: string | null; submitted_at: string | null; result_json: string | null;
-};
 type ReviewRow = { id: string; status: string; account: string | null; expires_at: string;
   review_revision: number; preparation_id: string | null; preparation_error: string | null;
-  current_attempt_id: string | null; review_state_json: string | null };
+  current_attempt_id: string | null; wallet_connection_id: string | null; wallet_grant_revision: number | null; review_state_json: string | null };
 const interruptionReasons = {
   user_stop: "User stopped waiting before submission.",
   wallet_change: "The wallet connection changed or became unavailable before submission. Nothing was submitted.",
-  connection_conflict: "More than one wallet connection is present. Nothing was submitted.",
   disconnect_requested: "Wallet disconnection was requested before submission. Nothing was submitted.",
   wallet_service_restarted: "The wallet service was restarted before submission. Nothing was submitted.",
   wallet_service_lost: "The wallet service stopped before submission. Nothing was submitted."
 } as const;
 type RequestInterruptionCause = keyof typeof interruptionReasons;
 const preparationInterruptionReasons = {
-  wallet_change: "The selected wallet connection changed.",
-  connection_conflict: "More than one wallet connection is present. Disconnect the connections you no longer need, then update this review.",
-  disconnect_requested: "Disconnection of the selected wallet was requested. Connect a wallet before updating this review.",
+  wallet_change: "The original wallet connection's Sui authorization changed.",
+  disconnect_requested: "Wallet disconnection was requested for the original connection. This review cannot use a replacement connection.",
   wallet_service_restarted: "The wallet service was restarted. Update this review before requesting approval.",
   wallet_service_lost: "The wallet service stopped. Restore the wallet connection and update this review before requesting approval."
 } as const;
@@ -65,12 +66,39 @@ export class SqliteWalletWorkflowStore {
     }
   }
   constructor(private readonly db: SqliteDatabase, private readonly ownerId: string,
-    private readonly writeActiveAccount: (address: string, connectionId: string, walletName: string | undefined, now: Date) => void,
+    private readonly accounts: SqliteAccountStore,
     private readonly clock: () => Date, private readonly materialStore: LocalTransactionMaterialStore,
     private readonly evaluateState: (input: WorkflowEvaluationInput, at?: Date) => EvaluatedWorkflowState,
-    private readonly readActiveAccount: () => StoredReadAccount | undefined,
     private readonly readSdkSnapshot: () => WalletSnapshot | undefined) {
     this.cards = new SqliteCardRecordStore(db);
+  }
+
+  cardResult(record: CardRecord, at: Date, pendingWork?: WalletPendingWork): unknown {
+    if (record.state.kind === "connect" || record.state.kind === "disconnect") {
+      const operation = record.operationId ? this.cardOperation(record) : undefined;
+      const id = operation?.connectionId ?? (record.state.kind === "disconnect" && typeof record.state.input.connectionId === "string" ? record.state.input.connectionId : undefined);
+      return walletCardResult(record, at, { message: record.state.error ?? operation?.message ?? endedCardMessage(record.state.reason),
+        connection: id ? this.connection(id)?.connection : undefined, pendingWork });
+    }
+    const session = new SqliteSessionRecordStore(this.db).get(String(record.state.input.reviewSessionId));
+    const id = record.operationId ?? (typeof record.state.input.attemptId === "string" ? record.state.input.attemptId : undefined);
+    const request = id ? this.request(id) : undefined;
+    return reviewCardResult(record, at, { session, request, state: id ? this.requestReview(id) ?? session?.reviewState : session?.reviewState,
+      receipt: id ? this.executionDetails(id)?.data : undefined, observationStopped: !!(id && this.authority(id)?.observation_stopped) });
+  }
+  private replaceCard(expected: CardRecord, next: CardRecord, at = this.clock(), pendingWork?: WalletPendingWork): boolean {
+    if (next.state.state === "closed") next = { ...next, state: { ...next.state, data: this.cardResult(next, at, pendingWork) } };
+    return this.cards.replace(expected, next, at);
+  }
+  endCard(record: CardRecord, reason: NonNullable<CardRecord["state"]["reason"]>, at = this.clock(), error?: string): CardRecord {
+    if (record.state.state === "closed") return record;
+    if (!this.replaceCard(record, { ...record, state: { ...record.state, state: "closed", reason,
+      ...(error ? { error } : {}), revision: record.state.revision + 1 } }, at)) throw new WorkflowConflict("The card changed before its result could be saved.");
+    return this.cards.get(record.state.cardId)!;
+  }
+  expireCard(record: CardRecord, at = this.clock()): CardRecord {
+    record = this.currentCard(record);
+    return record.state.state === "ready" && Date.parse(record.state.expiresAt) <= at.getTime() ? this.endCard(record, "expired", at) : record;
   }
 
   reconcileAndEvaluate(input: WorkflowEvaluationInput): EvaluatedWorkflowState { return this.evaluateState(input); }
@@ -98,65 +126,48 @@ export class SqliteWalletWorkflowStore {
         liveReview && liveReview.status !== "expired" && Date.parse(liveReview.expiresAt) > at) };
   }
 
-  walletRecovery(record: CardRecord): WalletRecovery | undefined {
-    if (record.acceptedInput?.action !== "restart_wallet_service") return undefined;
-    const recovery = walletRecoverySchema.parse(record.state.data);
-    if (recovery.priorRunId !== record.acceptedInput.walletRunId || record.operationId !== undefined || record.scope !== "connect") {
-      throw new WorkflowConflict("The saved wallet recovery does not match this card.");
-    }
-    if (record.state.state === "closed" && record.state.reason === "server_restarted") {
-      return { kind: recovery.kind, priorRunId: recovery.priorRunId, admittedAt: recovery.admittedAt, updatedAt: recovery.updatedAt,
-        ...("nextRunId" in recovery ? { nextRunId: recovery.nextRunId } : {}), outcome: "server_restarted",
-        message: "The server restarted before this wallet recovery was confirmed." };
-    }
-    return recovery;
-  }
   recordWalletFailure(input: { observedAt: string; runId?: string }): void {
     // Retried by the workflow until revocation is durably recorded. The SDK
     // run is already fenced, so a failed write cannot preserve usable authority.
     this.invalidateWalletRun("wallet_service_lost", new Date(input.observedAt), input.runId);
   }
-  publishWalletState(): void { this.publishAvailableWallets(); }
-  applyWalletObservation(snapshot: WalletSnapshot, previous: WalletSnapshot | undefined, ready: boolean, recordReady?: () => void): void {
+  applyWalletObservation(snapshot: WalletSnapshot, _previous: WalletSnapshot | undefined, ready: boolean, recordReady?: () => void): void {
     this.db.transaction(() => {
-      for (const record of this.connections()) {
-        if (!record.topic) continue;
-        const observed = snapshot.sessions.find((item) => item.topic === record.topic);
-        if (record.connection.status !== "connected") {
-          // Startup can transfer management ownership; ordinary observations
-          // update the current run's facts without restoring terminal authority.
-          if ((ready || record.ownerId === this.ownerId && record.runId === snapshot.runId) &&
-              observed?.status === "present" && !record.sdkPending &&
-              !this.pendingDisconnect(record.connection.connectionId, record.ownerId)) {
-            const transferred = record.ownerId !== this.ownerId || record.runId !== snapshot.runId;
-            const changed = !isDeepStrictEqual(record.connection.accounts, observed.session.accounts) ||
-              !isDeepStrictEqual(record.connection.methods, observed.session.methods) ||
-              record.connection.expiresAt !== observed.session.expiresAt || record.connection.walletName !== observed.session.walletName;
-            if (transferred) this.db.prepare("UPDATE live_wallet_connections SET owner_id=?,run_id=? WHERE id=?")
-              .run(this.ownerId, snapshot.runId, record.connection.connectionId);
-            if (transferred || changed) this.updateConnection(record.connection.connectionId, { accounts: observed.session.accounts,
-              methods: observed.session.methods, expiresAt: observed.session.expiresAt, walletName: observed.session.walletName }, this.clock());
+      if (ready) this.db.prepare(`UPDATE wallet_connection_operations SET sdk_pending=0
+        WHERE owner_id!=? OR run_id IS NOT NULL AND run_id!=?`).run(this.ownerId, snapshot.runId);
+      let record = this.currentConnection();
+      if (record && ready) {
+        // The exclusive SDK lease permits cleanup ownership, not old authority.
+        this.db.prepare("UPDATE live_wallet_connections SET owner_id=?,run_id=? WHERE id=? AND current_slot=1")
+          .run(this.ownerId, snapshot.runId, record.connection.connectionId);
+        record = this.currentConnection();
+      }
+      const observed = record?.topic ? snapshot.sessions.find((item) => item.topic === record.topic) : undefined;
+      if (record && record.ownerId === this.ownerId && record.runId === snapshot.runId && observed) {
+        const id = record.connection.connectionId;
+        if (observed.status !== "present") {
+          if (record.connection.status === "connected") this.applyConnectionChange(id,
+            { status: observed.status === "absent" ? "disconnected" : "failed",
+              reason: observed.status === "absent" ? "The wallet session is no longer present." : "The retained wallet session cannot be used." }, this.clock());
+          const pending = this.pendingDisconnect(id);
+          if (pending?.status === "running" && observed.status === "absent") this.finishDisconnect(pending.operationId, id, true, this.clock());
+        } else {
+          const session = observed.session;
+          if (record.connection.lifecycleRevision !== observed.lifecycleRevision ||
+              record.connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== observed.grantRevisions[SUI_MAINNET_WALLET_CHAIN]) {
+            this.invalidateConnectionRequests(id, this.clock(), "wallet_change");
           }
-          continue;
-        }
-        if (ready && observed?.status === "present" && !record.sdkPending && !this.pendingDisconnect(record.connection.connectionId, record.ownerId)) {
-          this.restoreConnection(observed.session, this.clock());
-        } else if (record.ownerId === this.ownerId) {
-          if (!observed || observed.status === "absent") this.applyConnectionChange(record.connection.connectionId,
-            { status: "disconnected", reason: "The wallet session is no longer present in the connection service." }, this.clock());
-          else if (observed.status === "unusable") this.applyConnectionChange(record.connection.connectionId,
-            { status: "failed", reason: "This wallet session is no longer usable for Sui mainnet." }, this.clock());
-          else if (observed.status === "present" && previous?.sessions.find((item) => item.topic === record.topic)?.version !== observed.version) {
-            this.applyConnectionChange(record.connection.connectionId, { accounts: observed.session.accounts,
-              methods: observed.session.methods, expiresAt: observed.session.expiresAt, walletName: observed.session.walletName }, this.clock());
+          if (!isDeepStrictEqual(record.connection.grants, session.grants) || !isDeepStrictEqual(record.connection.grantRevisions, observed.grantRevisions) ||
+              record.connection.lifecycleRevision !== observed.lifecycleRevision || record.connection.expiresAt !== session.expiresAt || record.connection.walletName !== session.walletName) {
+            this.updateConnection(id, { grants: session.grants, grantRevisions: observed.grantRevisions, lifecycleRevision: observed.lifecycleRevision,
+              expiresAt: session.expiresAt, walletName: session.walletName }, this.clock());
           }
         }
       }
-      this.invalidateConflictingConnections(this.clock());
-      if (ready) recordReady?.();
-      if (ready) this.publishAvailableWallets();
+      if (ready) { recordReady?.();  }
     }).immediate();
   }
+
   invalidateWalletRun(cause: "wallet_service_lost" | "wallet_service_restarted", now = this.clock(), runId?: string): void {
     this.db.transaction(() => {
       const targets = new Set<string>();
@@ -172,97 +183,151 @@ export class SqliteWalletWorkflowStore {
         if (["connected", "awaiting_approval"].includes(record.connection.status)) this.updateConnection(record.connection.connectionId, {}, now);
       }
       for (const id of targets) this.invalidateConnectionRequests(id, now, cause, runId);
-      this.publishAvailableWallets();
+
     }).immediate();
   }
 
-  connection(id: string): WalletConnectionRecord | undefined {
-    const row = this.db.prepare("SELECT * FROM live_wallet_connections WHERE id=?").get(id) as
-      { owner_id: string; run_id: string | null; topic: string | null; sdk_pending: number; connection_json: string } | undefined;
-    return row ? { connection: walletConnectionSchema.parse(JSON.parse(row.connection_json)), ownerId: row.owner_id, ...(row.run_id === null ? {} : { runId: row.run_id }),
-      sdkPending: row.sdk_pending === 1, ...(row.topic === null ? {} : { topic: row.topic }) } : undefined;
+  private connectionRows(id?: string, current = false): WalletConnectionRecord[] {
+    const rows = this.db.prepare(`SELECT c.*,EXISTS(SELECT 1 FROM wallet_connection_operations o
+      WHERE o.connection_id=c.id AND o.sdk_pending=1) AS sdk_pending,
+      EXISTS(SELECT 1 FROM wallet_connection_operations o WHERE o.connection_id=c.id AND o.action='disconnect'
+        AND (o.status='running' OR o.sdk_pending=1)) AS disconnect_pending,
+      pending.operation_id AS pending_operation_id,pending.action AS pending_action,
+      pending.status AS pending_status,pending.sdk_pending AS pending_settlement
+      FROM live_wallet_connections c LEFT JOIN wallet_connection_operations pending ON pending.connection_id=c.id
+        AND (pending.status='running' OR pending.sdk_pending=1)
+      ${current ? "WHERE c.current_slot=1" : id === undefined ? "" : "WHERE c.id=?"} ORDER BY c.id`)
+      .all(...(id === undefined ? [] : [id])) as Array<{ owner_id: string; run_id: string | null; topic: string | null;
+        id: string; sdk_pending: number; disconnect_pending: number; current_slot: number | null; data_epoch: number; read_address_cleared: number; connection_json: string;
+        pending_operation_id: string | null; pending_action: string | null; pending_status: string | null; pending_settlement: number | null }>;
+    if (new Set(rows.map((row) => row.id)).size !== rows.length) throw new WorkflowConflict("A wallet connection has conflicting pending operations.");
+    return rows.map((row) => ({ connection: walletConnectionSchema.parse(JSON.parse(row.connection_json)), ownerId: row.owner_id,
+      sdkPending: row.sdk_pending === 1, disconnectPending: row.disconnect_pending === 1, current: row.current_slot === 1, dataEpoch: row.data_epoch, readAddressCleared: row.read_address_cleared === 1,
+      ...(row.pending_operation_id ? { pendingOperation: pendingWalletConnectionOperationSchema.parse({ operationId: row.pending_operation_id,
+        action: row.pending_action, status: row.pending_status, settlementPending: row.pending_settlement === 1 }) } : {}),
+      ...(row.run_id === null ? {} : { runId: row.run_id }), ...(row.topic === null ? {} : { topic: row.topic }) }));
   }
-  connections(): WalletConnectionRecord[] {
-    return (this.db.prepare("SELECT id FROM live_wallet_connections ORDER BY id").all() as { id: string }[])
-      .map(({ id }) => this.connection(id)!);
-  }
-  connectionView(connection: WalletConnection): ConnectionView {
-    return { ...connection, ...(this.pendingDisconnect(connection.connectionId) ? { pendingAction: "disconnect" as const } : {}) };
-  }
-  private connectionPresence(records: WalletConnectionRecord[], snapshot: WalletSnapshot | undefined): WalletConnectionPresence {
-    const pendingConnectionIds = records.filter((item) => item.ownerId === this.ownerId &&
-      (item.sdkPending || !!this.pendingDisconnect(item.connection.connectionId))).map((item) => item.connection.connectionId);
-    if (!snapshot || snapshot.runId !== this.runId) return { confirmed: false, connections: [], unrecorded: false, pendingConnectionIds };
-    const connections: WalletConnectionPresence["connections"] = [];
-    let unrecorded = false;
-    for (const session of snapshot.sessions) {
-      if (session.status !== "present") continue;
-      const record = records.find((item) => item.topic === session.topic && item.ownerId === this.ownerId && item.runId === this.runId);
-      if (record) connections.push({ connectionId: record.connection.connectionId, expiresAt: session.session.expiresAt });
-      else unrecorded = true;
-    }
-    return { confirmed: true, connections, unrecorded, pendingConnectionIds };
+  connection(id: string): WalletConnectionRecord | undefined { return this.connectionRows(id)[0]; }
+  connections(): WalletConnectionRecord[] { return this.connectionRows(); }
+  currentConnection(): WalletConnectionRecord | undefined { return this.connectionRows(undefined, true)[0]; }
+  private connectionPresence(record: WalletConnectionRecord | undefined, snapshot: WalletSnapshot | undefined): WalletConnectionPresence {
+    const currentRun = !!snapshot && snapshot.runId === this.runId;
+    const observed = currentRun && record?.topic ? snapshot.sessions.find((item) => item.topic === record.topic) : undefined;
+    const epoch = (this.db.prepare("SELECT data_epoch FROM settings_control WHERE id=1").get() as { data_epoch: number }).data_epoch;
+    const pending = !!record?.pendingOperation;
+    return { confirmed: currentRun && (!record?.topic || !!observed), managed: !record || record.ownerId === this.ownerId && record.runId === this.runId,
+      dataCurrent: !record || record.dataEpoch === epoch, pending, hasRecordedSession: !!record?.topic,
+      unrecorded: !!(currentRun && !(record?.sdkPending && !record.topic) && snapshot.sessions.some((item) => item.status !== "absent" && item.topic !== record?.topic)),
+      ...(observed ? { observation: { status: observed.status, ...(observed.status === "present" ? { expiresAt: observed.session.expiresAt } : {}) } } : {}) };
   }
   readConnectionFacts(now: Date): ConnectionFacts {
-    // A deferred read transaction reuses an outer admission transaction when
-    // present. It never repairs callbacks, advances deadlines or reserves I/O.
     return this.db.transaction(() => {
-      const records = this.connections(), snapshot = this.readSdkSnapshot(), account = this.readActiveAccount();
-      return { evaluatedAt: now.toISOString(), activeAccount: account?.address, activeAccountConnectionId: account?.walletId,
-        connections: records.filter((item) => item.ownerId === this.ownerId).map((item) => this.connectionView(item.connection)),
-        connectionPresence: this.connectionPresence(records, snapshot),
+      const record = this.currentConnection(), snapshot = this.readSdkSnapshot();
+      const account = this.accounts.currentReadAccount(SUI_MAINNET_WALLET_CHAIN);
+      return { evaluatedAt: now.toISOString(), activeAccount: account?.address,
+        requestedChains: new SqlitePreferencesRepository(this.db).getWalletConnectionChainsSync(),
+        readAddressCleared: !!record?.readAddressCleared,
+        ...(record ? { connection: { ...record.connection, disconnectImpact: this.disconnectImpact(record.connection.connectionId) },
+          pendingOperation: record.pendingOperation } : {}),
+        connectionPresence: this.connectionPresence(record, snapshot),
         ...(snapshot ? { walletObservation: { runId: snapshot.runId, sequence: snapshot.sequence, observedAt: snapshot.observedAt } } : {}) };
     }).deferred();
   }
-  connectionSelection(now = this.clock()) {
+  connectionEligibility(now = this.clock()) {
     const facts = this.readConnectionFacts(now);
-    return walletConnectionSelection(facts.connections, now.getTime(), facts.connectionPresence,
-      facts.activeAccount ? { address: facts.activeAccount, walletId: facts.activeAccountConnectionId } : undefined);
+    return walletConnectionEligibility(facts.connection, now.getTime(), facts.connectionPresence, facts.activeAccount, facts.readAddressCleared);
   }
-  isUsableConnection(id: string, now = this.clock()): boolean {
-    return this.connectionSelection(now).connection?.connectionId === id;
+  isUsableConnection(id: string, now = this.clock(), chainId: WalletChainId = SUI_MAINNET_WALLET_CHAIN, account?: string): boolean {
+    const record = this.currentConnection();
+    return !!usableWalletConnection(record?.connection, now.getTime(), this.connectionPresence(record, this.readSdkSnapshot()), id, chainId, account);
   }
-  private invalidateConflictingConnections(now: Date): void {
-    const selection = this.connectionSelection(now);
-    if (selection.conflict || selection.connectionReconciliationRequired) for (const record of this.connections()) {
-      if (record.ownerId === this.ownerId) this.invalidateConnectionRequests(record.connection.connectionId, now,
-        selection.conflict ? "connection_conflict" : "wallet_change");
+
+  operation(id: string): WalletConnectionOperationRecord | undefined { return readStoredWalletConnectionOperation(this.db, id); }
+  cardOperation(card: CardRecord, id = card.operationId): WalletConnectionOperationRecord | undefined {
+    const operation = id ? this.operation(id) : undefined;
+    if (operation && operation.cardId !== card.state.cardId) throw new WorkflowConflict("This operation belongs to a different card.");
+    return operation;
+  }
+  private requireConnectionCard(expected: CardRecord, now: Date): CardRecord {
+    const card = this.currentCard(expected);
+    if (!["connect", "disconnect"].includes(card.scope ?? "") || card.ownerId !== this.ownerId || card.state.state !== "ready" || card.acceptedInput !== undefined || card.state.revision !== expected.state.revision ||
+      Date.parse(card.state.expiresAt) <= now.getTime()) throw new WorkflowConflict("This wallet request card no longer accepts actions.");
+    return card;
+  }
+  recoverConnectionOperation(expected: CardRecord, input: WalletConnectionAction): WalletConnectionOperationRecord | undefined {
+    const card = this.currentCard(expected);
+    if (card.scope !== input.action || card.operationId !== input.operationId ||
+        input.action === "disconnect" && card.state.input.connectionId !== input.connectionId) {
+      throw new WorkflowConflict("This action does not match the card's fixed purpose, operation and target.");
+    }
+    const operation = this.operation(input.operationId);
+    if (!operation) return undefined;
+    if (operation.cardId !== expected.state.cardId || operation.ownerId !== this.ownerId || !isDeepStrictEqual(operation.input, input)) {
+      throw new WorkflowConflict("This operation ID already belongs to a different request.");
+    }
+    return operation;
+  }
+  private admitConnectionOperation(card: CardRecord, input: WalletConnectionAction, now: Date, connectionId: string, pending = false): void {
+    const epoch = (this.db.prepare("SELECT data_epoch FROM settings_control WHERE id=1").get() as { data_epoch: number }).data_epoch;
+    this.db.prepare(`INSERT INTO wallet_connection_operations
+      (operation_id,card_id,owner_id,run_id,data_epoch,action,connection_id,status,input_json,sdk_pending,created_at,updated_at,expires_at)
+      VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?)`).run(input.operationId, card.state.cardId, this.ownerId,
+        input.walletRunId, epoch, input.action, connectionId,
+        JSON.stringify(input), Number(pending), now.toISOString(), now.toISOString(), card.state.expiresAt);
+    // Admission consumes this card for exactly one effect.
+    if (!this.replaceCard(card, { ...card, acceptedInput: input, operationId: input.operationId, state: { ...card.state, state: "running", revision: card.state.revision + 1 } })) {
+      throw new WorkflowConflict("The connection details changed. Check the updated card and try again.");
     }
   }
-  settleConnection(id: string, source: { cardId: string; runId: string; action: "connect" | "disconnect";
-    unrecordedOutcome?: "failed" | "stopped" | "rejected" }): void {
+  private finishConnectionOperation(id: string, status: "completed" | "failed" | "stopped", message: string, now: Date,
+    endReason?: "user_stopped" | "expired" | "run_ended", pendingWork?: WalletPendingWork): void {
+    const changed = this.db.prepare(`UPDATE wallet_connection_operations SET status=?,result_json=?,updated_at=?
+      WHERE operation_id=? AND status='running' AND result_json IS NULL`).run(status, JSON.stringify({ message, ...(endReason ? { endReason } : {}) }), now.toISOString(), id);
+    if (!changed.changes) return;
+    const op = this.operation(id)!;
+    const card = this.cards.get(op.cardId);
+    if (card && card.state.state !== "closed") {
+      const reason = endReason === "user_stopped" ? "cancelled" : endReason === "expired" ? "expired" : status === "completed" ? "completed" : "failed";
+      if (!this.replaceCard(card, { ...card, state: { ...card.state, state: "closed", reason, revision: card.state.revision + 1 } }, now, pendingWork)) {
+        throw new WorkflowConflict("The operation result could not be saved with its card.");
+      }
+    }
+  }
+  pendingDisconnect(connectionId: string, ownerId = this.ownerId): WalletConnectionOperationRecord | undefined {
+    const row = this.db.prepare(`SELECT operation_id FROM wallet_connection_operations WHERE owner_id=? AND connection_id=? AND action='disconnect'
+      AND (status='running' OR sdk_pending=1) ORDER BY created_at DESC,operation_id DESC LIMIT 1`).get(ownerId, connectionId) as { operation_id: string } | undefined;
+    return row ? this.operation(row.operation_id) : undefined;
+  }
+  pendingConnectionOperations(): WalletConnectionOperationRecord[] {
+    return (this.db.prepare(`SELECT operation_id FROM wallet_connection_operations
+      WHERE owner_id=? AND (status='running' OR sdk_pending=1) ORDER BY created_at,operation_id`)
+      .all(this.ownerId) as { operation_id: string }[]).map(({ operation_id }) => this.operation(operation_id)!);
+  }
+  settleConnection(id: string, source: { cardId: string; runId: string; operationId: string; action: "connect" | "disconnect";
+    unrecordedOutcome?: "failed" | "stopped" | "rejected"; cleanup?: { topic: string; absent: boolean } }): void {
     this.db.transaction(() => {
-      const card = this.cards.get(source.cardId);
-      if (!card || card.ownerId !== this.ownerId || card.operationId !== id || card.acceptedInput?.action !== source.action ||
-          card.acceptedInput.walletRunId !== source.runId) return;
-      // A connection may progress from pairing to one admitted disconnect.
-      // That later operation owns sdk_pending even if its result is already
-      // visible and the original pairing's failed cleanup write arrives late.
-      const disconnect = this.db.prepare(`SELECT id FROM live_read_cards WHERE owner_id=? AND scope='connect' AND operation_id=?
-        AND json_extract(accepted_input_json,'$.action')='disconnect'`).get(this.ownerId, id) as { id: string } | undefined;
-      if (source.action === "connect" && disconnect && disconnect.id !== source.cardId) return;
-      const activeDisconnect = this.pendingDisconnect(id);
-      if (source.action === "disconnect" && activeDisconnect && activeDisconnect.state.cardId !== source.cardId) return;
-      const record = this.connection(id);
-      if (!record || record.ownerId !== this.ownerId || record.runId !== source.runId) return;
-      if (source.action === "connect" && record.connection.status === "awaiting_approval") {
-        const status = source.unrecordedOutcome ?? "failed";
-        this.updateConnection(id, { status, reason: status === "stopped" ? "The wallet service ended before this connection was confirmed."
-          : status === "rejected" ? "The wallet declined the connection request."
-          : "The wallet connection could not be recorded. Check any retained connection in your wallet app." }, this.clock(), undefined, false);
-      } else this.db.prepare("UPDATE live_wallet_connections SET sdk_pending=0 WHERE id=? AND owner_id=?").run(id, this.ownerId);
+      const operation = this.operation(source.operationId);
+      if (!operation || operation.cardId !== source.cardId || operation.connectionId !== id || operation.runId !== source.runId ||
+        operation.ownerId !== this.ownerId) return;
+      const epoch = (this.db.prepare("SELECT data_epoch FROM settings_control WHERE id=1").get() as { data_epoch: number }).data_epoch;
+      if (operation.dataEpoch !== epoch) return;
+      if (source.cleanup) {
+        const retained = this.connection(id);
+        if (!retained || retained.ownerId !== this.ownerId || retained.runId !== source.runId ||
+            retained.topic !== source.cleanup.topic || operation.status === "completed") return;
+        this.updateConnection(id, { status: source.cleanup.absent ? "disconnected" : "failed",
+          reason: source.cleanup.absent ? "The unaccepted wallet session was removed."
+            : "This wallet connection was not accepted for account use, and its removal could not be confirmed. Disconnect it before connecting again." }, this.clock());
+      }
+      if (operation.status === "running" && source.action === "connect") this.finishConnectionOperation(operation.operationId, source.unrecordedOutcome === "stopped" ? "stopped" : "failed",
+        source.unrecordedOutcome === "rejected" ? "The connection request was declined in your wallet."
+          : "The wallet operation could not be confirmed. Check the saved connection state.", this.clock());
+      this.db.prepare("UPDATE wallet_connection_operations SET sdk_pending=0 WHERE operation_id=?").run(operation.operationId);
+      const connection = this.connection(id);
+      if (source.action === "connect" && connection?.connection.status === "awaiting_approval") this.updateConnection(id,
+        { status: source.unrecordedOutcome ?? "failed", reason: "The connection was not recorded as approved." }, this.clock());
+
     }).immediate();
-  }
-  pendingDisconnect(connectionId: string, ownerId = this.ownerId): CardRecord | undefined {
-    const row = this.db.prepare(`SELECT id FROM live_read_cards WHERE owner_id=? AND scope='connect'
-      AND state='running' AND operation_id=? AND json_extract(accepted_input_json,'$.action')='disconnect'`)
-      .get(ownerId, connectionId) as { id: string } | undefined;
-    return row ? this.cards.get(row.id) : undefined;
-  }
-  pendingConnectionCards(now: Date): CardRecord[] {
-    return (this.db.prepare(`SELECT id FROM live_read_cards WHERE owner_id=? AND kind='connect'
-      AND state!='closed' AND (state!='ready' OR expires_at>?) ORDER BY created_at DESC,id DESC`)
-      .all(this.ownerId, now.toISOString()) as { id: string }[]).map(({ id }) => this.cards.get(id)!);
   }
   request(id: string): TransactionRequest | undefined { return readStoredTransactionRequest(this.db, id); }
   requestForRevision(id: string, revision: number): TransactionRequest | undefined {
@@ -299,39 +364,57 @@ export class SqliteWalletWorkflowStore {
         Date.parse(current.state.expiresAt) <= now.getTime()) throw new WorkflowConflict("This card input is no longer available.");
     return current;
   }
-  private requireAction(card: CardRecord, action: WorkflowAction, now: Date): void {
+  private requireAction(card: CardRecord, action: WorkflowAction, now: Date) {
     const session = card.state.kind === "review" ? new SqliteSessionRecordStore(this.db).get(String(card.state.input.reviewSessionId)) : undefined;
     const target = session ? this.reviewReadTarget(session.id, card) : undefined;
     const request = target?.attemptId ? this.request(target.attemptId) : undefined;
     if (card.state.kind === "review" && !session) throw new WorkflowConflict("The saved review is unavailable.");
-    const connection = card.state.kind === "connect" && card.operationId ? this.connection(card.operationId)?.connection : undefined;
     // Wallet-dependent commands already passed the workflow availability guard.
     // This store checks DB eligibility; it does not measure SDK health.
-    const connectionFacts = this.readConnectionFacts(now), targetAccount = session?.account ?? connectionFacts.activeAccount;
+    const connectionFacts = this.readConnectionFacts(now), targetAccount = session ? fixedReviewTarget(session, card.state.input)?.account : undefined;
     const facts = { ...connectionFacts, ownerId: this.ownerId, record: card, session, request,
-      authority: request ? this.authority(request.attemptId) : undefined, connection,
+      authority: request ? this.authority(request.attemptId) : undefined,
       walletAvailability: { status: "available" as const },
       busyForAccount: !!targetAccount && this.busyForAccount(targetAccount, now) };
-    if (!workflowEligibility(facts).allowedActions.includes(action)) throw new WorkflowConflict("That action is not available right now.");
+    const eligibility = workflowEligibility(facts);
+    if (!eligibility.allowedActions.includes(action)) throw new WorkflowConflict("That action is not available right now.");
+    return eligibility;
   }
-  manage(expected: CardRecord, action: "stop_connection" | "stop_waiting" | "read_result"): string {
+  manage(expected: CardRecord, action: "stop_waiting" | "read_result"): string {
     return this.db.transaction(() => {
-      const now = this.clock(), card = this.cards.get(expected.state.cardId);
-      if (!card || card.ownerId !== this.ownerId || card.tokenHash !== expected.tokenHash ||
-          card.state.revision !== expected.state.revision || card.scope !== expected.scope) throw new WorkflowConflict("This request does not match the card's current state.");
-      const id = card.scope === "review_manage" ? String(card.state.input.attemptId) : card.operationId!;
-      if (action !== "stop_connection") this.advanceRequestDeadlines(now, id);
+      const now = this.clock(), card = this.currentCard(expected);
+      if (card.ownerId !== this.ownerId || card.state.kind !== "review") throw new WorkflowConflict("This request does not match the card's current state.");
+      const id = card.scope === "review_manage" ? String(card.state.input.attemptId) : card.operationId;
+      const request = id ? this.request(id) : undefined;
+      if (!id || !request || request.reviewSessionId !== card.state.input.reviewSessionId) throw new WorkflowConflict("This transaction request does not match the card.");
+      // A repeated stop reads its ended card; it must not stop a later result
+      // observation admitted through a different management card.
+      if (action === "stop_waiting" && card.state.state === "closed" && card.state.reason === "cancelled") return id;
+      if (card.state.revision !== expected.state.revision) throw new WorkflowConflict("This request does not match the card's current state.");
+      this.advanceRequestDeadlines(now, id);
       this.requireAction(card, action, now);
-      if (action === "stop_connection") this.updateConnection(id, { status: "stopped", reason: "The connection request was stopped here. The approval screen may still be open in your wallet." }, now);
-      else if (action === "stop_waiting") this.stopWaiting(id, now, "user_stop");
-      else this.resumeObservation(id);
+      if (action === "stop_waiting") {
+        this.stopWaiting(id, now, "user_stop", card.state.cardId);
+        this.closeCancelledCard(this.cards.get(card.state.cardId)!);
+      }
+      else {
+        if (card.scope !== "review_manage" || card.state.state !== "ready" || card.acceptedInput !== undefined) throw new WorkflowConflict("Open a new result card for another lookup.");
+        this.consume(card, { action: "read_result" }, id);
+        this.resumeObservation(id);
+      }
       return id;
     }).immediate();
   }
-  expireConnections(now: Date): void {
-    for (const record of this.connections()) if (record.ownerId === this.ownerId && record.connection.status === "awaiting_approval" &&
-      Date.parse(record.connection.expiresAt) <= now.getTime()) this.updateConnection(record.connection.connectionId,
-        { status: "expired", reason: "The time to approve this connection has ended." }, now);
+  expireConnections(now: Date, operationId?: string): void {
+    const connectionId = operationId ? this.operation(operationId)?.connectionId : undefined;
+    const records = operationId ? connectionId ? this.connectionRows(connectionId) : [] : this.connections();
+    for (const record of records) if (record.ownerId === this.ownerId && record.connection.status === "awaiting_approval" &&
+      Date.parse(record.connection.expiresAt) <= now.getTime()) {
+      this.updateConnection(record.connection.connectionId, { status: "expired", reason: "The time to approve this connection has ended." }, now);
+      const rows = this.db.prepare("SELECT operation_id FROM wallet_connection_operations WHERE connection_id=? AND action='connect' AND status='running'")
+        .all(record.connection.connectionId) as { operation_id: string }[];
+      for (const row of rows) this.finishConnectionOperation(row.operation_id, "stopped", "The connection request expired.", now, "expired", this.operation(row.operation_id)?.settlementPending ? "approval_response" : undefined);
+    }
   }
   beginObservation(id: string, explicit: boolean): TransactionRequest | undefined {
     return this.db.transaction(() => {
@@ -352,39 +435,80 @@ export class SqliteWalletWorkflowStore {
     const next: CardRecord = { ...card, acceptedInput: input, ...(operationId ? { operationId } : {}), state: {
       ...card.state, state: terminal ? "closed" : "running", revision: card.state.revision + 1,
       ...(terminal ? { reason: "completed" as const } : {}) } };
-    if (!this.cards.replace(card, next)) throw new WorkflowConflict("The card changed before this action was accepted.");
+    if (!this.replaceCard(card, next, this.clock())) throw new WorkflowConflict("The card changed before this action was accepted.");
   }
-  private publish(operationId: string, terminal: boolean): void {
-    this.db.prepare(`UPDATE live_read_cards SET revision=revision+1,
-      state=CASE WHEN @terminal=1 THEN 'closed' ELSE state END,
-      reason=CASE WHEN @terminal=1 THEN 'completed' ELSE reason END
-      WHERE operation_id=@id`).run({ terminal: terminal ? 1 : 0, id: operationId });
+  private publish(operationId: string, terminal: boolean, excludedCardId?: string): void {
+    const rows = this.db.prepare("SELECT id FROM live_read_cards WHERE operation_id=? AND state!='closed'").all(operationId) as { id: string }[];
+    for (const { id } of rows) {
+      if (id === excludedCardId) continue;
+      const card = this.cards.get(id)!;
+      if (!this.replaceCard(card, { ...card, state: { ...card.state, revision: card.state.revision + 1,
+        ...(terminal ? { state: "closed" as const, reason: "completed" as const } : {}) } }, this.clock())) throw new WorkflowConflict("The request result could not be saved with its card.");
+    }
   }
-  private publishConnection(connectionId: string, status: WalletConnection["status"]): void {
-    // Connection updates are not completion of every operation referencing it.
-    // In particular, session_update(connected) must not finish a pending disconnect.
-    const outcome = this.connection(connectionId)?.connection;
-    this.db.prepare(`UPDATE live_read_cards SET revision=revision+1,
-      result_json=CASE WHEN state='running' AND json_extract(accepted_input_json,'$.action')='disconnect'
-        AND @disconnectTerminal THEN @outcome ELSE result_json END,
-      reason=CASE WHEN state='running' AND
-        CASE WHEN json_extract(accepted_input_json,'$.action')='disconnect'
-          THEN @disconnectTerminal ELSE @connectionTerminal END THEN 'completed' ELSE reason END,
-      state=CASE WHEN state='running' AND
-        CASE WHEN json_extract(accepted_input_json,'$.action')='disconnect'
-          THEN @disconnectTerminal ELSE @connectionTerminal END THEN 'closed' ELSE state END
-      WHERE scope='connect' AND operation_id=@id`).run({ id: connectionId, outcome: outcome ? JSON.stringify({ disconnectOutcome: outcome }) : null,
-        disconnectTerminal: Number(status !== "connected" && status !== "awaiting_approval"),
-        connectionTerminal: Number(status !== "awaiting_approval") });
+  closeConnectionCardsWithChangedNetworks(chains: readonly WalletChainId[]): void {
+    for (const { id } of this.db.prepare("SELECT id FROM live_read_cards WHERE owner_id=? AND scope='connect' AND state='ready'").all(this.ownerId) as { id: string }[]) {
+      const card = this.cards.get(id)!;
+      if (!isDeepStrictEqual(card.state.input.requestedChains, chains)) this.invalidateConnectionCard(card);
+    }
   }
-
+  reconcileWalletCard(card: CardRecord, facts: ConnectionFacts): CardRecord {
+    if (card.ownerId !== this.ownerId || card.state.state !== "ready") return card;
+    let message: string | undefined;
+    if (card.scope === "connect") {
+      if (!isDeepStrictEqual(card.state.input.requestedChains, facts.requestedChains) ||
+          (card.state.input.connectionId ?? null) !== (facts.connection?.connectionId ?? null)) return this.invalidateConnectionCard(card);
+      if (facts.pendingOperation && facts.pendingOperation.operationId !== card.operationId) {
+        message = "Another wallet request is still pending. No connection request was sent from this card. Ask in chat to check the existing request.";
+      } else if (facts.connection && facts.connectionPresence.confirmed &&
+          ["present", "unusable"].includes(facts.connectionPresence.observation?.status ?? "")) {
+        message = "A wallet session is already present. No connection request was sent. To change the wallet or networks, ask in chat to disconnect and then request a new connection.";
+      }
+    } else if (card.scope === "disconnect") {
+      const replaced = !!facts.connection && facts.connection.connectionId !== card.state.input.connectionId;
+      const absent = facts.connection?.connectionId === card.state.input.connectionId && facts.connectionPresence.confirmed &&
+        facts.connectionPresence.observation?.status === "absent";
+      if (replaced || absent) message = "The wallet session for this card is no longer current. No disconnection request was sent from this card. Ask in chat for current connection status.";
+    }
+    return message ? this.invalidateConnectionCard(card, message) : card;
+  }
+  invalidateConnectionCard(card: CardRecord, message = "The networks or connection state for this request changed. Ask for a new wallet connection card. No connection request was sent."): CardRecord {
+    if (card.state.state === "closed") return card;
+    if (!this.replaceCard(card, { ...card, state: { ...card.state, state: "closed", reason: "failed", revision: card.state.revision + 1,
+      error: message } }, this.clock())) throw new WorkflowConflict("The card changed before it could be closed.");
+    return this.cards.get(card.state.cardId)!;
+  }
+  operationRead(expected: CardRecord, context: Pick<WorkflowEvaluationInput, "walletAvailability" | "walletObservation">) {
+    return this.db.transaction(() => {
+      let record = this.expireCard(this.currentCard(expected));
+      if (!["connect", "disconnect"].includes(record.scope ?? "")) throw new WorkflowConflict("A wallet operation card is required.");
+      const now = this.clock(), connectionFacts = record.state.state === "closed" ? undefined : this.readConnectionFacts(now);
+      if (connectionFacts) record = this.reconcileWalletCard(record, connectionFacts);
+      const operation = this.cardOperation(record);
+      const facts = connectionFacts && record.state.state !== "closed" ? { ...connectionFacts, ...context,
+        record, ownerId: this.ownerId, hasReviewInput: false, busyForAccount: false,
+        operation: operation ? publicConnectionOperation(operation) : undefined } : undefined;
+      const evaluated: EvaluatedWorkflowState | undefined = facts ? { ...facts, ...workflowEligibility(facts), events: [] } : undefined;
+      if (record.acceptedInput && !operation) throw new WorkflowConflict("The admitted operation is unavailable.");
+      return { record, operation: operation ? publicConnectionOperation(operation) : null, evaluated,
+        evaluatedAt: evaluated?.evaluatedAt ?? this.clock().toISOString() };
+    }).deferred();
+  }
+  private closeCancelledCard(expected: CardRecord): void {
+    const card = this.currentCard(expected);
+    if (card.ownerId !== this.ownerId) throw new WorkflowConflict("This card no longer accepts actions.");
+    if (card.state.state === "closed" && card.state.reason === "cancelled") return;
+    if (!this.replaceCard(card, { ...card, state: { ...card.state, state: "closed", reason: "cancelled", revision: card.state.revision + 1 } }, this.clock())) {
+      throw new WorkflowConflict("Card changed before cancellation.");
+    }
+  }
   recoveryImpact(runId: string): WalletRecoveryImpact {
     return walletRecoveryImpactSchema.parse({
       runId,
       connections: this.connections().filter((record) => record.ownerId === this.ownerId && record.runId === runId)
         .map((record) => ({ connectionId: record.connection.connectionId, revision: record.connection.revision,
-          status: record.connection.status, accounts: record.connection.accounts, walletName: record.connection.walletName,
-          sdkPending: record.sdkPending, disconnectPending: !!this.pendingDisconnect(record.connection.connectionId) })),
+          status: record.connection.status, chainResults: record.connection.chainResults, walletName: record.connection.walletName,
+          sdkPending: record.sdkPending, disconnectPending: record.disconnectPending })),
       preparations: this.db.prepare(`SELECT id,revision,review_revision,preparation_id,wallet_connection_id FROM live_review_sessions
         WHERE owner_id=? AND preparation_run_id=? AND status!='expired' ORDER BY id`).all(this.ownerId, runId),
       requests: this.db.prepare(`SELECT r.attempt_id,r.revision,r.request_status,l.can_submit,l.sdk_pending,l.submit_pending,l.lookup_pending
@@ -397,138 +521,197 @@ export class SqliteWalletWorkflowStore {
     this.db.transaction(() => {
       this.db.prepare(`UPDATE live_request_authority SET sdk_pending=0 WHERE owner_id=? AND run_id=? AND sdk_pending=1
         AND attempt_id NOT IN (SELECT value FROM json_each(?))`).run(this.ownerId, runId, JSON.stringify(parentProcessing));
-      for (const record of this.connections()) {
-        if (record.ownerId !== this.ownerId || record.runId !== runId) continue;
-        const pending = this.pendingDisconnect(record.connection.connectionId);
-        if (pending) this.finishDisconnect(pending.state.cardId, record.connection.connectionId, false, this.clock());
-        else if (record.connection.status === "awaiting_approval") this.updateConnection(record.connection.connectionId,
-          { status: "stopped", reason: "The wallet service ended before this connection was confirmed." }, this.clock(), undefined, false);
-        this.db.prepare("UPDATE live_wallet_connections SET sdk_pending=0 WHERE id=? AND run_id=? AND sdk_pending=1").run(record.connection.connectionId, runId);
+      const rows = this.db.prepare("SELECT operation_id FROM wallet_connection_operations WHERE owner_id=? AND run_id=? AND sdk_pending=1")
+        .all(this.ownerId, runId) as { operation_id: string }[];
+      for (const row of rows) {
+        const op = this.operation(row.operation_id)!;
+        if (op.status === "running") {
+          this.finishConnectionOperation(op.operationId, "stopped", "The wallet service ended before this operation was confirmed.", this.clock(), "run_ended");
+          if (op.connectionId) this.updateConnection(op.connectionId, { status: op.action === "connect" ? "stopped" : "failed",
+            reason: "The wallet service ended before this operation was confirmed." }, this.clock());
+        }
       }
+      this.db.prepare("UPDATE wallet_connection_operations SET sdk_pending=0 WHERE owner_id=? AND run_id=?").run(this.ownerId, runId);
+
     }).immediate();
-  }
-  private publishAvailableWallets(): void {
-    this.db.prepare("UPDATE live_read_cards SET revision=revision+1 WHERE owner_id=? AND kind IN ('connect','review') AND state='ready'").run(this.ownerId);
   }
   private publishReview(id: string): void {
     this.db.prepare(`UPDATE live_read_cards SET revision=revision+1 WHERE owner_id=? AND kind='review' AND state='ready'
       AND json_extract(input_json,'$.reviewSessionId')=?`).run(this.ownerId, id);
   }
 
-  admitConnection(expected: CardRecord, input: Record<string, unknown>): WalletConnectionRecord {
-    return this.db.transaction(() => {
-      const now = this.clock();
-      this.assertWalletInputAllowed();
-      this.expireConnections(now);
-      const card = this.requireInput(expected, now);
-      this.requireAction(card, "connect", now);
+  admitConnection(expected: CardRecord, input: Extract<WalletConnectionAction, { action: "connect" }>): { connection: WalletConnectionRecord; operationId: string; created: boolean } {
+    const admitted = this.db.transaction(() => {
+      const recovered = this.recoverConnectionOperation(expected, input);
+      if (recovered) return { connection: this.connection(recovered.connectionId!)!, operationId: recovered.operationId, created: false };
+      const now = this.clock(); this.assertWalletInputAllowed(); this.expireConnections(now);
+      const card = this.requireConnectionCard(expected, now);
+      if (this.runId !== input.walletRunId) {
+        throw new WorkflowConflict("This card cannot start that wallet connection.");
+      }
+      const facts = this.readConnectionFacts(now);
+      if (this.reconcileWalletCard(card, facts).state.state === "closed") return undefined;
+      if (!input.chains.length || !isDeepStrictEqual([...input.chains].sort(), [...facts.requestedChains].sort())) {
+        throw new WorkflowConflict("The requested networks changed. Check the current networks before connecting.");
+      }
+      const decision = walletActionDecision({ ...facts, walletAvailability: { status: "available" } }, "connect");
+      if (!decision.allowed) throw new WorkflowConflict(decision.nextStep.message!, [], decision.nextStep.reason);
       const connection = walletConnectionSchema.parse({ connectionId: randomUUID(), status: "awaiting_approval", revision: 0,
-        accounts: [], methods: [], chain: SUI_MAINNET_WALLET_CHAIN, createdAt: now.toISOString(), updatedAt: now.toISOString(),
-        expiresAt: card.state.expiresAt });
-      this.db.prepare("INSERT INTO live_wallet_connections (id,owner_id,status,revision,topic,sdk_pending,connection_json,run_id) VALUES (?,?,?,?,?,?,?,?)")
-        .run(connection.connectionId, this.ownerId, connection.status, 0, null, 1, JSON.stringify(connection), this.runId ?? null);
-      this.consume(card, input, connection.connectionId);
-      // Every other live input observes the admitted connection before the SDK
-      // responds, so an older selection cannot bypass the one-connection rule.
-      this.publishAvailableWallets();
-      return this.connection(connection.connectionId)!;
+        requestedChains: input.chains, chainResults: [], grants: [], grantRevisions: initialGrantRevisions(), lifecycleRevision: 0,
+        createdAt: now.toISOString(), updatedAt: now.toISOString(), expiresAt: card.state.expiresAt });
+      const epoch = (this.db.prepare("SELECT data_epoch FROM settings_control WHERE id=1").get() as { data_epoch: number }).data_epoch;
+      this.db.prepare("UPDATE live_wallet_connections SET current_slot=NULL WHERE current_slot=1").run();
+      this.db.prepare("INSERT INTO live_wallet_connections (id,owner_id,status,revision,topic,connection_json,run_id,current_slot,data_epoch) VALUES (?,?,?,?,?,?,?,1,?)")
+        .run(connection.connectionId, this.ownerId, connection.status, 0, null, JSON.stringify(connection), this.runId, epoch);
+      this.admitConnectionOperation(card, input, now, connection.connectionId, true);
+
+      return { connection: this.connection(connection.connectionId)!, operationId: input.operationId, created: true };
     }).immediate();
+    if (!admitted) throw new WorkflowConflict("The networks or connection state for this request changed. Ask for a new wallet connection card. No connection request was sent.");
+    return admitted;
   }
-  updateConnection(id: string, update: Partial<WalletConnection>, now: Date, topic?: string, sdkPending?: boolean): WalletConnectionRecord | undefined {
+  updateConnection(id: string, update: Partial<Pick<WalletConnection, "status" | "grants" | "grantRevisions" | "lifecycleRevision" | "expiresAt" | "walletName" | "reason">>, now: Date, topic?: string): WalletConnectionRecord | undefined {
+    const allowed = new Set(["status", "grants", "grantRevisions", "lifecycleRevision", "expiresAt", "walletName", "reason"]);
+    if (Object.keys(update).some((key) => !allowed.has(key))) throw new WorkflowConflict("A fixed connection approval cannot be changed.");
     return this.db.transaction(() => {
       const old = this.connection(id);
       if (!old || old.ownerId !== this.ownerId) return undefined;
       const next = walletConnectionSchema.parse({ ...old.connection, ...update,
         connectionId: id, revision: old.connection.revision + 1, updatedAt: now.toISOString() });
       assertNoForbiddenMcpFields(next);
-      this.db.prepare(`UPDATE live_wallet_connections SET status=?, revision=?, topic=?, sdk_pending=?, connection_json=?
+      this.db.prepare(`UPDATE live_wallet_connections SET status=?,revision=?,topic=?,connection_json=?
         WHERE id=? AND owner_id=? AND revision=?`).run(next.status, next.revision, topic ?? old.topic ?? null,
-          sdkPending === undefined ? Number(old.sdkPending) : Number(sdkPending), JSON.stringify(next), id, this.ownerId, old.connection.revision);
-      this.invalidateConflictingConnections(now);
-      this.publishConnection(id, next.status);
-      this.publishAvailableWallets();
-      if (next.status === "connected" && next.accounts.length === 1 && old.connection.status === "awaiting_approval" && this.isUsableConnection(id, now)) {
-        this.writeActiveAccount(next.accounts[0]!, id, next.walletName, now);
-      }
+          JSON.stringify(next), id, this.ownerId, old.connection.revision);
+
       return this.connection(id);
     }).immediate();
   }
-  applyConnectionChange(id: string, update: Partial<WalletConnection>, now: Date): void {
+  applyConnectionChange(id: string, update: Partial<Pick<WalletConnection, "status" | "grants" | "grantRevisions" | "lifecycleRevision" | "expiresAt" | "walletName" | "reason">>, now: Date): void {
     this.db.transaction(() => {
       this.invalidateConnectionRequests(id, now, "wallet_change");
       this.updateConnection(id, update, now);
     }).immediate();
   }
-  restoreConnection(session: WalletSession, now: Date): WalletConnectionRecord {
-    const existing = (this.db.prepare("SELECT id FROM live_wallet_connections WHERE topic=?").get(session.topic) as { id: string } | undefined);
-    const id = existing?.id ?? randomUUID();
-    const prior = existing ? this.connection(id)! : undefined;
-    if (prior?.ownerId === this.ownerId && prior.runId === this.runId && prior.connection.status === "connected" && !prior.sdkPending &&
-        isDeepStrictEqual(prior.connection.accounts, session.accounts) && isDeepStrictEqual(prior.connection.methods, session.methods) &&
-        prior.connection.expiresAt === session.expiresAt && prior.connection.walletName === session.walletName) return prior;
-    const next = walletConnectionSchema.parse({ connectionId: id, status: "connected", revision: (prior?.connection.revision ?? -1) + 1,
-      accounts: session.accounts, methods: session.methods, chain: session.chain,
-      createdAt: prior?.connection.createdAt ?? now.toISOString(), updatedAt: now.toISOString(),
-      expiresAt: session.expiresAt, walletName: session.walletName });
-    this.db.prepare(`INSERT INTO live_wallet_connections (id,owner_id,status,revision,topic,sdk_pending,connection_json,run_id) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-      owner_id=excluded.owner_id, status=excluded.status, revision=excluded.revision, topic=excluded.topic,
-      sdk_pending=0, connection_json=excluded.connection_json,run_id=excluded.run_id`).run(id, this.ownerId, next.status, next.revision,
-        session.topic, 0, JSON.stringify(next), this.runId ?? null);
-    this.publishConnection(id, next.status);
-    // Restoring the SDK session never restores a cleared read-account context.
-    return this.connection(id)!;
-  }
-  useAccount(expected: CardRecord, input: Record<string, unknown>, connectionId: string, account: string): void {
+  pairingExpiry(operationId: string, expiresAt: string): void {
     this.db.transaction(() => {
-      const now = this.clock();
-      this.assertWalletInputAllowed();
-      const card = this.requireInput(expected, now), connection = this.connection(connectionId);
-      if (card.scope !== "connect" || !this.isUsableConnection(connectionId, now) || !isOwnedConnectedWallet(connection, this.ownerId, !!this.pendingDisconnect(connectionId)) ||
-          Date.parse(connection.connection.expiresAt) <= now.getTime() || !connection.connection.accounts.includes(account)) {
-        throw new WorkflowConflict("The selected wallet account is no longer available.");
-      }
-      this.requireAction(card, "use_account", now);
-      this.writeActiveAccount(account, connectionId, connection.connection.walletName, now);
-      this.consume(card, input, connectionId, true);
-      this.publishAvailableWallets();
+      const op = this.operation(operationId);
+      if (!op || op.ownerId !== this.ownerId || op.runId !== this.runId || op.status !== "running" || op.action !== "connect") return;
+      this.db.prepare("UPDATE wallet_connection_operations SET expires_at=?,updated_at=? WHERE operation_id=?")
+        .run(expiresAt, this.clock().toISOString(), operationId);
+      this.updateConnection(op.connectionId!, { expiresAt }, this.clock());
     }).immediate();
   }
-  admitDisconnect(expected: CardRecord, input: Record<string, unknown>, connectionId: string): WalletConnectionRecord {
+  private responseOwner(source: ConnectionResponseOwner) {
+    const operation = this.operation(source.operationId), record = this.connection(source.id);
+    const epoch = (this.db.prepare("SELECT data_epoch FROM settings_control WHERE id=1").get() as { data_epoch: number }).data_epoch;
+    if (!operation || operation.action !== "connect" || operation.cardId !== source.cardId || operation.connectionId !== source.id ||
+        operation.ownerId !== this.ownerId || operation.runId !== source.runId || source.runId !== this.runId ||
+        operation.dataEpoch !== epoch || !record || record.ownerId !== this.ownerId || record.runId !== source.runId || record.dataEpoch !== epoch) return undefined;
+    return { operation, record };
+  }
+  captureConnectionSession(source: ConnectionResponseOwner, session: WalletSession): "captured" | "already_published" | "not_owned" {
     return this.db.transaction(() => {
-      const now = this.clock();
-      this.assertWalletInputAllowed();
-      const card = this.requireInput(expected, now), connection = this.connection(connectionId);
-      if (card.scope !== "connect" || !connection || connection.ownerId !== this.ownerId || connection.runId !== this.runId ||
-          connection.sdkPending || !this.connectionSelection(now).manageableConnectionIds.includes(connectionId)) {
-        throw new WorkflowConflict("The wallet connection is no longer available.");
-      }
-      this.requireAction(card, "disconnect", now);
-      this.consume(card, input, connectionId);
-      this.db.prepare("UPDATE live_wallet_connections SET sdk_pending=1 WHERE id=? AND owner_id=?").run(connectionId, this.ownerId);
-      this.invalidateConnectionRequests(connectionId, now, "disconnect_requested");
-      this.publishAvailableWallets();
-      return connection;
+      const owned = this.responseOwner(source);
+      if (!owned) return "not_owned";
+      const { operation, record } = owned;
+      if (record.topic && record.topic !== session.topic) return "not_owned";
+      if (operation.status === "completed") return record.topic === session.topic && record.connection.approvedAt ? "already_published" : "not_owned";
+      // SDK exit may end I/O before the parent can persist its received
+      // response. The original operation still owns cleanup, never approval.
+      if (!record.current) return "not_owned";
+      const existing = this.db.prepare("SELECT id FROM live_wallet_connections WHERE topic=?").get(session.topic) as { id: string } | undefined;
+      if (existing && existing.id !== source.id) return "not_owned";
+      // The SDK response is owned for cleanup before account use is published.
+      // A later publication rollback must not erase this private association.
+      this.db.prepare("UPDATE live_wallet_connections SET topic=? WHERE id=? AND current_slot=1").run(session.topic, source.id);
+      return "captured";
     }).immediate();
   }
-  finishDisconnect(cardId: string, connectionId: string, succeeded: boolean, now: Date): void {
-    this.db.transaction(() => {
-      const pending = this.pendingDisconnect(connectionId);
-      // A session deletion event may have already completed this operation.
-      if (pending?.state.cardId !== cardId) return;
-      this.updateConnection(connectionId, succeeded ? { status: "disconnected" } : {
-        status: "failed", reason: "The wallet disconnection could not be confirmed. The connection may remain in your wallet app."
-      }, now);
+  prepareConnectionCleanup(source: ConnectionResponseOwner, session: WalletSession, now: Date): boolean {
+    return this.db.transaction(() => {
+      const owned = this.responseOwner(source);
+      if (!owned || !owned.record.current || owned.record.topic !== session.topic || owned.operation.status === "completed") return false;
+      const { operation } = owned;
+      this.updateConnection(source.id, { status: operation.status === "stopped" ? "stopped" : "failed", grants: session.grants,
+        expiresAt: session.expiresAt, walletName: session.walletName, reason: "This wallet connection was not accepted for account use." }, now);
+      if (operation.status === "running") this.finishConnectionOperation(source.operationId, "failed",
+        "The wallet connection could not be recorded as approved.", now, undefined, "session_removal");
+      return true;
     }).immediate();
   }
-  recoverDisconnect(cardId: string, connectionId: string, revision: number, sessionAbsent: boolean): void {
-    this.db.transaction(() => {
-      const connection = this.connection(connectionId);
-      if (!connection || connection.ownerId !== this.ownerId || connection.sdkPending ||
-          connection.connection.revision !== revision || this.pendingDisconnect(connectionId)?.state.cardId !== cardId) return;
-      this.finishDisconnect(cardId, connectionId, sessionAbsent, this.clock());
-    }).immediate();
-  }
+  completeConnection(source: ConnectionResponseOwner, session: WalletSession, now: Date): ConnectionPublication {
+    return this.db.transaction(() => {
+      const owned = this.responseOwner(source);
+      if (!owned || owned.record.topic !== session.topic) return "not_owned";
+      const { operation: op, record } = owned;
+      if (op.status === "completed") return record.connection.approvedAt ? "already_published" : "not_owned";
+      const snapshot = this.readSdkSnapshot(), observed = snapshot?.sessions.find((item) => item.topic === session.topic);
+      if (!record.current) return "not_owned";
+      if (op.status !== "running" || record.connection.status !== "awaiting_approval" ||
+          Date.parse(op.expiresAt) <= now.getTime() || snapshot?.runId !== op.runId || observed?.status !== "present") return "cleanup_required";
+      const chainResults = approvedChainResults(record.connection.requestedChains, session.grants);
+      const next = walletConnectionSchema.parse({ ...record.connection, status: "connected", chainResults, approvedAt: now.toISOString(),
+        grants: observed.session.grants, grantRevisions: observed.grantRevisions, lifecycleRevision: observed.lifecycleRevision,
+        expiresAt: observed.session.expiresAt, walletName: observed.session.walletName, revision: record.connection.revision + 1, updatedAt: now.toISOString() });
+      this.db.prepare("UPDATE live_wallet_connections SET status=?,revision=?,topic=?,connection_json=? WHERE id=? AND current_slot=1")
+        .run(next.status, next.revision, session.topic, JSON.stringify(next), next.connectionId);
+      for (const result of chainResults) if (result.status === "bound") this.accounts.upsert(result.chainId, result.address, "wallet_connection", now.toISOString());
+      this.finishConnectionOperation(source.operationId, "completed", chainResults.some((result) => result.status === "bound") ? "Wallet connection approved." : "The wallet returned no usable address. Disconnect before connecting again.", now);
 
+      return "published";
+    }).immediate();
+  }
+  stopConnection(expected: CardRecord, operationId: string): string {
+    return this.db.transaction(() => {
+      const current = this.currentCard(expected), op = this.cardOperation(current, operationId);
+      if (op?.endReason === "user_stopped") return op.connectionId!;
+      if (current.scope !== "connect" || current.ownerId !== this.ownerId || current.state.state === "closed") throw new WorkflowConflict("This connection card has ended.");
+      if (!op || op.action !== "connect" || op.status !== "running") throw new WorkflowConflict("This connection request can no longer be stopped.");
+      this.finishConnectionOperation(operationId, "stopped", "Connecting was stopped here. A pending wallet approval will not be used.", this.clock(), "user_stopped", op.settlementPending ? "approval_response" : undefined);
+      this.updateConnection(op.connectionId!, { status: "stopped", reason: "The connection request was stopped here." }, this.clock());
+      this.closeCancelledCard(current);
+      return op.connectionId!;
+    }).immediate();
+  }
+  disconnectImpact(connectionId: string): { impactId: string; requestCount: number; chains: WalletChainId[] } {
+    const record = this.connection(connectionId);
+    if (!record) throw new WorkflowConflict("The wallet connection is unavailable.");
+    const requests = this.db.prepare(`SELECT l.attempt_id,r.revision FROM live_request_authority l JOIN review_requests r ON r.attempt_id=l.attempt_id
+      WHERE l.connection_id=? AND l.can_submit=1 ORDER BY l.attempt_id`).all(connectionId);
+    const impact = { connectionId, lifecycleRevision: record.connection.lifecycleRevision, grants: record.connection.grantRevisions,
+      chainResults: record.connection.chainResults, requests };
+    return { impactId: createHash("sha256").update(JSON.stringify(impact)).digest("hex"), requestCount: requests.length,
+      chains: record.connection.requestedChains };
+  }
+  admitDisconnect(expected: CardRecord, input: Extract<WalletConnectionAction, { action: "disconnect" }>): { connection: WalletConnectionRecord; created: boolean } {
+    return this.db.transaction(() => {
+      const prior = this.recoverConnectionOperation(expected, input);
+      if (prior) return { connection: this.connection(prior.connectionId!)!, created: false };
+      const now = this.clock(); this.assertWalletInputAllowed();
+      const card = this.requireConnectionCard(expected, now), connection = this.connection(input.connectionId);
+      const decision = walletActionDecision({ ...this.readConnectionFacts(now), walletAvailability: { status: "available" } }, "disconnect", input.connectionId);
+      if (!decision.allowed) throw new WorkflowConflict(decision.nextStep.message!, [], decision.nextStep.reason);
+      if (!connection?.topic || !connection.current || connection.ownerId !== this.ownerId || connection.runId !== this.runId || input.walletRunId !== this.runId ||
+          input.impactId !== this.disconnectImpact(input.connectionId).impactId) throw new WorkflowConflict("The connection or pending approvals changed. Review the updated disconnection details.");
+      this.admitConnectionOperation(card, input, now, input.connectionId, true);
+      this.invalidateConnectionRequests(input.connectionId, now, "disconnect_requested");
+
+      return { connection, created: true };
+    }).immediate();
+  }
+  finishDisconnect(operationId: string, connectionId: string, succeeded: boolean, now: Date): void {
+    this.db.transaction(() => {
+      const op = this.operation(operationId);
+      if (!op || op.connectionId !== connectionId || op.status !== "running" || op.ownerId !== this.ownerId) return;
+      this.updateConnection(connectionId, succeeded ? { status: "disconnected" } : {
+        status: "failed", reason: "Wallet disconnection was not confirmed. Check the retained connection in your wallet app." }, now);
+      this.finishConnectionOperation(operationId, succeeded ? "completed" : "failed", succeeded ? "Wallet disconnected." : "Wallet disconnection was not confirmed.", now, undefined, succeeded ? undefined : "session_status");
+    }).immediate();
+  }
+  recoverDisconnect(operationId: string, connectionId: string, revision: number, sessionAbsent: boolean): void {
+    const connection = this.connection(connectionId);
+    if (connection?.connection.revision === revision && !connection.sdkPending) this.finishDisconnect(operationId, connectionId, sessionAbsent, this.clock());
+  }
   private recoverRequestAt(expected: CardRecord, input: Record<string, unknown>, binding: {
     reviewSessionId: string; reviewRevision: number; account: string; connectionId: string;
   }, now: Date): { request: TransactionRequest; created: false } | undefined {
@@ -553,13 +736,13 @@ export class SqliteWalletWorkflowStore {
     return this.db.transaction(() => this.recoverRequestAt(expected, input, binding, this.clock())).immediate();
   }
   admitRequest(expected: CardRecord, input: Record<string, unknown>, material: ValidatedReviewMaterial,
-    selectedConnection: WalletConnection, walletRunId: string): { request: TransactionRequest; created: boolean } {
+    reviewConnection: WalletConnection, walletRunId: string): { request: TransactionRequest; created: boolean } {
     const result = this.db.transaction(() => {
       const now = this.clock();
       this.assertWalletInputAllowed();
       const binding = { reviewSessionId: material.reviewSessionId, planId: material.planId, account: material.account,
         reviewRevision: material.reviewRevision, transactionDigest: material.reviewedTransactionDigest,
-        connectionId: selectedConnection.connectionId, connectionRevision: selectedConnection.revision };
+        connectionId: reviewConnection.connectionId, grantRevision: reviewConnection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] };
       const recovered = this.recoverRequestAt(expected, input, binding, now);
       if (recovered) return recovered;
       const card = this.requireInput(expected, now);
@@ -580,16 +763,17 @@ export class SqliteWalletWorkflowStore {
       const data = state?.transactionReviewData as { reviewedTransactionDigest?: string } | undefined;
       const connection = this.connection(binding.connectionId);
       if (!review || review.status !== "ready_for_wallet_review" || review.preparation_id !== null || review.account !== binding.account ||
+          review.wallet_connection_id !== binding.connectionId || review.wallet_grant_revision !== binding.grantRevision ||
           review.review_revision !== binding.reviewRevision || state?.planId !== binding.planId ||
           data?.reviewedTransactionDigest !== binding.transactionDigest || Date.parse(review.expires_at) <= now.getTime() ||
           !this.isUsableConnection(binding.connectionId, now) || !isOwnedConnectedWallet(connection, this.ownerId, !!this.pendingDisconnect(binding.connectionId)) ||
-          connection.connection.revision !== binding.connectionRevision || Date.parse(connection.connection.expiresAt) <= now.getTime() ||
-          !connection.connection.accounts.includes(binding.account) || !connection.connection.methods.includes(SUI_SIGN_TRANSACTION_METHOD)) {
+          connection.connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== binding.grantRevision || Date.parse(connection.connection.expiresAt) <= now.getTime() ||
+          !connectionHasSuiSigningScope(connection.connection, binding.account)) {
         throw new WorkflowConflict("The account, wallet connection or transaction changed since this review was prepared.");
       }
-      this.requireAction(card, "request_signature", now);
       if (this.busyForAccount(binding.account, now)) throw new WorkflowConflict("Another wallet request or transaction result for this account is still pending.");
-      const account = this.db.prepare("SELECT id FROM accounts WHERE sui_address=?").get(binding.account) as { id: number } | undefined;
+      this.requireAction(card, "request_signature", now);
+      const account = this.db.prepare("SELECT id FROM accounts WHERE chain_id='sui:mainnet' AND address=?").get(binding.account) as { id: number } | undefined;
       if (!account) throw new WorkflowConflict("The reviewed account is unavailable.");
       const id = randomUUID();
       this.db.prepare(`INSERT INTO review_requests
@@ -597,15 +781,15 @@ export class SqliteWalletWorkflowStore {
         VALUES (?,?,?,?,?,?,?,'awaiting_signature',0,?,?)`).run(id, review.id, binding.planId, binding.reviewRevision,
           account.id, binding.transactionDigest, review.review_state_json, now.toISOString(), now.toISOString());
       this.db.prepare(`INSERT INTO live_request_authority
-        (attempt_id,owner_id,connection_id,connection_revision,can_submit,sdk_pending,submit_pending,lookup_pending,signature_deadline,run_id)
-        VALUES (?,?,?,?,1,1,0,0,?,?)`).run(id, this.ownerId, binding.connectionId, binding.connectionRevision,
+        (attempt_id,owner_id,connection_id,grant_revision,can_submit,sdk_pending,submit_pending,lookup_pending,signature_deadline,run_id)
+        VALUES (?,?,?,?,1,1,0,0,?,?)`).run(id, this.ownerId, binding.connectionId, binding.grantRevision,
           new Date(Math.min(now.getTime() + SIGNATURE_WAIT_MS, Date.parse(review.expires_at))).toISOString(), walletRunId);
       this.db.prepare(`UPDATE live_review_sessions SET current_attempt_id=?, revision=revision+1, write_contract_version=? WHERE id=?`)
         .run(id, LIVE_REVIEW_SESSION_WRITE_CONTRACT_VERSION, review.id);
       this.db.prepare("UPDATE review_sessions SET current_attempt_id=?, updated_at=? WHERE id=?").run(id, now.toISOString(), review.id);
       this.consume(card, input, id);
       this.recordRequestEvent(this.request(id)!, "request_admitted", undefined, now);
-      this.publishAvailableWallets();
+
       return { request: this.request(id)!, created: true };
     }).immediate();
     if (result instanceof Error) throw result;
@@ -614,7 +798,7 @@ export class SqliteWalletWorkflowStore {
 
   busyForAccount(account: string, now: Date): boolean {
     return !!this.db.prepare(`SELECT 1 FROM live_request_authority l JOIN review_requests r ON r.attempt_id=l.attempt_id
-      JOIN accounts a ON a.id=r.account_id WHERE a.sui_address=? AND (l.sdk_pending=1 OR l.submit_pending=1 OR l.lookup_pending=1
+      JOIN accounts a ON a.id=r.account_id AND a.chain_id='sui:mainnet' WHERE a.chain_id='sui:mainnet' AND a.address=? AND (l.sdk_pending=1 OR l.submit_pending=1 OR l.lookup_pending=1
         OR (r.request_status IN (SELECT value FROM json_each(?)) AND l.observation_stopped=0
           AND (l.lookup_deadline IS NULL OR l.lookup_deadline>?))) LIMIT 1`)
       .get(account, JSON.stringify(INITIAL_CHAIN_OBSERVATION_STATUSES), now.toISOString());
@@ -645,14 +829,14 @@ export class SqliteWalletWorkflowStore {
     }).immediate();
   }
   private recordRequestEvent(request: TransactionRequest, event: string, from: TransactionRequestStatus | undefined, now: Date): void {
-    const account = this.db.prepare("SELECT id FROM accounts WHERE sui_address=?").get(request.account) as { id: number };
+    const account = this.db.prepare("SELECT id FROM accounts WHERE chain_id='sui:mainnet' AND address=?").get(request.account) as { id: number };
     this.db.prepare(`INSERT INTO review_status_transitions
       (review_session_id,event,attempt_id,domain,from_status,to_status,account_id,reason,transitioned_at)
       VALUES (?,?,?,'request',?,?,?,?,?)`).run(request.reviewSessionId, event, request.attemptId, from ?? null,
         request.requestStatus, account.id, request.reason ?? null, now.toISOString());
   }
   transitionRequest(id: string, next: TransactionRequestStatus, now: Date, options: {
-    reason?: string; execution?: TransactionExecutionSummary; signatureVerified?: boolean;
+    reason?: string; execution?: TransactionExecutionSummary; signatureVerified?: boolean; excludedCardId?: string;
     details?: { data: unknown; receiptDisplay?: ReceiptDisplay };
   } = {}): TransactionRequest | undefined {
     return this.db.transaction(() => {
@@ -666,7 +850,7 @@ export class SqliteWalletWorkflowStore {
             execution.txDigest !== old.transactionDigest || execution.chainReceipt.sender !== old.account) {
           throw new WorkflowConflict("Chain result does not match the admitted transaction.");
         }
-        const account = this.db.prepare("SELECT id FROM accounts WHERE sui_address=?").get(old.account) as { id: number };
+        const account = this.db.prepare("SELECT id FROM accounts WHERE chain_id='sui:mainnet' AND address=?").get(old.account) as { id: number };
         this.db.prepare(`INSERT INTO review_executions
           (attempt_id,review_session_id,plan_id,account_id,status,tx_digest,failure_reason,result_json,recorded_at,updated_at)
           VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, old.reviewSessionId, old.planId, account.id, execution.status, execution.txDigest,
@@ -687,8 +871,7 @@ export class SqliteWalletWorkflowStore {
       const result = this.request(id)!;
       this.recordRequestEvent(result, options.signatureVerified ? "signature_verified" : next === "completed" ? "chain_result_recorded" : "request_status_changed", old.requestStatus, now);
       this.db.prepare("UPDATE review_sessions SET updated_at=? WHERE id=?").run(now.toISOString(), old.reviewSessionId);
-      this.publish(id, !["awaiting_signature", "submitting", "awaiting_chain_result"].includes(next));
-      if (old.requestStatus === "awaiting_signature" && next !== old.requestStatus) this.publishAvailableWallets();
+      this.publish(id, !["awaiting_signature", "submitting", "awaiting_chain_result"].includes(next), options.excludedCardId);
       if (["stopped", "request_failed", "outcome_unknown", "completed"].includes(next)) {
         // A historical attempt may finish while a newer review is preparing.
         // Clean only the material still owned by this admitted revision.
@@ -709,8 +892,10 @@ export class SqliteWalletWorkflowStore {
           (this.db.prepare("SELECT wallet_input_blocked FROM settings_control WHERE id=1").get() as { wallet_input_blocked: number }).wallet_input_blocked !== 0 ||
           request.requestStatus !== "awaiting_signature" || Date.parse(authority.signature_deadline) <= now.getTime()) return false;
       const connection = this.connection(authority.connection_id);
-      if (!this.isUsableConnection(authority.connection_id, now) || !isOwnedConnectedWallet(connection, this.ownerId, !!this.pendingDisconnect(authority.connection_id)) ||
-          connection.connection.revision !== authority.connection_revision || Date.parse(connection.connection.expiresAt) <= now.getTime()) return false;
+      if (!this.isUsableConnection(authority.connection_id, now, SUI_MAINNET_WALLET_CHAIN, request.account) ||
+          !isOwnedConnectedWallet(connection, this.ownerId, !!this.pendingDisconnect(authority.connection_id)) ||
+          connection.connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== authority.grant_revision ||
+          !connectionHasSuiSigningScope(connection.connection, request.account) || Date.parse(connection.connection.expiresAt) <= now.getTime()) return false;
       this.db.prepare("UPDATE live_request_authority SET can_submit=0, submit_pending=1, lookup_deadline=? WHERE attempt_id=?")
         .run(new Date(now.getTime() + CHAIN_RECEIPT_LOOKUP_MAX_AGE_MS).toISOString(), id);
       return this.transitionRequest(id, "submitting", now)?.requestStatus === "submitting";
@@ -726,19 +911,26 @@ export class SqliteWalletWorkflowStore {
     }).immediate();
   }
   settle(id: string, field: "sdk_pending" | "submit_pending" | "lookup_pending", pending: boolean): void {
-    this.db.prepare(`UPDATE live_request_authority SET ${field}=? WHERE attempt_id=? AND owner_id=?`).run(Number(pending), id, this.ownerId);
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE live_request_authority SET ${field}=? WHERE attempt_id=? AND owner_id=?`).run(Number(pending), id, this.ownerId);
+      if (field === "lookup_pending" && !pending) {
+        const request = this.request(id);
+        if (request && !isInitialChainObservation(request.requestStatus)) this.publish(id, true);
+      }
+    }).immediate();
   }
-  private stopWaiting(id: string, now: Date, cause: RequestInterruptionCause): TransactionRequest | undefined {
+
+  private stopWaiting(id: string, now: Date, cause: RequestInterruptionCause, excludedCardId?: string): TransactionRequest | undefined {
     return this.db.transaction(() => {
       const request = this.request(id), authority = this.authority(id);
       if (!request || !authority || authority.owner_id !== this.ownerId) return request;
-      if (request.requestStatus === "awaiting_signature") return this.transitionRequest(id, cause === "wallet_service_lost" ? "request_failed" : "stopped", now, { reason: interruptionReasons[cause] });
+      if (request.requestStatus === "awaiting_signature") return this.transitionRequest(id, cause === "wallet_service_lost" ? "request_failed" : "stopped", now, { reason: interruptionReasons[cause], ...(excludedCardId ? { excludedCardId } : {}) });
       // Once submitted, connection changes cannot revoke a transaction or the
       // independent lookup of its digest. Only explicit user stopping ends observation.
       if (cause === "user_stop" && authority.observation_stopped === 0 &&
           ["submitting", "awaiting_chain_result", "outcome_unknown"].includes(request.requestStatus)) {
         this.db.prepare("UPDATE live_request_authority SET observation_stopped=1 WHERE attempt_id=?").run(id);
-        this.publish(id, false);
+        this.publish(id, false, excludedCardId);
       }
       return this.request(id);
     }).immediate();
@@ -778,11 +970,16 @@ export class SqliteWalletWorkflowStore {
   cancelInput(expected: CardRecord): void {
     this.db.transaction(() => {
       const now = this.clock();
-      const card = this.requireInput(expected, now);
-      this.requireAction(card, "cancel", now);
-      if (!this.cards.replace(card, { ...card, state: { ...card.state, state: "closed", reason: "cancelled", revision: card.state.revision + 1 } })) {
-        throw new WorkflowConflict("Card changed before cancellation.");
+      const card = this.currentCard(expected);
+      if (card.scope === "connect" && card.state.state === "running" && card.state.revision === expected.state.revision) {
+        const operation = this.cardOperation(card);
+        if (operation?.status === "running") { this.stopConnection(card, operation.operationId); return; }
       }
+      this.requireInput(card, now);
+      this.requireAction(card, "cancel", now);
+      const pairing = card.scope === "connect" ? this.cardOperation(card) : undefined;
+      if (pairing?.status === "running") this.stopConnection(card, pairing.operationId);
+      this.closeCancelledCard(card);
     }).immediate();
   }
   beginReviewPreparation(expected: CardRecord, reviewRevision: number, connection: WalletConnection, account: string): string {
@@ -797,16 +994,20 @@ export class SqliteWalletWorkflowStore {
       if (!review || review.preparation_id !== null || review.review_revision !== reviewRevision ||
           review.status === "expired" || Date.parse(review.expires_at) <= now.getTime() ||
           !this.isUsableConnection(connection.connectionId, now) || !isOwnedConnectedWallet(currentConnection, this.ownerId, !!this.pendingDisconnect(connection.connectionId)) ||
-          currentConnection.connection.revision !== connection.revision || Date.parse(currentConnection.connection.expiresAt) <= now.getTime() ||
-          (review.account && this.busyForAccount(review.account, now))) throw new WorkflowConflict("The review could not be updated with the current wallet and account.");
-      const readAccount = this.connectionSelection(now).assetReadAccount;
-      const selection = reviewPreparationAccount(review.account ?? undefined, readAccount.status === "available" ? readAccount.account : undefined, account);
-      if (!selection.allowed) throw new WorkflowConflict(selection.message);
-      this.requireAction(card, "prepare_review", now);
-      if (this.busyForAccount(selection.account, now) || !currentConnection.connection.accounts.includes(selection.account)) throw new WorkflowConflict("The review could not be updated with the selected wallet account.");
+          currentConnection.connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] || Date.parse(currentConnection.connection.expiresAt) <= now.getTime()) throw new WorkflowConflict("The review could not be updated with the current wallet and account.");
+      if (review.wallet_connection_id && review.wallet_connection_id !== connection.connectionId) {
+        throw new WorkflowConflict("This review remains bound to its original wallet connection.");
+      }
+      const binding = fixedReviewTarget({ ...(review.account ? { account: review.account } : {}),
+        ...(review.wallet_connection_id ? { walletConnectionId: review.wallet_connection_id } : {}) }, card.state.input);
+      if (!binding || binding.connectionId !== connection.connectionId || binding.account !== account) throw new WorkflowConflict("The review target changed before preparation.");
+      if (this.busyForAccount(binding.account, now)) throw new WorkflowConflict("Another wallet request or transaction result for this account is still pending.");
+      const target = this.requireAction(card, "prepare_review", now).reviewTarget;
+      if (target?.connectionId !== connection.connectionId || target.account !== account) throw new WorkflowConflict("The review target changed before preparation.");
+      if (fixedChainAccount(currentConnection.connection, SUI_MAINNET_WALLET_CHAIN) !== binding.account) throw new WorkflowConflict("The review could not be updated with its fixed wallet account.");
       const preparation = randomUUID();
-      this.db.prepare(`UPDATE live_review_sessions SET preparation_id=?,preparation_run_id=?,preparation_error=NULL,wallet_connection_id=?,wallet_connection_revision=?,revision=revision+1,write_contract_version=? WHERE id=?`)
-        .run(preparation, this.runId ?? null, connection.connectionId, connection.revision, LIVE_REVIEW_SESSION_WRITE_CONTRACT_VERSION, id);
+      this.db.prepare(`UPDATE live_review_sessions SET preparation_id=?,preparation_run_id=?,preparation_error=NULL,wallet_connection_id=?,wallet_grant_revision=?,revision=revision+1,write_contract_version=? WHERE id=?`)
+        .run(preparation, this.runId ?? null, connection.connectionId, connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN], LIVE_REVIEW_SESSION_WRITE_CONTRACT_VERSION, id);
       this.publishReview(id);
       return preparation;
     }).immediate();
@@ -852,7 +1053,7 @@ export class SqliteWalletWorkflowStore {
         this.db.prepare("DELETE FROM live_transaction_materials WHERE review_session_id=?").run(review.id);
         this.db.prepare("DELETE FROM live_private_review_artifacts WHERE review_session_id=?").run(review.id);
         if (review.status !== "expired") {
-          const account = review.account ? this.db.prepare("SELECT id FROM accounts WHERE sui_address=?").get(review.account) as { id: number } | undefined : undefined;
+          const account = review.account ? this.db.prepare("SELECT id FROM accounts WHERE chain_id='sui:mainnet' AND address=?").get(review.account) as { id: number } | undefined : undefined;
           this.db.prepare(`INSERT INTO review_status_transitions(review_session_id,event,from_status,to_status,account_id,reason,transitioned_at)
             VALUES (?,'expired',?,'expired',?,'server_restarted',?)`).run(review.id, review.status, account?.id ?? null, now.toISOString());
           this.db.prepare("UPDATE review_sessions SET current_status='expired',updated_at=? WHERE id=?").run(now.toISOString(), review.id);
@@ -861,16 +1062,18 @@ export class SqliteWalletWorkflowStore {
       this.db.prepare(`UPDATE live_review_sessions SET owner_id=?,status='expired',preparation_id=NULL,
         revision=revision+1,write_contract_version=? WHERE owner_id!=?`)
         .run(this.ownerId, LIVE_REVIEW_SESSION_WRITE_CONTRACT_VERSION, this.ownerId);
-      for (const record of this.connections()) {
-        if (record.ownerId === this.ownerId) continue;
-        const disconnect = this.pendingDisconnect(record.connection.connectionId, record.ownerId);
-        if (disconnect || record.connection.status === "awaiting_approval") {
-          const next: WalletConnection = { ...record.connection, status: disconnect ? "failed" : "stopped", revision: record.connection.revision + 1,
-            reason: disconnect ? "Server restarted before wallet disconnection was confirmed. Check the connection in your wallet app."
-              : "Server restarted before wallet approval.", updatedAt: now.toISOString() };
-          this.db.prepare("UPDATE live_wallet_connections SET owner_id=?,status=?,revision=?,sdk_pending=0,connection_json=? WHERE id=?")
-            .run(this.ownerId, next.status, next.revision, JSON.stringify(next), next.connectionId);
-          if (disconnect) this.publishConnection(next.connectionId, next.status);
+      for (const row of this.db.prepare("SELECT operation_id FROM wallet_connection_operations WHERE owner_id!=? AND status='running'")
+        .all(this.ownerId) as { operation_id: string }[]) {
+        const op = this.operation(row.operation_id)!;
+        this.finishConnectionOperation(op.operationId, "stopped", "The server restarted before this operation was confirmed.", now, "run_ended");
+        if (op.connectionId) {
+          const record = this.connection(op.connectionId);
+          if (record) {
+            const next = { ...record.connection, status: op.action === "connect" ? "stopped" as const : "failed" as const,
+              revision: record.connection.revision + 1, updatedAt: now.toISOString(), reason: "The server restarted before the wallet operation was confirmed." };
+            this.db.prepare("UPDATE live_wallet_connections SET owner_id=?,status=?,revision=?,connection_json=? WHERE id=?")
+              .run(this.ownerId, next.status, next.revision, JSON.stringify(next), next.connectionId);
+          }
         }
       }
       const old = this.db.prepare("SELECT attempt_id FROM live_request_authority WHERE owner_id!=?").all(this.ownerId) as { attempt_id: string }[];
@@ -881,30 +1084,20 @@ export class SqliteWalletWorkflowStore {
           this.transitionRequest(id, "outcome_unknown", now, { reason: "The server restarted. The request will not be sent again." });
         }
       }
+      for (const { id } of this.db.prepare("SELECT id FROM live_read_cards WHERE kind IN ('connect','disconnect','review') AND state!='closed' AND owner_id!=?").all(this.ownerId) as { id: string }[]) {
+        const card = this.cards.get(id)!;
+        const next = { ...card, ownerId: this.ownerId, state: { ...card.state, state: "closed" as const,
+          reason: card.state.state === "ready" && Date.parse(card.state.expiresAt) <= now.getTime() ? "expired" as const : "server_restarted" as const, revision: card.state.revision + 1 } };
+        if (!this.replaceCard(card, next, now)) throw new WorkflowConflict("The interrupted wallet card could not be saved.");
+      }
     }).immediate();
   }
 }
 
 export function hasUnsettledWalletWork(db: SqliteDatabase, now = new Date()): boolean {
-  return !!db.prepare("SELECT 1 FROM live_wallet_connections WHERE sdk_pending=1 LIMIT 1").get() ||
+  return !!db.prepare("SELECT 1 FROM wallet_connection_operations WHERE sdk_pending=1 OR status='running' LIMIT 1").get() ||
     !!db.prepare(`SELECT 1 FROM live_request_authority l JOIN review_requests r ON r.attempt_id=l.attempt_id
     WHERE l.sdk_pending=1 OR l.submit_pending=1 OR l.lookup_pending=1
       OR (r.request_status IN (SELECT value FROM json_each(?)) AND (l.lookup_deadline IS NULL OR l.lookup_deadline>?)) LIMIT 1`)
     .get(JSON.stringify(INITIAL_CHAIN_OBSERVATION_STATUSES), now.toISOString());
 }
-
-export function readStoredTransactionRequest(db: SqliteDatabase, id: string): TransactionRequest | undefined {
-    const row = db.prepare(`SELECT r.*, a.sui_address AS account, e.result_json FROM review_requests r
-      JOIN accounts a ON a.id=r.account_id LEFT JOIN review_executions e ON e.attempt_id=r.attempt_id
-      WHERE r.attempt_id=?`).get(id) as RequestRow | undefined;
-    if (!row) return undefined;
-    const result = transactionRequestSchema.parse({ attemptId: row.attempt_id, reviewSessionId: row.review_session_id,
-      planId: row.plan_id, reviewRevision: row.review_revision, account: row.account, transactionDigest: row.transaction_digest,
-      requestStatus: row.request_status, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at,
-      ...(row.reason === null ? {} : { reason: row.reason }),
-      ...(row.signature_verified_at === null ? {} : { signatureVerifiedAt: row.signature_verified_at }),
-      ...(row.submitted_at === null ? {} : { submittedAt: row.submitted_at }),
-      ...(row.result_json === null ? {} : { execution: JSON.parse(row.result_json) }) });
-    assertNoForbiddenMcpFields(result);
-    return result;
-  }

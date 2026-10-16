@@ -1,3 +1,4 @@
+import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { Client } from "@modelcontextprotocol/client";
 import { CallToolResultSchema } from "@modelcontextprotocol/core";
 import { type ClientCapabilities } from "@modelcontextprotocol/client";
@@ -80,7 +81,7 @@ describe("MCP read cards, persisted results and private display", () => {
   it("binds an explicit account before querying, regardless of stored read context", async () => {
     const context = await harness(true);
     try {
-      await context.activityStore.setActiveAccount(`0x${"b".repeat(64)}`, "wallet_connection");
+      await seedCurrentReadAccount(context.activityStore, `0x${"b".repeat(64)}`, new Date());
       const creating = await context.client.callTool({ name: CARD_TOOLS.account, arguments: { account } });
       const ref = cardReferenceSchema.parse(creating._meta?.[CARD_METADATA_KEY]);
       expect(snapshot(creating)).toMatchObject({ state: "closed", reason: "completed", input: { account }, data: inventory });

@@ -366,17 +366,16 @@ describe("source policy", () => {
   it("keeps runtime MCP instructions aligned with USD-denominated intent evidence guidance", () => {
     const source = readFileSync(join(process.cwd(), "src/mcp/serverInfo.ts"), "utf8");
 
-    expect(source).toMatch(/For USD-denominated payment coverage, balance total, or shortfall questions/);
+    expect(source).toMatch(/USD coverage\/total\/shortfall: read_get_server_status, then read_list_settlement_asset_groups, then read_preview_intent_evidence/);
     expect(source).toMatch(/read_get_server_status/);
     expect(source).toMatch(/read_list_settlement_asset_groups/);
     expect(source).toMatch(/read_preview_intent_evidence/);
     expect(source).toMatch(/read_summarize_settlement_asset_group_parity/);
     expect(source).toMatch(/toolAvailability/);
     expect(source).toMatch(/requiredToolsAvailable/);
-    expect(source).toMatch(/current MCP server build cannot support the answer/);
+    expect(source).toMatch(/Missing toolAvailability means this build cannot answer/);
     expect(source).toMatch(/responseSummary\.doNotCallQuoteToolsForThisQuestion/);
-    expect(source).toMatch(/do not call wallet inventory or quote tools/i);
-    expect(source).toMatch(/separate inventory or conversion question/i);
+    expect(source).toMatch(/Inventory\/quotes require a separate user request/);
     expect(source).toMatch(/evidencePolicyVersion/);
     expect(source).toMatch(/implementedToolsCount/);
     // SERVER_INSTRUCTIONS points clients at userAnswerUse.answerFields as the
@@ -570,8 +569,8 @@ describe("source policy", () => {
 
   it("keeps connection observation distinct from an unsubmitted card and transaction approval", () => {
     const docs = readFileSync(join(process.cwd(), "docs/AGENT_BEHAVIOR.md"), "utf8");
-    expect(docs).toMatch(/unsubmitted card needs input/);
-    expect(docs).toMatch(/waiting does not create a[\s\S]{0,20}pairing/);
+    expect(docs).toMatch(/Without an admitted operation, waiting ends immediately/);
+    expect(docs).toMatch(/Waiting does not create a[\s\S]{0,20}pairing/);
     expect(docs).toMatch(/model must not call app-only actions/);
     expect(docs).toMatch(/session_get_wallet_connection_card/);
     expect(docs).toMatch(/session_wait_wallet_connection_card/);
@@ -1394,7 +1393,7 @@ describe("source policy", () => {
       "test/mcpSchemas.test.ts"
     ]);
     expect(filesImporting("reviewStateOutputSchema")).toEqual([
-      "src/core/session/sqliteWalletWorkflowStore.ts", "src/core/session/workflowState.ts", "src/core/session/workflowView.ts",
+      "src/core/session/cardResult.ts", "src/core/session/sqliteWalletWorkflowStore.ts", "src/core/session/workflowState.ts", "src/core/session/workflowView.ts",
       "src/mcp/tools/read/reviewActivityTools.ts", "src/mcp/tools/session/shared.ts"
     ]);
     expect(localDataValidationSource).toMatch(/parseLocalDataEnvelope/);

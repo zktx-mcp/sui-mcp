@@ -56,12 +56,12 @@ describe("npm release metadata", () => {
 });
 
 // Archive requirements come from the deployed surfaces, independently of the
-// checker: six internal cards and the adapted backend; no external Settings page.
+// checker: seven internal cards and the adapted backend; no external Settings page.
 const archive = ["package.json", "README.md", "LICENSE", "dist/runtime/start.js",
   "dist/runtime/walletSdkChild.js", "dist/runtime/walletSdkChildRuntime.js", "dist/runtime/walletSdkProcess.js", "dist/runtime/walletSdkIpc.js", "docs/UTILITY_INDEX.md",
   "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt", ...MCP_RESOURCES.map((resource) => resource.path),
   "docs/LOCAL_DB_ARCHITECTURE.md", "docs/SDK_API.md", "docs/SIGNABLE_ADAPTER_CONTRACT.md", "docs/TRANSACTION_ACTIVITY_LOG.md",
-  ...["account", "receipt", "chart", "connect", "review", "settings"].flatMap((name) => [`dist/mcp-app/${name}.html`, `dist/mcp-app/${name}.notices.txt`])];
+  ...["account", "receipt", "chart", "connect", "disconnect", "review", "settings"].flatMap((name) => [`dist/mcp-app/${name}.html`, `dist/mcp-app/${name}.notices.txt`])];
 const pack = (paths: string[]) => ({ filename: "fixture.tgz", files: paths.map((path) => ({ path })) });
 
 it("accepts the complete current archive and rejects missing notices, backend license or the Settings card", () => {

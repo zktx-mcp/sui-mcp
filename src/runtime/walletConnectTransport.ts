@@ -2,7 +2,7 @@ import { SignClient } from "@walletconnect/sign-client";
 import type { SessionTypes } from "@walletconnect/types";
 import { getSdkError } from "@walletconnect/utils";
 import { z } from "zod";
-import { parseSuiAddress } from "../core/suiAddress.js";
+import { normalizeWalletGrants, walletChainsSchema, walletGrantAccount, WALLET_CHAINS, type WalletChainId } from "../core/session/chainAccounts.js";
 import { SUI_MAINNET_WALLET_CHAIN, SUI_SIGN_TRANSACTION_METHOD,
   WalletUserRejectedError, type WalletSession, type WalletTransport } from "../core/session/walletConnection.js";
 import { openWalletConnectStorage } from "./walletConnectStorage.js";
@@ -17,15 +17,11 @@ function transportError(error: unknown): Error {
 }
 
 function sessionValue(session: SessionTypes.Struct): WalletSession {
-  const namespace = session.namespaces.sui ?? session.namespaces[SUI_MAINNET_WALLET_CHAIN];
-  if (!namespace || !Number.isSafeInteger(session.expiry) || session.expiry * 1000 <= Date.now()) {
-    throw new Error("A live Sui mainnet wallet session is required.");
+  if (!Number.isSafeInteger(session.expiry) || session.expiry * 1000 <= Date.now()) {
+    throw new Error("A live wallet session is required.");
   }
-  const accounts = namespace.accounts.filter((account) => account.startsWith(`${SUI_MAINNET_WALLET_CHAIN}:`))
-    .map((account) => parseSuiAddress(account.slice(SUI_MAINNET_WALLET_CHAIN.length + 1)));
-  if (accounts.length === 0 || accounts.some((account) => !account)) throw new Error("The wallet did not approve a Sui mainnet account.");
-  return { topic: session.topic, accounts: [...new Set(accounts as string[])], methods: [...namespace.methods],
-    chain: SUI_MAINNET_WALLET_CHAIN, expiresAt: new Date(session.expiry * 1000).toISOString(), walletName: session.peer.metadata.name };
+  return { topic: session.topic, grants: normalizeWalletGrants(session.namespaces),
+    expiresAt: new Date(session.expiry * 1000).toISOString(), walletName: session.peer.metadata.name };
 }
 
 export async function createWalletConnectTransport(options: {
@@ -41,13 +37,14 @@ export async function createWalletConnectTransport(options: {
   const client = await (options.initialize ?? SignClient.init.bind(SignClient))({ projectId: options.projectId, metadata: { ...options.metadata, icons: [] },
     storage: owner.storage, logger: "silent", telemetryEnabled: false });
   let stopped = false;
-  const listeners = new Set<(topic: string, selectionChanged?: boolean) => void>();
+  const listeners = new Set<(topic: string, changedChains?: readonly WalletChainId[]) => void>();
   const changed = (event: { topic: string }) => { if (!stopped) for (const listener of listeners) listener(event.topic); };
   // Pinned SignClient emits session_event without changing session.namespaces.
   // Treat active account/chain changes as invalidation, not new authorization.
-  const selectionChanged = (event: { topic: string; params: { event: { name: string } } }) => {
+  const selectionChanged = (event: { topic: string; params: { chainId?: string; event: { name: string } } }) => {
     if (!stopped && ["accountsChanged", "chainChanged"].includes(event.params.event.name)) {
-      for (const listener of listeners) listener(event.topic, true);
+      const chain = WALLET_CHAINS.find((id) => id === event.params.chainId);
+      for (const listener of listeners) listener(event.topic, chain ? [chain] : WALLET_CHAINS);
     }
   };
   client.on("session_update", changed); client.on("session_delete", changed);
@@ -78,11 +75,14 @@ export async function createWalletConnectTransport(options: {
       }
       return client.session.getAll().flatMap((session) => { const value = current(session.topic); return value ? [value] : []; });
     },
-    async connect() {
+    async connect(chains) {
       requireActive();
-      const connecting = await client.connect({ requiredNamespaces: { sui: {
-        chains: [SUI_MAINNET_WALLET_CHAIN], methods: [SUI_SIGN_TRANSACTION_METHOD], events: ["accountsChanged", "chainChanged"]
-      } } });
+      const scope = walletChainsSchema.parse(chains);
+      if (!scope.length) throw new Error("Choose wallet networks in Settings before connecting.");
+      const optionalNamespaces = Object.fromEntries(scope.map((chain) => [chain.split(":")[0]!, { chains: [chain],
+        methods: chain === SUI_MAINNET_WALLET_CHAIN ? [SUI_SIGN_TRANSACTION_METHOD] : [],
+        events: chain === SUI_MAINNET_WALLET_CHAIN ? ["accountsChanged", "chainChanged"] : [] }]));
+      const connecting = await client.connect({ requiredNamespaces: {}, optionalNamespaces });
       const approval = connecting.approval().then(sessionValue).catch((error: unknown) => { throw transportError(error); });
       // Attach a rejection handler immediately; the backend records the same
       // promise's outcome once the private QR has been associated with its row.
@@ -97,7 +97,7 @@ export async function createWalletConnectTransport(options: {
     async sign(input) {
       requireActive();
       const session = current(input.topic);
-      if (!session?.accounts.includes(input.account) || !session.methods.includes(SUI_SIGN_TRANSACTION_METHOD)) {
+      if (!session || !walletGrantAccount(session.grants, SUI_MAINNET_WALLET_CHAIN, input.account)?.methods.includes(SUI_SIGN_TRANSACTION_METHOD)) {
         throw new Error("This wallet session cannot sign for the selected Sui account.");
       }
       return signedResponse.parse(await client.request({ topic: input.topic, chainId: SUI_MAINNET_WALLET_CHAIN,

@@ -1,3 +1,4 @@
+import { walletConnectionActionSchema } from "../src/core/session/walletConnectionOperations.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { Transaction } from "@mysten/sui/transactions";
 import { verifyTransactionSignature } from "@mysten/sui/verify";
@@ -28,7 +29,8 @@ async function ownBlock(f: Fixture, blocked: boolean) {
 function state(f: Fixture) {
   return f.wallet.run(() => ({
     cards: f.records.db.prepare("SELECT id,revision,state,reason,operation_id,accepted_input_json FROM live_read_cards ORDER BY id").all(),
-    connections: f.records.db.prepare("SELECT id,status,revision,sdk_pending,run_id,connection_json FROM live_wallet_connections ORDER BY id").all(),
+    operations: f.records.db.prepare("SELECT * FROM wallet_connection_operations ORDER BY operation_id").all(),
+    connections: f.records.db.prepare("SELECT id,status,revision,run_id,connection_json FROM live_wallet_connections ORDER BY id").all(),
     reviews: f.records.db.prepare("SELECT id,revision,status,preparation_id FROM live_review_sessions ORDER BY id").all(),
     requests: f.records.db.prepare("SELECT attempt_id,revision,request_status FROM review_requests ORDER BY attempt_id").all(),
     authority: f.records.db.prepare("SELECT attempt_id,can_submit,sdk_pending,submit_pending,lookup_pending FROM live_request_authority ORDER BY attempt_id").all(),
@@ -36,7 +38,7 @@ function state(f: Fixture) {
   }));
 }
 
-it.each(["connect", "use_account", "disconnect_connected", "disconnect_failed", "prepare_review", "request_signature", "begin_submission"] as const)(
+it.each(["connect", "disconnect_connected", "disconnect_failed", "prepare_review", "request_signature", "begin_submission"] as const)(
   "isolates the SQLite recovery block for an otherwise valid %s, with a normal positive control", async (action) => {
     for (const blocked of [false, true]) {
       const f = await settingsWorkflowFixture(); close.push(f.close);
@@ -46,29 +48,23 @@ it.each(["connect", "use_account", "disconnect_connected", "disconnect_failed", 
         const card = await w.createConnection();
         expect(card.snapshot.data).toMatchObject({ allowedActions: ["cancel", "connect"] });
         await ownBlock(f, blocked);
-        invoke = () => w.records.admitConnection(w.cardRecords.get(card.snapshot.cardId)!, { action: "connect" });
+        invoke = () => w.records.admitConnection(w.cardRecords.get(card.snapshot.cardId)!, walletConnectionActionSchema.options[0].parse(w.connectionInput(card, { action: "connect" })));
       } else {
         const { connection } = await w.approve();
-        if (action === "use_account") {
-          const clear = await f.prepare({ kind: "clear_read_address" }); await f.confirm(clear);
-          expect(w.run(() => w.activity.getActiveAccountSync())).toBeUndefined();
-          const card = await w.run(() => w.cards.create("connect", { intent: "manage" }));
-          await ownBlock(f, blocked);
-          invoke = () => w.records.useAccount(w.cardRecords.get(card.snapshot.cardId)!, { action: "use_account", connectionId: connection.connectionId, account: w.account }, connection.connectionId, w.account);
-        } else if (action.startsWith("disconnect_")) {
+        if (action.startsWith("disconnect_")) {
           if (action === "disconnect_failed") {
             vi.mocked(w.transport.disconnect).mockRejectedValueOnce(new Error("Synthetic unconfirmed disconnect"));
-            const prior = await w.run(() => w.cards.create("connect", { intent: "manage" }));
+            const prior = await w.run(() => w.cards.create("disconnect", {}));
             await w.act(prior, { action: "disconnect", connectionId: connection.connectionId });
             await vi.waitFor(() => expect(w.run(() => w.records.connection(connection.connectionId))).toMatchObject({ sdkPending: false, connection: { status: "failed" } }));
           }
-          const card = await w.run(() => w.cards.create("connect", { intent: "manage" }));
-          expect(card.snapshot.data).toMatchObject({ manageableConnectionIds: [connection.connectionId] });
+          const card = await w.run(() => w.cards.create("disconnect", {}));
+          expect(card.snapshot.data).toMatchObject({ allowedActions: ["cancel", "disconnect"] });
           await ownBlock(f, blocked);
-          invoke = () => w.records.admitDisconnect(w.cardRecords.get(card.snapshot.cardId)!, { action: "disconnect", connectionId: connection.connectionId }, connection.connectionId);
+          invoke = () => w.records.admitDisconnect(w.cardRecords.get(card.snapshot.cardId)!, walletConnectionActionSchema.options[1].parse(w.connectionInput(card, { action: "disconnect", connectionId: connection.connectionId })));
         } else if (action === "prepare_review") {
           const review = await w.run(() => w.sessions.createReviewSession([w.plan], w.now()));
-          const card = await w.run(() => w.cards.create("review", { reviewSessionId: review.session.id }));
+          const card = await w.run(() => w.cards.create("review", w.reviewInput(review.session.id)));
           await ownBlock(f, blocked);
           invoke = () => w.records.beginReviewPreparation(w.cardRecords.get(card.snapshot.cardId)!, 0, connection, w.account);
         } else {
@@ -100,7 +96,6 @@ it.each(["connect", "use_account", "disconnect_connected", "disconnect_failed", 
         const result = w.run(invoke);
         if (action === "begin_submission") expect(result).toBe(true);
         expect(state(f)).not.toEqual(before);
-        if (action === "use_account") expect(w.run(() => w.activity.getActiveAccountSync())).toMatchObject({ address: w.account, walletId: w.run(() => w.records.connections()[0]!.connection.connectionId) });
       }
       // Store primitives never dispatch SDK work. End-to-end recovery tests
       // separately verify that scoped rejected inputs dispatch nothing.

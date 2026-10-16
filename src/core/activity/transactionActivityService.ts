@@ -421,8 +421,8 @@ export class TransactionActivityService {
   private async resolveActiveAccount(): Promise<{ account: string; accountSource: "active_account_context" }> {
     const active = await this.options.activityStore.getActiveAccount();
     if (!active) {
-      throw new TransactionActivityError("active_account_not_set", "Active account read context is not set", {
-        action: "connect_wallet_connection"
+      throw new TransactionActivityError("active_account_not_set", "No saved read address is set. Provide an explicit Sui account for this read.", {
+        action: "provide_account"
       });
     }
     return { account: active.address, accountSource: "active_account_context" };

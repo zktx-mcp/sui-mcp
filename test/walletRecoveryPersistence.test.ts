@@ -1,11 +1,10 @@
+import { suiGrants } from "./fixtures/walletGrants.js";
 import { WalletSdkPeer } from "./fixtures/walletSdkPeer.js";
 import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, expect, it, vi } from "vitest";
 import { WalletSdkProcess } from "../src/runtime/walletSdkProcess.js";
-import { workflowViewSchema } from "../src/core/session/workflowView.js";
-import { waitForWalletConnection } from "../src/core/session/wait.js";
 import { walletWorkflowFixture } from "./fixtures/walletWorkflow.js";
 
 // Only the OS/IPC peer is synthetic. Admission, supervisor, Workflow, SQLite,
@@ -20,7 +19,7 @@ async function fixture() {
   }) });
   const db = new Database(join(f.directory, "activity.sqlite"));
   cleanup.push(async () => { for (const peer of peers) { peer.killMode = "exit"; peer.finish(); } await f.runtime.close(); db.close(); f.close(); });
-  const manage = () => f.run(() => f.cards.create("connect", { intent: "manage" }));
+  const manage = () => f.run(() => f.cards.create("connect", {}));
   return { ...f, peers, startups, db, manage };
 }
 
@@ -52,8 +51,7 @@ it.each(["false", "throw"] as const)("never spawns over a living child when term
 
 it("retains service-loss publication until storage recovers, without repeating termination", async () => {
   const f = await fixture(), card = await f.manage();
-  const connection = f.run(() => f.records.restoreConnection({ topic: "fixture-record", accounts: [f.account], methods: ["sui_signTransaction"],
-    chain: "sui:mainnet", expiresAt: new Date(f.now().getTime() + 60000).toISOString() }, f.now())).connection;
+  const connection = f.run(() => f.seedConnection({ topic: "fixture-record", grants: suiGrants([f.account], ["sui_signTransaction"]), expiresAt: new Date(f.now().getTime() + 60000).toISOString() })).connection;
   f.db.exec("CREATE TRIGGER reject_failure BEFORE UPDATE ON live_wallet_connections BEGIN SELECT RAISE(ABORT,'fixture failure write refused'); END");
   f.runtime.fail("wallet_state_unavailable");
   await vi.waitFor(() => expect(f.peers[0]!.signalCode).toBe("SIGKILL"));
@@ -61,7 +59,8 @@ it("retains service-loss publication until storage recovers, without repeating t
   expect(f.run(() => f.records.connection(connection.connectionId)?.connection.revision)).toBe(connection.revision);
   f.db.exec("DROP TRIGGER reject_failure");
   const current = await f.read(card), revision = f.run(() => f.records.connection(connection.connectionId)?.connection.revision);
-  expect(workflowViewSchema.parse(current.snapshot.data).walletAvailability.status).toBe("unavailable");
+  expect(current.snapshot.state).toBe("closed");
+  expect(f.run(() => f.workflow.currentConnectionContext()).walletAvailability.status).toBe("unavailable");
   expect(revision).toBeGreaterThan(connection.revision);
   await f.read(card); expect(f.run(() => f.records.connection(connection.connectionId)?.connection.revision)).toBe(revision);
   expect(f.peers).toHaveLength(1); expect(f.peers[0]!.kills).toBe(1);
@@ -74,17 +73,4 @@ it("does not let a cancelled replacement continue into a new data generation", a
   const stopped = expect(replacing).rejects.toThrow("run ended");
   await f.run(() => f.localData.resetLocalData()); peer.finish(); await stopped;
   expect(f.peers).toHaveLength(1); expect(f.runtime.availability().status).toBe("unavailable");
-});
-
-it.each(["available", "failed", "superseded", "server_restarted"] as const)("reads a historical recovery %s without restoring its retired input", async (outcome) => {
-  const f = await fixture(), card = await f.manage();
-  const record = f.run(() => f.cardRecords.get(card.snapshot.cardId))!;
-  f.run(() => f.cardRecords.replace(record, { ...record, acceptedInput: { action: "restart_wallet_service", walletRunId: f.runtime.runId },
-    state: { ...record.state, revision: record.state.revision + 1, state: "closed", reason: outcome === "server_restarted" ? "server_restarted" : outcome === "available" ? "completed" : "failed",
-      data: { kind: "wallet_service_recovery", priorRunId: f.runtime.runId, admittedAt: f.now().toISOString(), updatedAt: f.now().toISOString(), outcome } } }));
-  const saved = await f.read(card);
-  expect(saved.snapshot.data).toMatchObject({ runtimeRecovery: { outcome }, allowedActions: [], observe: false });
-  expect((await f.run(() => waitForWalletConnection(f.cards, card.snapshot.cardId))).waitOutcome).toBe("status_reached");
-  expect((await f.act(await f.read(card), { action: "restart_wallet_service" })).error?.code).toBe("invalid_card_input");
-  expect(f.peers).toHaveLength(1); expect(f.peers[0]!.kills).toBe(0);
 });

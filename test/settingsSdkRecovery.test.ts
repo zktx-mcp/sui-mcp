@@ -1,3 +1,4 @@
+import { seedReadAddressCleared } from "./fixtures/readAccount.js";
 import { fork, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -31,21 +32,19 @@ it.each(["selected", "cleared"] as const)("restores a known approved connection 
     const observed = w.runtime.snapshot()!.sessions.find((item) => item.topic === sdkFixtureTopic)!;
     if (observed.status !== "present") throw new Error("The actual SDK session prerequisite is absent");
     // Approval is a declared synthetic journal input, not real wallet UI proof.
-    const connection = w.run(() => w.records.restoreConnection(observed.session, w.now())).connection;
-    const use = await w.run(() => w.cards.create("connect", { intent: "manage" }));
-    expect((await w.act(use, { action: "use_account", connectionId: connection.connectionId, account: w.account })).error).toBeUndefined();
+    const connection = w.run(() => w.seedConnection(observed.session)).connection;
     if (selection === "cleared") {
-      const clear = await f.prepare({ kind: "clear_read_address" }); await f.confirm(clear);
+      await w.run(() => seedReadAddressCleared(w.activity));
       expect(w.run(() => w.activity.getActiveAccountSync())).toBeUndefined();
     }
     const priorRun = w.runtime.runId, restart = await f.prepare({ kind: "restart_wallet_service" }); await f.confirm(restart);
     await vi.waitFor(async () => expect((await f.read(restart)).snapshot.data).toMatchObject({ result: { outcome: "completed" } }), { timeout: 10000 });
     expect(children[0]!.signalCode).toBe("SIGKILL"); expect(children).toHaveLength(2); expect(w.runtime.runId).not.toBe(priorRun);
     const context = w.run(() => w.workflow.reconcileConnectionContext());
-    expect(context.connections).toEqual([expect.objectContaining({ connectionId: connection.connectionId, status: "connected", accounts: [w.account] })]);
+    expect(context.connection).toMatchObject({ connectionId: connection.connectionId, status: "connected", chainResults: [{ chainId: "sui:mainnet", status: "bound", address: w.account }] });
     expect(context.connectionReconciliationRequired).toBeUndefined();
-    expect(context.assetReadAccount).toEqual(selection === "selected" ? { status: "available", account: w.account } : { status: "address_required" });
-    if (selection === "selected") expect(w.run(() => w.activity.getActiveAccountSync())).toMatchObject({ address: w.account, walletId: connection.connectionId });
+    expect(context.assetReadAccount).toEqual(selection === "selected" ? { status: "available", account: w.account } : { status: "address_required", reason: "read_address_cleared" });
+    if (selection === "selected") expect(w.run(() => w.activity.getActiveAccountSync())).toMatchObject({ address: w.account, connectionId: connection.connectionId });
     else expect(w.run(() => w.activity.getActiveAccountSync())).toBeUndefined();
     expect(commands.filter((command) => command === "connect" || command === "sign" || command === "disconnect")).toEqual([]);
   } finally { await close(); }
@@ -59,10 +58,8 @@ it.each([false, true])("reconciles a real SDK held disconnect through Settings w
     // actual SDK store. This proves recovery, not a new wallet's approval UI.
     const observed = f.wallet.runtime.snapshot()!.sessions.find((item) => item.topic === sdkFixtureTopic)!;
     if (observed.status !== "present") throw new Error("Actual SDK session prerequisite is absent");
-    const connection = f.wallet.run(() => f.wallet.records.restoreConnection(observed.session, f.wallet.now())).connection;
-    let manage = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
-    expect((await f.wallet.act(manage, { action: "use_account", connectionId: connection.connectionId, account: f.wallet.account })).error).toBeUndefined();
-    manage = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
+    const connection = f.wallet.run(() => f.wallet.seedConnection(observed.session)).connection;
+    const manage = await f.wallet.createDisconnection();
     await f.wallet.act(manage, { action: "disconnect", connectionId: connection.connectionId });
     await vi.waitFor(() => expect(relay.calls.some((call) => call.method === "irn_unsubscribe")).toBe(true), { timeout: 10000 });
     expect(f.wallet.run(() => f.wallet.records.connection(connection.connectionId))).toMatchObject({ sdkPending: true, connection: { status: "connected" } });
@@ -84,14 +81,15 @@ it.each([false, true])("reconciles a real SDK held disconnect through Settings w
     expect(children).toHaveLength(2); expect(commands.filter((command) => command === "disconnect")).toHaveLength(1);
     const context = f.wallet.run(() => f.wallet.workflow.reconcileConnectionContext());
     expect(context.assetReadAccount).toEqual({ status: "address_required" });
-    expect(context.connections.find((value) => value.connectionId === connection.connectionId)?.status).toBe("failed");
+    expect(context.connection?.status).toBe("failed");
     const present = f.wallet.runtime.snapshot()!.sessions.find((value) => value.topic === sdkFixtureTopic)?.status === "present";
     if (present) {
-      const retry = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
+      const retry = await f.wallet.createDisconnection();
       expect((await f.wallet.act(retry, { action: "disconnect", connectionId: connection.connectionId })).error).toBeUndefined();
       await vi.waitFor(() => expect(f.wallet.run(() => f.wallet.records.connection(connection.connectionId)?.connection.status)).toBe("disconnected"), { timeout: 10000 });
-    } else expect(context.manageableConnectionIds).toEqual([]);
-    const empty = await f.wallet.run(() => f.wallet.cards.create("connect", { intent: "manage" }));
+    } else expect(context.canDisconnect).toBe(false);
+    await vi.waitFor(() => expect(f.wallet.run(() => f.wallet.records.connection(connection.connectionId)?.sdkPending)).toBe(false));
+    const empty = await f.wallet.run(() => f.wallet.cards.create("connect", {}));
     expect(empty.snapshot.data).toMatchObject({ allowedActions: ["cancel", "connect"] });
     expect(commands.filter((command) => command === "connect")).toHaveLength(0);
     expect((await f.wallet.act(empty, { action: "connect" })).error).toBeUndefined();

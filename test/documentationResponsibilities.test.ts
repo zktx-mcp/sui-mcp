@@ -237,7 +237,7 @@ describe("documentation responsibility boundaries", () => {
     )).toEqual([]);
 
     const walletIdentity = read("docs/WALLET_CONNECTION.md");
-    expect(walletIdentity).toMatch(/active read account|read context/i);
+    expect(walletIdentity).toMatch(/account context/i);
     expect(walletIdentity).toMatch(/not login[\s\S]{0,100}custody[\s\S]{0,80}standing permission/i);
     expect(unnegatedClaims(
       walletIdentity,
@@ -292,16 +292,126 @@ describe("documentation responsibility boundaries", () => {
 });
 
 describe("disconnect request routing", () => {
-  it("routes disconnect requests to the existing user-confirmed card, never to clearing read context", () => {
+  it("routes disconnect requests to their purpose card, never to clearing read context", () => {
     const behavior = read("docs/AGENT_BEHAVIOR.md");
     const flow = requiredBlock(behavior, 'For "disconnect my wallet",', '3. `session_get_wallet_connection_card`');
-    expect(flow).toContain("open `session_open_wallet_connection_card` with `intent: disconnect`");
-    expect(flow).toContain("Confirm disconnect or Back");
-    expect(flow).toContain("Back only returns to the connection view");
-    expect(flow).toContain("does not submit Cancel review or disconnect");
+    expect(flow).toContain("open `session_open_wallet_disconnection_card`");
+    expect(flow).toContain("Confirm disconnect removes that exact session");
+    expect(flow).toMatch(/Cancel ends\s+only this card and leaves the session unchanged/);
     expect(flow).toContain("The card starts no pairing");
-    expect(flow).toContain("Do not substitute the Settings action to clear the default read address");
+    expect(flow).toContain("Do not substitute Clear saved read address");
     expect(flow).toContain("If disconnection is already pending");
     expect(behavior).toContain("For a connect request, if the requested wallet is already connected");
+  });
+});
+
+describe("single-connection user-flow contracts", () => {
+  it("keeps one current connection and immutable Review targets across their owning guidance", () => {
+    const wallet = requiredBlock(read("docs/WALLET_CONNECTION.md"), "## One connection, fixed addresses", "## Transaction approval");
+    const api = requiredBlock(read("docs/MCP_TOOLS.md"), "## Session Tools", "## Account Tools");
+    const behavior = requiredBlock(read("docs/AGENT_BEHAVIOR.md"), "Describe an active wallet account", "Frame recreation and chat navigation");
+    const frontend = requiredBlock(read("docs/FRONTEND_POLICY.md"), "## Connect and Review behavior", "## Rendering and recovery");
+    const recovery = requiredBlock(read("docs/FRONTEND_POLICY.md"), "## Rendering and recovery", "## Internal Read Cards");
+
+    expect(wallet).toMatch(/There is one current product connection/);
+    expect(wallet).toMatch(/at most one fixed address\s+per chain/);
+    expect(wallet).toMatch(/Change the wallet, account, address or approved network scope by\s+disconnecting/);
+    expect(api).toMatch(/replacement\s+connection is never substituted for the original Review target/);
+    expect(behavior).toMatch(/Reconnecting cannot retarget an existing Review/);
+    expect(frontend).toMatch(/Disconnect presents the exact target/);
+    expect(recovery).toMatch(/Retry review rereads the same card and prepares only its original\s+fixed account and connection/);
+    expect(recovery).toMatch(/replacement connection\s+requires a new Review/);
+    expect(recovery).toMatch(/ended\s+original connection requires a new Review even when no replacement is connected/);
+    expect(SERVER_INSTRUCTIONS).toMatch(/One connection fixes one address per approved chain/);
+    expect(SERVER_INSTRUCTIONS).toMatch(/Wallet\/address\/scope changes require disconnect\/reconnect/);
+
+    // Evaluate claims in the owning blocks, including their negation. Financial
+    // signer selection and active_account_context are not forbidden words.
+    const conflictingClaims = /\b(?:independent|multiple current|multiple concurrent) (?:wallet )?connections\b|\b(?:change|switch) (?:the )?default account\b|\bretarget (?:an? |the )?(?:existing |bound )?Review\b/i;
+    for (const [file, block] of [
+      ["docs/WALLET_CONNECTION.md", wallet], ["docs/MCP_TOOLS.md", api],
+      ["docs/AGENT_BEHAVIOR.md", behavior], ["docs/FRONTEND_POLICY.md", `${frontend}\n${recovery}`],
+      ["runtime guidance", SERVER_INSTRUCTIONS]
+    ]) expect(unnegatedClaims(block!, file!, conflictingClaims), file).toEqual([]);
+
+    expect(api).toMatch(/top-level `pendingOperation`/);
+    expect(api).toMatch(/Match `pendingOperation\.operationId` to the one operation fixed to that card/);
+    expect(api).toMatch(/completed disconnect is disconnected\s+with any outstanding cleanup reported separately/);
+    expect(api).toContain("`connection.sessionPresence`");
+    expect(api).toMatch(/`unconfirmed`, never evidence of absence/);
+    expect(api).toMatch(/settled attempt without an approved\s+session or recorded session reference/);
+    expect(api).toMatch(/no pending connection work and no unrecorded SDK session/);
+    expect(recovery).toMatch(/Do not direct\s+the user to repeat status checks for a confirmed no-session result/);
+    expect(recovery).toMatch(/guidance, not a list of saved status names/);
+    expect(frontend).toMatch(/Completed disconnection with pending cleanup\s+remains completed/);
+    expect(frontend).toMatch(/Connect and Disconnect results\s+contain no addresses, QR or account controls/);
+    expect(wallet).toMatch(/Cleanup completion never reopens the card/);
+  });
+
+  it("keeps Settings read-address and backup effects separate from wallet authority", () => {
+    const setup = requiredBlock(read("docs/MCP_SETUP.md"), "## Local Settings", "## Advanced Runtime Settings");
+    const accounts = requiredBlock(read("docs/MCP_TOOLS.md"), "## Account Tools", "## Settings Tools");
+    const settings = requiredBlock(read("docs/MCP_TOOLS.md"), "## Settings Tools", "## Resources");
+    const timeline = requiredBlock(read("docs/MCP_TOOLS.md"), "### Stored Account Asset Timeline", "## Action Tools");
+    expect(setup).toMatch(/Settings groups Address for viewing assets, Wallet networks, Local records/);
+    expect(settings).toMatch(/Settings groups Address for viewing assets, Wallet networks, Local records/);
+    expect(accounts).toMatch(/without disconnecting the wallet,\s+changing fixed addresses or cancelling transaction requests/);
+    expect(setup).toMatch(/Backups include chain-qualified address history/);
+    expect(setup).toMatch(/They do not contain\s+the current connection, an active-account selection, read-address suppression or\s+wallet approvals/);
+    expect(setup).toMatch(/Restoring records does not reconnect a wallet or activate a\s+saved address/);
+    expect(timeline).toContain('accountSource: "active_account_context"');
+    expect(timeline).toContain('details.action: "provide_account"');
+    expect(timeline).toMatch(/That error does not establish wallet disconnection/);
+  });
+
+  it("describes the smoke's explicit address and temporary history without inventing wallet state", () => {
+    const setup = read("docs/MCP_SETUP.md"), utility = read("docs/UTILITY_INDEX.md");
+    const setupRead = requiredBlock(setup, "## Mainnet Read Smoke", "## Troubleshooting");
+    const utilityRead = requiredBlock(utility, "## Mainnet Read Smoke", "## Sui GraphQL Function Filter Probe Notes");
+    expect(setupRead).toMatch(/All four activity calls supply the address explicitly/);
+    for (const block of [setupRead, utilityRead]) expect(block).toContain('accountSource: "explicit_filter"');
+    for (const [file, source] of [["docs/MCP_SETUP.md", setup], ["docs/UTILITY_INDEX.md", utility]]) {
+      const start = source!.indexOf("### Optional account-bound review smoke");
+      expect(start, `${file} optional review section`).toBeGreaterThanOrEqual(0);
+      const review = source!.slice(start);
+      expect(review).toMatch(/known-account history for that explicit address/);
+      expect(review).toMatch(/does not create a current\s+wallet connection, saved read context or proof of ownership/);
+      expect(review).toMatch(/never wallet pairing, signing or submission/);
+    }
+  });
+});
+
+
+describe("retired card instructions across current reader surfaces", () => {
+  // These are bounded claims of the removed product model, not a word blacklist.
+  // Scan the entire affected reader surface so a second section cannot retain it.
+  const retired = [
+    /six internal (?:HTML resources|cards)/i,
+    /explicitly choose the connection operation|card opened for inspection has no pending pairing until Connect wallet is used|opening manage does not pair|manage does not pair merely by opening|(?:wallet|connection) management card to connect and disconnect/i,
+    /read or wait on (?:the returned |that )?cardId\s*(?:and|\/)\s*operationId/i,
+    /later availability requires an explicit Retry for that failed attempt|only the separate scoped file continuations[\s\S]{0,100}may remain available|ended Settings card keeps Retry download/i,
+    /local confirmation stage describes presentation|New purpose cards remain available during initialization or failure/i,
+    /operation in closed card data/i
+  ];
+  const retiredInstructions = (source: string, file: string) => retired.flatMap((claim) => unnegatedClaims(source, file, claim));
+  const files = ["README.md", "docs/MCP_SETUP.md", "docs/MCP_TOOLS.md", "docs/AGENT_BEHAVIOR.md", "docs/WALLET_CONNECTION.md", "docs/FRONTEND_POLICY.md", "docs/SDK_API.md", "docs/UTILITY_INDEX.md"];
+  it.each(files)("does not retain retired instructions in another section of %s", (file) => {
+    expect(retiredInstructions(read(file), file)).toEqual([]);
+  });
+  it("detects the previous missed instructions outside the primary block without banning valid controls", () => {
+    const current = read("docs/MCP_SETUP.md");
+    for (const bad of [
+      "A card opened for inspection has no pending pairing until Connect wallet is used.",
+      "Read or wait on the returned cardId and operationId.",
+      "Read or wait on that cardId/operationId.",
+      "Open the wallet management card to connect and disconnect.",
+      "There are six internal HTML resources.",
+      "New purpose cards remain available during initialization or failure so the user can inspect state.",
+      "The operation in closed card data is the operation recorded at closure.",
+      "The ended Settings card keeps Retry download and file controls.",
+      "Later availability requires an explicit Retry for that failed attempt.",
+      "The local confirmation stage describes presentation."
+    ]) expect(retiredInstructions(`${current}\n## Another section\n${bad}`, "docs/MCP_SETUP.md"), bad).not.toEqual([]);
+    expect(retiredInstructions("Settings Back changes only the selected settings page. Review Retry prepares the same fixed target. There are no six internal cards to count. Do not read or wait on that cardId/operationId. The journal's operationId identifies the admitted request. A fresh backupDelivery card permits Retry download.", "guidance.md")).toEqual([]);
   });
 });

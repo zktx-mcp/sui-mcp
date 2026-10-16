@@ -46,16 +46,17 @@ it("uses the pinned Sui sign-only RPC with unchanged stored BCS and selected add
 it("invalidates selection on account/chain events even if approved namespaces do not change", async () => {
   sdk.sessions.set("approved", approved()); const transport = await open(), listener = vi.fn(); transport.onSessionChanged(listener);
   for (const name of ["accountsChanged", "chainChanged"]) sdk.listeners.get("session_event")!({ topic: "approved", params: { event: { name } } });
-  expect(listener.mock.calls).toEqual([["approved", true], ["approved", true]]);
-  expect(transport.session("approved")?.accounts).toEqual([account]);
+  expect(listener.mock.calls).toEqual([["approved", ["sui:mainnet", "eip155:1", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"]],
+    ["approved", ["sui:mainnet", "eip155:1", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"]]]);
+  expect(transport.session("approved")?.grants[0]?.accounts.map((item) => item.address)).toEqual([account]);
   transport.stop(); expect(sdk.listeners.size).toBe(0); expect(transport.session("approved")).toBeUndefined();
 });
 
-it("rejects non-mainnet sessions and removes abandoned pairing restoration", async () => {
+it("keeps a non-mainnet session unusable for supported accounts and removes abandoned pairings", async () => {
   sdk.sessions.set("approved", approved()); const wrong = approved(); wrong.topic = "wrong"; wrong.namespaces.sui.accounts = [`sui:testnet:${account}`]; sdk.sessions.set("wrong", wrong);
   sdk.pairings = [{ topic: "abandoned", expiry: Math.floor(Date.now() / 1000) + 60, active: false }];
   const transport = await open();
-  try { expect((await transport.restore()).map((s) => s.topic)).toEqual(["approved"]); expect(sdk.removePairing).toHaveBeenCalledExactlyOnceWith({ topic: "abandoned" }); }
+  try { expect((await transport.restore()).map((s) => s.topic)).toEqual(["approved", "wrong"]); expect(transport.session("wrong")?.grants.flatMap((grant) => grant.accounts)).toEqual([]); expect(sdk.removePairing).toHaveBeenCalledExactlyOnceWith({ topic: "abandoned" }); }
   finally { transport.stop(); }
 });
 
@@ -65,10 +66,16 @@ it("takes pairing expiry from the SDK and classifies rejection by protocol code 
   sdk.connect.mockResolvedValue({ uri: "wc:pair@2?relay-protocol=irn&symKey=fixture", approval: async () => { throw { code: 5000, message: "PRIVATE-REMOTE-DETAIL" }; } });
   const transport = await open();
   try {
-    const pairing = await transport.connect(); expect(pairing.expiresAt).toBe(new Date(expiry * 1000).toISOString());
+    const pairing = await transport.connect(["sui:mainnet", "eip155:1", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"]);
+    expect(sdk.connect).toHaveBeenCalledExactlyOnceWith({ requiredNamespaces: {}, optionalNamespaces: {
+      sui: { chains: ["sui:mainnet"], methods: ["sui_signTransaction"], events: ["accountsChanged", "chainChanged"] },
+      eip155: { chains: ["eip155:1"], methods: [], events: [] },
+      solana: { chains: ["solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"], methods: [], events: [] }
+    } });
+    expect(pairing.expiresAt).toBe(new Date(expiry * 1000).toISOString());
     await expect(pairing.approval).rejects.toBeInstanceOf(WalletUserRejectedError);
     await expect(pairing.approval).rejects.not.toThrow("PRIVATE-REMOTE-DETAIL");
     sdk.connect.mockResolvedValue({ uri: "wc:pair@2?relay-protocol=irn&symKey=fixture", approval: async () => { throw { code: -32000, message: "User rejected" }; } });
-    await expect((await transport.connect()).approval).rejects.not.toBeInstanceOf(WalletUserRejectedError);
+    await expect((await transport.connect(["sui:mainnet"])).approval).rejects.not.toBeInstanceOf(WalletUserRejectedError);
   } finally { transport.stop(); }
 });

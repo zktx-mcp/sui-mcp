@@ -22,6 +22,7 @@ describe("runtime local settings service", () => {
 
     await repository.setSuiGrpcUrl("https://example.sui.provider:9000");
     await expect(service.getLocalSettings()).resolves.toEqual({
+      walletConnectionChains: ["sui:mainnet"],
       suiGrpcUrl: {
         storedValue: "https://example.sui.provider:9000",
         effectiveValue: "https://override.sui.provider:9443",
@@ -86,6 +87,7 @@ describe("runtime local settings service", () => {
     await repository.resetSuiGrpcUrl("https://fullnode.mainnet.sui.io:443");
 
     await expect(service.getLocalSettings()).resolves.toEqual({
+      walletConnectionChains: ["sui:mainnet"],
       suiGrpcUrl: {
         storedValue: "https://fullnode.mainnet.sui.io:443",
         effectiveValue: "https://boot.sui.provider:9443",
@@ -123,6 +125,7 @@ describe("runtime local settings service", () => {
     await repository.resetSuiGrpcUrl("https://fullnode.mainnet.sui.io:443");
 
     await expect(service.getLocalSettings()).resolves.toEqual({
+      walletConnectionChains: ["sui:mainnet"],
       suiGrpcUrl: {
         storedValue: "https://fullnode.mainnet.sui.io:443",
         effectiveValue: "https://fullnode.mainnet.sui.io:443",

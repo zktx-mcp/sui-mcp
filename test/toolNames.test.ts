@@ -18,7 +18,7 @@ describe("MCP tool names", () => {
       "read_scan_sui_function_activity", "read_summarize_sui_function_activity_scan",
       "read_summarize_sui_account_activity", "read_get_account_asset_timeline",
       "settings_create_local_settings_session", "settings_get_local_settings", "action_start_review",
-      "action_create_proposal_review", "session_open_wallet_connection_card",
+      "action_create_proposal_review", "session_open_wallet_disconnection_card", "session_open_wallet_connection_card",
       "session_get_wallet_connection_card", "session_wait_wallet_connection_card",
       "session_get_interaction_status", "session_get_review_status", "session_get_execution_result",
       "session_wait_execution_result", "account_get_active_account"

@@ -1,4 +1,5 @@
-import { walletAvailabilitySchema, workflowProgressSchema, walletUnavailable, connectionConflictSchema } from "../../../core/session/walletConnection.js";
+import { walletChainsSchema } from "../../../core/session/chainAccounts.js";
+import { walletAvailabilitySchema, workflowProgressSchema, walletUnavailable } from "../../../core/session/walletConnection.js";
 import { walletObservationSchema } from "../../../core/session/walletRuntime.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
@@ -13,18 +14,19 @@ import { userAnswerUseSchema } from "../read/commonSchemas.js";
 import { isReviewInteractionPending, reviewStatusResponse } from "../../../core/session/status.js";
 import { latest, reviewStatusResponseShape, readCurrentReview } from "./shared.js";
 import { pendingConnectionStatusSchema, connectionViewSchema, assetReadAccountSchema } from "../../../core/session/workflowView.js";
+import { pendingWalletConnectionOperationSchema } from "../../../core/session/walletConnectionOperations.js";
 
 export function registerSessionStatusTools(server: McpServer, deps: McpServerDeps): void {
   server.registerTool(TOOL_NAMES.sessionGetInteractionStatus, {
-    title: "Get local interaction status", description: "Read wallet connections, the default asset account, and pending interactions.",
+    title: "Get local interaction status", description: "Read the current wallet connection, asset read account, and pending interactions.",
     inputSchema: noParamsInputSchema,
     outputSchema: successOutputSchema({ walletAvailability: walletAvailabilitySchema, walletObservation: walletObservationSchema.optional(), activeAccount: activeAccountResponseSchema,
-      connections: z.array(connectionViewSchema), assetReadAccount: assetReadAccountSchema,
-      connectionConflict: connectionConflictSchema.optional(),
-      manageableConnectionIds: z.array(z.string().min(1)), connectionReconciliationRequired: z.literal(true).optional(),
+      requestedChains: walletChainsSchema,
+      connection: connectionViewSchema.nullable(), pendingOperation: pendingWalletConnectionOperationSchema.optional(), assetReadAccount: assetReadAccountSchema,
+      canDisconnect: z.boolean(), connectionReconciliationRequired: z.literal(true).optional(),
       pendingWalletConnections: z.object({ limit: z.number().int().positive(), truncated: z.boolean(),
         items: z.array(z.object({ cardId: z.string(), connectionId: z.string().optional(),
-          status: pendingConnectionStatusSchema, progress: workflowProgressSchema, lastActivityAt: z.string() })) }),
+          operationId: z.string().uuid(), status: pendingConnectionStatusSchema, progress: workflowProgressSchema, lastActivityAt: z.string() })) }),
       pendingReviewSessions: z.object({ limit: z.number().int().positive(), truncated: z.boolean(), items: z.array(z.object(reviewStatusResponseShape)) }),
       userAnswerUse: userAnswerUseSchema }),
     annotations: { readOnlyHint: false, openWorldHint: false }
@@ -35,15 +37,15 @@ export function registerSessionStatusTools(server: McpServer, deps: McpServerDep
     try {
       // Connection reconciliation can invalidate reviews and interrupt requests.
       // Complete that maintenance before projecting its dependent review facts.
-      const context = deps.workflow?.reconcileConnectionContext() ?? { connections: [], manageableConnectionIds: [],
+      const context = deps.workflow?.reconcileConnectionContext() ?? { requestedChains: [], canDisconnect: false,
         assetReadAccount: { status: "address_required" as const }, walletAvailability: walletUnavailable("initialization_failed") };
       const connections = deps.workflow?.pendingConnections() ?? [];
       const states = await Promise.all(deps.sessions.reviewSessionIds().map((id) => readCurrentReview(deps, id)));
       const reviews = states.flatMap((state) => state && isReviewInteractionPending(state) ? [reviewStatusResponse(state)] : []);
       return okToolResult({ activeAccount: activeAccountResponse(active), pendingWalletConnections: latest(connections),
-        pendingReviewSessions: latest(reviews), ...context,
+        pendingReviewSessions: latest(reviews), ...context, connection: "connection" in context ? context.connection ?? null : null,
         userAnswerUse: interactionStatusUserAnswerUse("walletObservation" in context && context.walletObservation !== undefined,
-          "connectionConflict" in context && !!context.connectionConflict, "connectionReconciliationRequired" in context && !!context.connectionReconciliationRequired) });
+          "connectionReconciliationRequired" in context && !!context.connectionReconciliationRequired) });
     } catch (error) { return sessionStoreToolError(error, deps.logger); }
   });
   server.registerTool(TOOL_NAMES.sessionGetReviewStatus, {
@@ -58,7 +60,7 @@ export function registerSessionStatusTools(server: McpServer, deps: McpServerDep
       const session = state.session;
       return okToolResult({ ...reviewStatusResponse(state),
         userAnswerUse: reviewStatusUserAnswerUse(!!session.reviewState, !!session.reviewState?.adapterLifecycle,
-          !!session.reviewState?.humanReadableReview, !!session.reviewState?.simulation, !!state.connectionConflict, !!state.connectionReconciliationRequired) });
+          !!session.reviewState?.humanReadableReview, !!session.reviewState?.simulation, !!state.connectionReconciliationRequired) });
     } catch (error) { return sessionStoreToolError(error, deps.logger); }
   });
 }

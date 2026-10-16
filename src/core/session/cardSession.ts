@@ -6,7 +6,7 @@ export const walletDisplaySchema = z.object({
 export type WalletDisplay = z.infer<typeof walletDisplaySchema>;
 
 
-export const cardKindSchema = z.enum(["account", "receipt", "chart", "connect", "review", "settings"]);
+export const cardKindSchema = z.enum(["account", "receipt", "chart", "connect", "disconnect", "review", "settings"]);
 export type CardKind = z.infer<typeof cardKindSchema>;
 export const cardStateSchema = z.object({
   cardId: z.string().min(1), kind: cardKindSchema,
@@ -42,7 +42,7 @@ export type CardRecord = {
   state: CardState;
   tokenHash: string;
   ownerId: string;
-  scope?: "read" | "connect" | "review" | "review_manage" | "settings";
+  scope?: "read" | "connect" | "disconnect" | "review" | "review_manage" | "settings";
   operationId?: string;
   acceptedInput?: Record<string, unknown>;
   receiptDisplay?: ReceiptDisplay;
@@ -61,13 +61,14 @@ export type CardSubmission = CardReference & { revision: number; input: Record<s
 // persisted initial state; service adapters supply only data or a safe failure.
 export type CardPreparation =
   | { status: "ready"; data?: unknown }
-  | { status: "failed"; error: string };
+  | { status: "failed"; error: string }
+  | { status: "completed"; data?: unknown };
 
 export interface CardRecordStore {
   get(id: string): CardRecord | undefined;
   evaluate(expected: CardRecord, clock: () => Date): { record: CardRecord; evaluatedAt: string };
   admit(expected: CardRecord, input: Record<string, unknown>, ownerId: string, clock: () => Date): CardRecord | undefined;
   create(record: CardRecord): void;
-  replace(expected: CardRecord, next: CardRecord): boolean;
+  replace(expected: CardRecord, next: CardRecord, at?: Date): boolean;
   recover(ownerId: string, now: Date): void;
 }

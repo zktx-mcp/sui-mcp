@@ -565,7 +565,7 @@ describe("userAnswerUse field references", () => {
         userAnswerUse: interactionStatusUserAnswerUse(),
         sourceShape: {
           walletAvailability: { status: "available" }, progress: { status: "idle" },
-          activeAccount: { status: "none" }, connections: [], manageableConnectionIds: [], assetReadAccount: { status: "address_required" },
+          activeAccount: { status: "none" }, requestedChains: ["sui:mainnet"], connection: null, canDisconnect: false, assetReadAccount: { status: "address_required" },
           pendingWalletConnections: { limit: 5, items: [], truncated: false },
           pendingReviewSessions: { limit: 5, items: [{ reviewSessionId: "review_1" }], truncated: false }
         }

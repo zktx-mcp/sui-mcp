@@ -1,3 +1,4 @@
+import { seedCurrentReadAccount } from "./readAccount.js";
 import { randomUUID, createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { constants } from "node:fs";
@@ -7,7 +8,6 @@ import { SqliteActivityStore } from "../../src/core/activity/sqliteActivityStore
 import { LocalSessionStore } from "../../src/core/session/sessionStore.js";
 import { WalletWorkflow } from "../../src/core/session/walletWorkflow.js";
 import { SettingsWorkflow } from "../../src/core/session/settingsWorkflow.js";
-import { settingsIdentity } from "../../src/core/session/sqliteSettingsWorkflowStore.js";
 import { SettingsFileStore } from "../../src/core/session/settingsFileStore.js";
 import { createReadCardStore } from "../../src/mcp-ui/readCards.js";
 import { createDeepbookUsdcChartService } from "../../src/core/read/deepbookUsdcChartService.js";
@@ -18,7 +18,7 @@ import { DEFAULT_SUI_GRPC_URL, DEFAULT_SUI_GRAPHQL_URL } from "../../src/runtime
 import { SERVER_VERSION } from "../../src/mcp/serverInfo.js";
 import { FixtureWalletRuntime } from "./walletRuntime.js";
 import type { CardResponse } from "../../src/core/session/cardSession.js";
-import type { SettingsDraft, SettingsView } from "../../src/core/session/settingsOperation.js";
+import { settingsDownload, type SettingsDraft, type SettingsView } from "../../src/core/session/settingsOperation.js";
 import type { WalletTransport } from "../../src/core/session/walletConnection.js";
 import { validateSupportedAdapterLifecycle } from "../../src/adapters/adapterLifecycleValidators.js";
 import type { ChildProcess } from "node:child_process";
@@ -112,7 +112,11 @@ if (fault === "saved_before") {
     return result;
   };
 }
-settings.recoverOwner(); await wallet.start();
+settings.recoverOwner();
+// Capture the committed result before physical cleanup can change file facts.
+const recoveryResults = Object.fromEntries((records.db.prepare("SELECT id,result_json FROM live_read_cards WHERE kind='settings' AND state='closed'")
+  .all() as Array<{ id: string; result_json: string }>).map((row) => [row.id, JSON.parse(row.result_json)]));
+await wallet.start();
 const cards = createReadCardStore({ ownerId, records: activity.createCardRecordStore(), workflow: wallet, settings, assertCurrent: access.assertCurrent,
   readService: { summarizeAccountInventory: unexpected }, publicChainReceiptReader: unexpected, chart: createDeepbookUsdcChartService() });
 access.ready();
@@ -124,38 +128,18 @@ async function act(input: Record<string, unknown>) {
   card = { ...await cards.act({ cardId: card.snapshot.cardId, permission: card.permission, revision: card.snapshot.revision, input }), permission: card.permission };
   if (card.error) throw new Error(card.error.message);
 }
-if (fault === "result_before") access.run(() => records.db.exec("CREATE TRIGGER refuse_result BEFORE UPDATE ON settings_operations WHEN NEW.phase='terminal' BEGIN SELECT RAISE(ABORT,'fixture result refused'); END"));
+if (fault === "result_before") access.run(() => records.db.exec("CREATE TRIGGER refuse_result BEFORE UPDATE ON settings_operations WHEN json_extract(NEW.preparation_json,'$.download.readyAt') IS NOT NULL BEGIN SELECT RAISE(ABORT,'fixture readiness refused'); END"));
 if (fault === "result_after") access.run(() => records.db.exec(`CREATE TRIGGER refuse_finished_release BEFORE UPDATE ON settings_control
   WHEN OLD.file_io_id IS NOT NULL AND NEW.file_io_id IS NULL AND EXISTS (
     SELECT 1 FROM settings_files f JOIN settings_operations o ON o.operation_id=coalesce(f.cleanup_operation_id,f.operation_id)
     WHERE f.file_id=OLD.file_io_id AND o.phase='terminal')
   BEGIN SELECT RAISE(ABORT,'finished cleanup release refused'); END`));
-process.on("message", (message: { command: "prepare" | "confirm" | "unsupported" | "read" | "stop" | "historical_export"; draft?: SettingsDraft; reference?: { cardId: string; permission: string } }) => {
+process.on("message", (message: { command: "prepare" | "confirm" | "unsupported" | "read" | "status" | "delivery" | "stop"; draft?: SettingsDraft; reference?: { cardId: string; permission: string } }) => {
   void access.run(async () => {
-    if (message.command === "historical_export") {
-      // Historical input to today's recovery reader: an old-format current-DB
-      // export admitted and physically published by a departed version. This
-      // setup does not exercise or reintroduce a new product export action.
-      card = await cards.create("settings", {});
-      const operation = records.get(data().operationId)!, record = records.cards.get(card.snapshot.cardId)!;
-      const bytes = Buffer.from(JSON.stringify(localData.exportLocalDataSync(new Date()))), fileId = randomUUID();
-      const input = { action: "settings_confirm", operationId: operation.operationId, preparationId: randomUUID() };
-      records.transaction(() => {
-        records.createFile({ fileId, operationId: operation.operationId, role: "export", relativePath: `backups/${operation.operationId}.json`,
-          displayName: `${operation.operationId}.json`, totalSize: bytes.length, receivedSize: 0,
-          sha256: createHash("sha256").update(bytes).digest("hex"), sealed: false, invalidated: false, cleanup: "pending" });
-        records.claimFinal(operation.operationId);
-        records.write(operation, { ...operation, phase: "executing", draft: { kind: "export_local_data" }, fileId,
-          admittedAt: new Date().toISOString(), acceptedDigest: settingsIdentity(input) }, record,
-          { ...record, acceptedInput: input, state: { ...record.state, state: "running", revision: record.state.revision + 1 } });
-      });
-      await fs.mkdir(join(directory, "backups"), { recursive: true });
-      await fs.writeFile(join(directory, "backups", `${operation.operationId}.json`), bytes, { flag: "wx" });
-      send({ event: "historical_export", card });
-    } else if (message.command === "prepare") {
+    if (message.command === "prepare") {
       card = await cards.create("settings", {});
       selectedKind = message.draft?.kind;
-      await activity.setActiveAccount(`0x${"a".repeat(64)}`, "wallet_connection");
+      await seedCurrentReadAccount(activity, `0x${"a".repeat(64)}`);
       if (selectedKind === "download_backup") { send({ event: "prepared", card }); return; }
       await act({ action: "settings_select", draft: message.draft });
       if (message.draft?.kind === "import_local_data") {
@@ -165,7 +149,6 @@ process.on("message", (message: { command: "prepare" | "confirm" | "unsupported"
         await act({ action: "settings_upload_chunk", operationId: data().operationId, fileId, offset: 0, chunkBase64: raw.toString("base64") });
         await act({ action: "settings_seal_upload", operationId: data().operationId, fileId });
       }
-      await act({ action: "settings_prepare", operationId: data().operationId });
       send({ event: "prepared", card });
     } else if (message.command === "confirm") {
       if (fault === "stopping") peers[0]!.killMode = "hold";
@@ -180,7 +163,7 @@ process.on("message", (message: { command: "prepare" | "confirm" | "unsupported"
         }
       }
       if (fault === "result_after") {
-        while (!records.get(data().operationId)?.result) await new Promise<void>((resolve) => setImmediate(resolve));
+        while (!settingsDownload(records.get(data().operationId)!)?.readyAt) await new Promise<void>((resolve) => setImmediate(resolve));
         card = { ...await cards.read({ cardId: card.snapshot.cardId, permission: card.permission }), permission: card.permission };
         try { await act({ action: "settings_report_download", operationId: data().operationId, fileId: data().file!.fileId,
           attemptId: data().download!.currentAttemptId, status: "acknowledged" }); }
@@ -201,13 +184,18 @@ process.on("message", (message: { command: "prepare" | "confirm" | "unsupported"
       await act({ action: "settings_report_download", operationId: data().operationId, fileId: data().file!.fileId,
         attemptId: data().download!.currentAttemptId, status: "unsupported", failure: { method: "ui/download-file", code: -32601 } });
       send({ event: "reported", card });
-    } else if (message.command === "read") {
+    } else if (message.command === "delivery") {
+      const existing = data();
+      card = await cards.create("settings", { backupDelivery: { operationId: existing.operationId, fileId: existing.file!.fileId } });
+      send({ event: "delivery", card });
+    } else if (message.command === "read" || message.command === "status") {
       const reference = message.reference ?? { cardId: card.snapshot.cardId, permission: card.permission };
       card = { ...await cards.read(reference), permission: reference.permission };
+      if (message.command === "status") card = await cards.create("settings", { operationStatus: { operationId: data().operationId } });
       send({ event: "read", card, creations, publications, control: records.control(), account: activity.getActiveAccountSync() ?? null });
     } else {
       wallet.stop(); cards.stop(); await settings.close(); await runtime.close(); activity.close(); access.close(); lease.close(); process.exit(0);
     }
   }).catch((error: unknown) => send({ event: "error", message: error instanceof Error ? error.message : "Fixture failure" }));
 });
-send({ event: "ready", ownerId });
+send({ event: "ready", ownerId, recoveryResults });

@@ -1,6 +1,7 @@
 import type { ToolErrorKind } from "../action/types.js";
+import type { WalletChainId } from "../session/chainAccounts.js";
 
-export const LOCAL_SETTING_KEYS = ["suiGrpcUrl", "suiGraphqlUrl"] as const;
+export const LOCAL_SETTING_KEYS = ["suiGrpcUrl", "suiGraphqlUrl", "walletConnectionChains"] as const;
 export type LocalSettingKey = (typeof LOCAL_SETTING_KEYS)[number];
 export const SETTINGS_APPLIES_AFTER_RESTART = "mcp_server_restart";
 
@@ -49,6 +50,7 @@ export type SuiGraphqlUrlLocalSettingsView = {
 export type LocalSettingsView = {
   suiGrpcUrl: SuiGrpcUrlLocalSettingsView;
   suiGraphqlUrl: SuiGraphqlUrlLocalSettingsView;
+  walletConnectionChains: WalletChainId[];
 };
 
 export type LocalSettingsWriteResponse = {
@@ -101,7 +103,7 @@ export class LocalSettingsError extends Error {
 }
 
 export function assertLocalSettingKey(key: string): LocalSettingKey {
-  if (key === "suiGrpcUrl" || key === "suiGraphqlUrl") {
+  if (key === "suiGrpcUrl" || key === "suiGraphqlUrl" || key === "walletConnectionChains") {
     return key;
   }
   throw new PreferencesStoreError("unknown_key", "Unknown local setting key", { key });

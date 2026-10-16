@@ -1,17 +1,22 @@
 import { z } from "zod";
-import { suiAddressStringSchema } from "../suiAddress.js";
 import { SUI_MAINNET_WALLET_CHAIN, walletRunIdSchema, walletStartStageSchema, type WalletAvailability, type WalletSession, type WalletTransport, type WalletUnavailableReason } from "./walletConnection.js";
+import { walletGrantsSchema, walletGrantRevisionsSchema, type WalletChainId } from "./chainAccounts.js";
 
 export { walletRunIdSchema, walletStartStageSchema } from "./walletConnection.js";
 export type WalletStartStage = z.infer<typeof walletStartStageSchema>;
 export const walletSessionSchema = z.object({
-  topic: z.string().min(1), accounts: z.array(suiAddressStringSchema).min(1), methods: z.array(z.string()),
-  chain: z.literal(SUI_MAINNET_WALLET_CHAIN), expiresAt: z.string().datetime(), walletName: z.string().optional()
+  topic: z.string().min(1), grants: walletGrantsSchema, expiresAt: z.string().datetime(), walletName: z.string().optional()
 }).strict();
+const observationIdentity = { topic: z.string().min(1), lifecycleRevision: z.number().int().positive(), grantRevisions: walletGrantRevisionsSchema };
 export const walletSessionObservationSchema = z.discriminatedUnion("status", [
-  z.object({ topic: z.string().min(1), version: z.number().int().positive(), status: z.literal("present"), session: walletSessionSchema }).strict(),
-  z.object({ topic: z.string().min(1), version: z.number().int().positive(), status: z.enum(["absent", "unusable"]) }).strict()
+  z.object({ ...observationIdentity, status: z.literal("present"), session: walletSessionSchema }).strict(),
+  z.object({ ...observationIdentity, status: z.enum(["absent", "unusable"]) }).strict()
 ]);
+// Private session revisions fence stale responses; they are not a signature or card authorization.
+export const suiWalletRevisionSchema = z.object({ chainId: z.literal(SUI_MAINNET_WALLET_CHAIN),
+  lifecycleRevision: z.number().int().positive(), grantRevision: z.number().int().nonnegative() });
+export type SuiWalletRevision = z.infer<typeof suiWalletRevisionSchema>;
+export type WalletSigningInput = SuiWalletRevision & { topic: string; account: string; transactionBytesBase64: string };
 export type WalletSessionObservation = z.infer<typeof walletSessionObservationSchema>;
 export const walletObservationSchema = z.object({
   runId: walletRunIdSchema, sequence: z.number().int().positive(), observedAt: z.string().datetime()
@@ -20,15 +25,6 @@ export const walletSnapshotSchema = walletObservationSchema.extend({ sessions: z
 export type WalletSnapshot = z.infer<typeof walletSnapshotSchema>;
 export type WalletObservation = z.infer<typeof walletObservationSchema>;
 
-const recoveryBase = z.object({ kind: z.literal("wallet_service_recovery"), priorRunId: walletRunIdSchema,
-  admittedAt: z.string().datetime(), updatedAt: z.string().datetime() });
-export const walletRecoverySchema = z.union([
-  recoveryBase.extend({ phase: z.literal("stopping") }).strict(),
-  recoveryBase.extend({ phase: z.literal("starting"), nextRunId: walletRunIdSchema }).strict(),
-  recoveryBase.extend({ outcome: z.enum(["available", "failed", "superseded", "server_restarted"]),
-    nextRunId: walletRunIdSchema.optional(), message: z.string().optional() }).strict()
-]);
-export type WalletRecovery = z.infer<typeof walletRecoverySchema>;
 export class WalletRunInterruptedError extends Error {
   constructor(readonly runId: string) { super("The wallet service run ended. This operation will not be repeated."); }
 }
@@ -45,12 +41,10 @@ export type WalletRuntimeEvent =
 export interface WalletRun {
   readonly runId: string;
   assertCurrent(): void;
-  connect(operationId: string): ReturnType<WalletTransport["connect"]>;
+  connect(chains: readonly WalletChainId[], operationId: string): ReturnType<WalletTransport["connect"]>;
   disconnect(topic: string, operationId: string): Promise<void>;
-  checkSession(topic: string, operationId: string): Promise<WalletSessionObservation>;
-  sign(input: { topic: string; account: string; transactionBytesBase64: string; sessionVersion: number }, operationId: string): Promise<{
-    transactionBytes: string; signature: string; sessionVersion: number;
-  }>;
+  checkSession(topic: string, operationId: string, chainId?: WalletChainId): Promise<WalletSessionObservation>;
+  sign(input: WalletSigningInput, operationId: string): Promise<SuiWalletRevision & { transactionBytes: string; signature: string }>;
 }
 
 export interface WalletRuntime {

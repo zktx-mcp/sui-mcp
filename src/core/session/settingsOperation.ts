@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { assetReadAccountSchema, walletAvailabilitySchema } from "./walletConnection.js";
 import { LOCAL_DATA_EXPORT_FORMAT } from "../activity/localDataTypes.js";
-import { suiAddressStringSchema } from "../suiAddress.js";
+import { walletChainsSchema, parseWalletChains } from "./chainAccounts.js";
 
 // This is the existing backup input limit, measured before Base64/JSON wrapping.
 export const SETTINGS_IMPORT_MAX_SIZE = 16 * 1024 * 1024;
@@ -21,13 +21,23 @@ export const restoreCheckSchema = z.discriminatedUnion("status", [
 export type RestoreCheck = z.infer<typeof restoreCheckSchema>;
 export const storedRestoreCheckSchema = z.object({ fileId: identity, sha256, totalSize: size, dataEpoch: size,
   userDataRevision: size, check: restoreCheckSchema }).strict();
-export const settingsDraftSchema = z.discriminatedUnion("kind", [
+export const settingsSelectionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("set_endpoint"), endpoint: z.enum(["grpc", "graphql"]), value: z.string().min(1) }).strict(),
   z.object({ kind: z.literal("restore_endpoint"), endpoint: z.enum(["grpc", "graphql"]) }).strict(),
-  z.object({ kind: z.enum(["clear_read_address", "export_local_data", "download_backup", "import_local_data", "reset_local_data", "restart_wallet_service"]) }).strict()
+  z.object({ kind: z.enum(["import_local_data", "reset_local_data", "restart_wallet_service"]) }).strict()
+]);
+export const settingsDraftSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("clear_read_address") }).strict(),
+  ...settingsSelectionSchema.options,
+  z.object({ kind: z.literal("set_wallet_networks"), chains: walletChainsSchema }).strict(),
+  z.object({ kind: z.literal("download_backup") }).strict()
 ]);
 export type SettingsDraft = z.infer<typeof settingsDraftSchema>;
-export const settingsDownloadReportSchema = z.enum(["acknowledged", "not_completed", "unconfirmed", "unsupported"]);
+export const settingsCardInputSchema = z.object({
+  operationStatus: z.object({ operationId: z.string().uuid() }).strict().optional(),
+  backupDelivery: z.object({ operationId: z.string().uuid(), fileId: z.string().uuid() }).strict().optional()
+}).strict().refine((input) => !(input.operationStatus && input.backupDelivery), "Choose exactly one card purpose.");
+export const settingsDownloadReportSchema = z.enum(["acknowledged", "not_completed", "unconfirmed", "unsupported", "not_sent"]);
 export const settingsDownloadFailureSchema = z.object({ method: z.literal("ui/download-file"), code: z.literal(-32601) }).strict();
 export const settingsDownloadEndSchema = z.enum(["acknowledged", "cancelled", "expired", "server_restarted", "data_replaced", "source_unavailable", "stored_locally", "local_save_failed"]);
 export const settingsFileIdentitySchema = z.object({ device: z.string().regex(/^\d+$/), inode: z.string().regex(/^\d+$/) }).strict();
@@ -37,7 +47,7 @@ export type SettingsLocalSaveOutcome = { status: "saved" } | { status: "failed";
 const storedLocalSaveSchema = z.object({ status: z.enum(["needs_consent", "saving", "saved", "failed"]),
   attemptId: identity, fileId: identity, sha256, totalSize: size, destination: z.string(), ownerId: z.string().min(1),
   currentSaveAttemptId: identity.optional(),
-  attempts: z.array(z.object({ saveAttemptId: identity, previousSaveAttemptId: identity.optional(),
+  attempts: z.array(z.object({ saveAttemptId: identity, cardId: z.string().min(1), previousSaveAttemptId: identity.optional(),
     admittedAt: z.string().datetime(), allowPossibleCopy: z.boolean() }).strict()),
   sourceIdentity: settingsFileIdentitySchema.optional(), savedAt: z.string().datetime().optional(), failure: localSaveFailure.optional()
 }).strict().superRefine((value, context) => {
@@ -54,7 +64,7 @@ const storedLocalSaveSchema = z.object({ status: z.enum(["needs_consent", "savin
 export type SettingsLocalSave = z.infer<typeof storedLocalSaveSchema>;
 export const storedSettingsDownloadSchema = z.object({
   currentAttemptId: identity,
-  attempts: z.array(z.object({ attemptId: identity, admittedAt: z.string().datetime(), previousAttemptId: identity.optional(),
+  attempts: z.array(z.object({ attemptId: identity, cardId: z.string().min(1), admittedAt: z.string().datetime(), previousAttemptId: identity.optional(),
     hostReport: settingsDownloadReportSchema.optional(), failure: settingsDownloadFailureSchema.optional() }).strict()).min(1),
   readyAt: z.string().datetime().optional(), expiresAt: z.string().datetime().optional(), endReason: settingsDownloadEndSchema.optional(),
   localSave: storedLocalSaveSchema.optional()
@@ -77,6 +87,9 @@ export const storedSettingsDownloadSchema = z.object({
 export type SettingsDownload = z.infer<typeof storedSettingsDownloadSchema>;
 export const settingsDownloadFileActionSchema = z.enum(["settings_retry_download", "settings_report_download", "settings_cancel_download", "settings_store_backup"]);
 export const settingsActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("settings_clear_read_address"), operationId: identity, connectionId: z.string().min(1), account: z.string().min(1) }).strict(),
+  z.object({ action: z.literal("settings_save_wallet_networks"), operationId: identity,
+    chains: walletChainsSchema.transform(parseWalletChains), expectedChains: walletChainsSchema.transform(parseWalletChains) }).strict(),
   z.object({ action: z.literal("settings_download_backup"), operationId: identity, attemptId: identity }).strict(),
   z.object({ action: z.literal("settings_retry_download"), operationId: identity, fileId: identity,
     previousAttemptId: identity, attemptId: identity }).strict(),
@@ -86,7 +99,7 @@ export const settingsActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("settings_store_backup"), operationId: identity, fileId: identity, attemptId: identity,
     saveAttemptId: identity, previousSaveAttemptId: identity.optional(), allowPossibleCopy: z.boolean() }).strict(),
   z.object({ action: z.literal("settings_cancel_download"), operationId: identity, fileId: identity, attemptId: identity }).strict(),
-  z.object({ action: z.literal("settings_select"), draft: settingsDraftSchema }).strict(),
+  z.object({ action: z.literal("settings_select"), draft: settingsSelectionSchema }).strict(),
   z.object({ action: z.literal("settings_prepare"), operationId: identity }).strict(),
   z.object({ action: z.literal("settings_begin_upload"), operationId: identity,
     name: z.string().min(1), totalSize: size.max(SETTINGS_IMPORT_MAX_SIZE), sha256 }).strict(),
@@ -104,7 +117,7 @@ export type SettingsResult = {
   recordedAt: string;
   message: string;
   details?: Record<string, unknown> | undefined;
-  completionScope?: "backup_snapshot" | undefined;
+  completionScope?: "backup_delivery" | undefined;
 };
 export type SettingsOperation = {
   operationId: string; cardId: string; ownerId: string; dataEpoch: number;
@@ -114,7 +127,6 @@ export type SettingsOperation = {
   acceptedDigest?: string; admittedAt?: string; result?: SettingsResult;
   priorRunId?: string; nextRunId?: string;
   supersedesOperationId?: string; supersededByOperationId?: string;
-  checkpoint?: "verify_export_after_owner_change";
 };
 export type SettingsFile = {
   fileId: string; operationId: string; role: "upload" | "export";
@@ -149,7 +161,7 @@ export class SettingsConflict extends Error {}
 
 export const settingsResultSchema: z.ZodType<SettingsResult> = z.object({
   outcome: z.enum(["completed", "failed", "interrupted", "superseded"]), recordedAt: z.string().datetime(),
-  message: z.string().min(1), details: z.record(z.string(), z.unknown()).optional(), completionScope: z.literal("backup_snapshot").optional()
+  message: z.string().min(1), details: z.record(z.string(), z.unknown()).optional(), completionScope: z.literal("backup_delivery").optional()
 }).strict();
 const endpointView = z.object({ storedValue: z.string(), effectiveValue: z.string(),
   source: z.enum(["environment", "local_db", "builtin_default"]), pendingStoredValue: z.string().optional(),
@@ -164,8 +176,7 @@ const localDataCounts = z.object({ accounts: count, reviewSessions: count, revie
   externalActivityTransactions: count, localSettings: count }).strict();
 const importPreview = z.object({ status: z.literal("valid"), format: z.literal(LOCAL_DATA_EXPORT_FORMAT), network: z.literal("mainnet"),
   exportedAt: z.string().datetime(), currentCounts: localDataCounts, incomingCounts: localDataCounts, willReplace: z.literal(true),
-  activeAccountChange: z.enum(["unchanged", "set", "cleared"]), currentReadAddress: suiAddressStringSchema.nullable(),
-  incomingReadAddress: suiAddressStringSchema.nullable(), restartRequiredAfterImport: z.boolean() }).strict();
+  restartRequiredAfterImport: z.boolean() }).strict();
 export const settingsViewSchema = z.object({
   kind: z.literal("settings"), operationId: identity,
   phase: z.enum(["draft", "uploading", "sealed", "prepared", "executing", "stopping", "starting", "terminal"]),
@@ -185,13 +196,13 @@ export const settingsViewSchema = z.object({
   priorRunId: identity.optional(), nextRunId: identity.optional(), supersedesOperationId: identity.optional(), supersededByOperationId: identity.optional(),
   allowedActions: z.array(z.enum(settingsActionSchema.options.map((option) => option.shape.action.value))), observe: z.boolean(),
   facts: z.object({ server: z.object({ name: z.string(), version: z.string(), network: z.literal("mainnet") }).strict(),
-    localSettings: z.object({ suiGrpcUrl: endpointView, suiGraphqlUrl: endpointView }).strict(), readAddress: z.string().optional(),
+    localSettings: z.object({ suiGrpcUrl: endpointView, suiGraphqlUrl: endpointView, walletConnectionChains: walletChainsSchema }).strict(), readAddress: z.string().optional(), readConnectionId: z.string().optional(),
     assetReadAccount: assetReadAccountSchema, walletAvailability: walletAvailabilitySchema,
     connectionReconciliationRequired: z.literal(true).optional(), observedAt: z.string().datetime().optional(),
     counts: localDataCounts }).strict().optional()
 }).strict().superRefine((value, context) => {
   if (value.download && (value.draft?.kind !== "download_backup" || !value.file ||
-      value.download.availability === "available" && (!value.file.sealed || !value.result || value.download.endReason || !value.download.expiresAt) ||
+      value.download.availability === "available" && (!value.file.sealed || value.download.endReason || !value.download.expiresAt) ||
       value.download.availability === "ended" && !value.download.endReason)) {
     context.addIssue({ code: "custom", message: "Download delivery must describe its own snapshot and lifetime." });
   }
@@ -217,19 +228,15 @@ export const settingsViewSchema = z.object({
       (value.phase === "prepared" || value.allowedActions.includes("settings_prepare"))) {
     context.addIssue({ code: "custom", message: "A rejected backup requires an explicit new selection." });
   }
-  if (value.backupLocation && !(value.result?.outcome === "completed" && (value.draft?.kind === "export_local_data" ||
-      value.draft?.kind === "download_backup" && value.download?.localSave?.status === "saved" && value.download.endReason === "stored_locally"))) {
+  if (value.backupLocation && !(value.result?.outcome === "completed" &&
+      value.draft?.kind === "download_backup" && value.download?.localSave?.status === "saved" && value.download.endReason === "stored_locally")) {
     context.addIssue({ code: "custom", message: "A backup location requires its recorded successful export." });
   }
   if (value.download?.localSave?.status === "saved" && !value.backupLocation) {
     context.addIssue({ code: "custom", message: "A saved backup must identify its verified location." });
   }
-  if (value.draft?.kind === "export_local_data" && value.result?.outcome === "completed" &&
-      typeof value.result.details?.path === "string" && !value.backupLocation) {
-    context.addIssue({ code: "custom", message: "A recorded backup path must provide its folder and file name." });
-  }
   if (value.temporaryFileCleanup && !value.result) context.addIssue({ code: "custom", message: "Cleanup of an applied or ended operation requires its recorded result." });
-  if ((value.phase === "terminal") !== (value.result !== undefined) || value.phase === "terminal" && (value.observe || value.allowedActions.length)) {
+  if ((value.phase === "terminal") !== (value.result !== undefined) || value.phase === "terminal" && (value.observe || value.allowedActions.length || value.download?.allowedFileActions.length)) {
     context.addIssue({ code: "custom", message: "A terminal Settings result cannot grant input or observation." });
   }
   if (value.phase === "prepared" && (!value.preparationId || !value.draft || !value.preparation)) context.addIssue({ code: "custom", message: "Settings confirmation requires a prepared identity and facts." });

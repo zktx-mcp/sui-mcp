@@ -1,3 +1,7 @@
+import { seedApprovedConnection } from "./walletJournal.js";
+import { suiGrants } from "./walletGrants.js";
+import type { WalletChainId } from "../../src/core/session/chainAccounts.js";
+import { workflowViewSchema } from "../../src/core/session/workflowView.js";
 import { FixtureWalletRuntime } from "./walletRuntime.js";
 import { BUILD_CHAIN } from "./deepbookBuildClient.js";
 import { SUI_TYPE_ARG } from "@mysten/sui/utils";
@@ -69,9 +73,9 @@ export async function walletWorkflowFixture(options: { receiptDetails?: boolean;
       catch (error) { preparationErrors.push(error); throw error; }
     });
   }
-  let approved: WalletSession | undefined;
+  const approved = new Map<string, WalletSession>();
   const approval = deferred<WalletSession>();
-  const listeners = new Set<(topic: string, selectionChanged?: boolean) => void>();
+  const listeners = new Set<(topic: string, changedChains?: readonly WalletChainId[]) => void>();
   const signatures = new Map<string, Uint8Array>();
   const sign = vi.fn<WalletTransport["sign"]>(async (input) => {
     const bytes = Buffer.from(input.transactionBytesBase64, "base64");
@@ -82,13 +86,13 @@ export async function walletWorkflowFixture(options: { receiptDetails?: boolean;
   const connect = vi.fn<WalletTransport["connect"]>(async () => ({
     uri: `wc:fixture@2?relay-protocol=irn&symKey=${"ab".repeat(32)}`,
     expiresAt: new Date(clock + 300_000).toISOString(),
-    approval: approval.promise.then((value) => { approved = value; return value; })
+    approval: approval.promise.then((value) => { approved.set(value.topic, value); return value; })
   }));
   const transport: WalletTransport = { connect, sign, restore: async () => [],
-    session: (topic) => approved?.topic === topic ? approved : undefined,
+    session: (topic) => approved.get(topic),
     inspect: (topic) => { const session = transport.session(topic); return session ? { topic, status: "present", session } : { topic, status: "absent" }; },
-    inspectAll: () => approved ? [transport.inspect(approved.topic)] : [],
-    disconnect: vi.fn(async () => { approved = undefined; }), stop: vi.fn(),
+    inspectAll: () => [...approved.keys()].map((topic) => transport.inspect(topic)),
+    disconnect: vi.fn(async (topic) => { approved.delete(topic); }), stop: vi.fn(),
     onSessionChanged: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); } } };
   let sourceAccount = account;
   const simulate = vi.fn((input: Parameters<ReturnType<typeof createSuccessfulReviewTimeSimulationClient>["core"]["simulateTransaction"]>[0]) =>
@@ -156,12 +160,29 @@ export async function walletWorkflowFixture(options: { receiptDetails?: boolean;
     verifySuiGrpcUrl: async () => {}, verifySuiGraphqlUrl: async () => {} });
   access.ready();
   const run = <T>(operation: () => T): T => access.run(operation);
-  const createConnection = () => run(() => cards.create("connect", { intent: "connect" }));
+  const createConnection = () => run(() => cards.create("connect", {}));
+  const createDisconnection = () => run(() => cards.create("disconnect", {}));
+  // Capture the same fixed target used by the public swap-review gateway.
+  // Later wallet changes do not rewrite the returned card input.
+  const reviewInput = (reviewSessionId: string) => run(() => {
+    const target = workflow.resolveReviewTarget();
+    if (target.status !== "available") throw new Error("A current fixed wallet target is required by this review fixture.");
+    return { reviewSessionId, connectionId: target.connectionId, account: target.account };
+  });
+  const connectionInput = (card: CardResponse, input: Record<string, unknown>): Record<string, unknown> => {
+    const parsed = workflowViewSchema.safeParse(card.snapshot.data), data = parsed.success ? parsed.data : undefined;
+    const connection = data?.kind === "disconnect" && data.connection?.connectionId === input.connectionId ? data.connection : undefined;
+    const common = { walletRunId: data?.walletAvailability.walletRunId ?? runtime!.runId, ...input };
+    if (input.action === "connect") return { operationId: card.snapshot.input.operationId, chains: card.snapshot.input.requestedChains, ...common };
+    if (input.action === "disconnect") return { operationId: card.snapshot.input.operationId, impactId: connection?.disconnectImpact?.impactId, ...common };
+    if (input.action === "stop_connection") return { operationId: card.snapshot.input.operationId, ...input };
+    return ["prepare_review", "request_signature"].includes(String(input.action)) ? common : input;
+  };
   const act = (card: CardResponse & { permission: string }, input: Record<string, unknown>) => run(() => cards.act({
-    cardId: card.snapshot.cardId, permission: card.permission, revision: card.snapshot.revision, input: ["connect", "disconnect", "use_account", "prepare_review", "request_signature", "restart_wallet_service"].includes(String(input.action))
-      ? { walletRunId: (card.snapshot.data as { walletAvailability: { walletRunId: string } }).walletAvailability.walletRunId, ...input } : input
+    cardId: card.snapshot.cardId, permission: card.permission, revision: card.snapshot.revision, input: connectionInput(card, input)
   }));
-  const read = (card: CardResponse & { permission: string }) => run(async () => ({ ...await cards.read({ cardId: card.snapshot.cardId, permission: card.permission }), permission: card.permission }));
+  const read = (card: CardResponse & { permission: string }) => run(async () => ({
+    ...await cards.read({ cardId: card.snapshot.cardId, permission: card.permission }), permission: card.permission }));
   const plan: ActionPlan = { id: "fixture-plan", actionKind: "swap", adapterId: "deepbook-swap", protocol: "DeepBookV3", title: "Review swap", summary: "Review a swap",
     createdAt: now().toISOString(), assetFlowPreview: { outgoing: [{ symbol: "SUI", amount: "1", amountKind: "display_intent" }],
       expectedIncoming: [{ symbol: "USDC", amount: "unknown", amountKind: "display_intent", approx: true }] },
@@ -170,15 +191,27 @@ export async function walletWorkflowFixture(options: { receiptDetails?: boolean;
     let card = await createConnection();
     await act(card, { action: "connect" });
     await vi.waitFor(() => { if (!connect.mock.calls.length) throw new Error("Pairing not started"); });
-    approval.resolve({ topic: "fixture-topic", accounts: [account], methods: ["sui_signTransaction"], chain: "sui:mainnet",
-      expiresAt: new Date(clock + 1_800_000).toISOString(), walletName: "Fixture Wallet" });
+    approval.resolve({ topic: "fixture-topic", grants: suiGrants([account], ["sui_signTransaction"]), expiresAt: new Date(clock + 1_800_000).toISOString(), walletName: "Fixture Wallet" });
     await vi.waitFor(() => { if (run(() => records.connections()[0]?.connection.status) !== "connected") throw new Error("Approval not recorded"); });
     card = await read(card);
     return { card, connection: run(() => records.connections()[0]!.connection) };
   };
+  const connectSession = async (session: WalletSession) => {
+    connect.mockImplementationOnce(async () => ({ uri: `wc:fixture@2?relay-protocol=irn&symKey=${"ab".repeat(32)}`,
+      expiresAt: new Date(clock + 300_000).toISOString(),
+      approval: Promise.resolve().then(() => { approved.set(session.topic, session); return session; }) }));
+    const card = await createConnection();
+    const response = await act(card, { action: "connect" });
+    if (response.error) throw new Error(response.error.message);
+    await vi.waitFor(() => {
+      const value = run(() => records.connections().find((item) => item.topic === session.topic));
+      if (value?.connection.status !== "connected" || value.sdkPending) throw new Error("Fixture approval not settled");
+    });
+    return run(() => records.connections().find((item) => item.topic === session.topic)!);
+  };
   const prepare = async (connectionId: string) => {
     const created = await run(() => sessions.createReviewSession([plan], now()));
-    let card = await run(() => cards.create("review", { reviewSessionId: created.session.id }));
+    let card = await run(() => cards.create("review", { reviewSessionId: created.session.id, connectionId, account }));
     const response = await act(card, { action: "prepare_review", connectionId, account, reviewRevision: 0 });
     if (response.error) throw new Error(response.error.message);
     await vi.waitFor(async () => {
@@ -191,13 +224,15 @@ export async function walletWorkflowFixture(options: { receiptDetails?: boolean;
     return { card, session: session! };
   };
   return { directory, access, run, activity, localData, cards, cardRecords, records, sessions, workflow, runtime, transport, accountKey, account, sign, connect, submit, chainRead, quote, simulate,
-    approval, createConnection, act, read, approve, prepare, now, plan, logger, verifyNetwork, computation, verifyReceipt,
+    approval, createConnection, createDisconnection, reviewInput, connectionInput, act, read, approve, connectSession, prepare, now, plan, logger, verifyNetwork, computation, verifyReceipt,
+    seedConnection(session: WalletSession) { return seedApprovedConnection(join(directory, "activity.sqlite"), session, { ownerId, runId: runtime.runId, at: now() }); },
     setChainOutcome(status: "success" | "failure") { chainFailure = status === "failure"; },
     // Explicit synthetic object/simulation ownership, independent of the selected
     // product account. Signing still uses accountKey unless a test replaces it.
     setSourceAccount(value: string) { sourceAccount = value; },
     advance(ms: number) { clock += ms; },
-    notify(session?: WalletSession, selectionChanged = false) { approved = session; for (const listener of listeners) listener("fixture-topic", selectionChanged); },
+    notify(session?: WalletSession, changedChains?: readonly WalletChainId[]) { if (session) approved.set(session.topic, session); else approved.delete("fixture-topic"); for (const listener of listeners) listener("fixture-topic", changedChains); },
+    removeSession(topic: string) { approved.delete(topic); for (const listener of listeners) listener(topic); },
     observe() { for (const listener of listeners) listener("fixture-topic"); },
     holdWalletExit() {
       if (!(runtime instanceof FixtureWalletRuntime)) throw new Error("Only the external runtime double supports holding its exit.");

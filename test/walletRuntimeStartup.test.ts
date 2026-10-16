@@ -1,3 +1,6 @@
+import { seedReadAddressCleared } from "./fixtures/readAccount.js";
+import { seedApprovedConnection } from "./fixtures/walletJournal.js";
+import { suiGrants } from "./fixtures/walletGrants.js";
 import { SERVER_VERSION } from "../src/mcp/serverInfo.js";
 import { afterEach, beforeEach, expect, it, vi, type Mock } from "vitest";
 import { createHash, randomUUID } from "node:crypto";
@@ -84,7 +87,7 @@ vi.mock("node:child_process", async (original) => {
       if (message.type === "check_session") {
         // The external SDK peer answers the actual admission-time check. The
         // parent still validates the run, operation, revision and account.
-        const observation = source.sessions.find((item) => item.topic === message.topic) ?? { topic: message.topic, version: 1, status: "absent" as const };
+        const observation = source.sessions.find((item) => item.topic === message.topic) ?? { topic: message.topic, lifecycleRevision: 1, grantRevisions: { "sui:mainnet": 1, "eip155:1": 1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 1 }, status: "absent" as const };
         queueMicrotask(() => child.emit("message", { packageVersion: SERVER_VERSION, runId: message.runId,
           requestId: message.requestId, operationId: message.operationId, type: "checked", observation,
           sequence: 1 /* The unchanged session is from the initial published snapshot. */ } satisfies WalletEvent));
@@ -173,7 +176,7 @@ afterEach(() => {
 });
 
 it.each([
-  { kind: "selected" }, { kind: "cleared" }, { kind: "different_source" }, { kind: "prior_owner" },
+  { kind: "selected" }, { kind: "cleared" }, { kind: "prior_owner" },
   { kind: "terminal", status: "failed" }, { kind: "terminal", status: "stopped" },
   { kind: "expiry", offset: -1 }, { kind: "expiry", offset: 0 }, { kind: "expiry", offset: 1 }
 ] as const)("publishes production qualification for $kind ($status $offset) without selecting an account", async (input) => {
@@ -185,18 +188,10 @@ it.each([
   const journal = new SqliteActivityStore({ databasePath: boot.activityDatabasePath, validateAdapterLifecycle: validateSupportedAdapterLifecycle });
   const prior = journal.createWalletWorkflowStore(input.kind === "prior_owner" ? "prior-owner" : ownerId, () => new Date());
   if (input.kind === "prior_owner") prior.setWalletRunId(randomUUID());
-  const session = { topic: "qualification-topic", accounts: [account], methods: ["sui_signTransaction"],
-    chain: "sui:mainnet" as const, expiresAt: new Date(at.getTime() + 60000).toISOString(), walletName: "Synthetic approved wallet" };
-  const saved = prior.restoreConnection(session, at);
-  let selectedConnectionId = saved.connection.connectionId;
-  if (input.kind === "different_source") {
-    const previous = prior.restoreConnection({ ...session, topic: "previous-same-address-topic" }, at);
-    prior.updateConnection(previous.connection.connectionId, { status: "disconnected" }, at);
-    selectedConnectionId = previous.connection.connectionId;
-  }
-  if (input.kind !== "cleared") await journal.setActiveAccount(account, "wallet_connection", at,
-    { id: selectedConnectionId });
-  source.sessions = [{ topic: session.topic, version: 1, status: "present", session }];
+  const session = { topic: "qualification-topic", grants: suiGrants([account], ["sui_signTransaction"]), expiresAt: new Date(at.getTime() + 60000).toISOString(), walletName: "Synthetic approved wallet" };
+  const saved = seedApprovedConnection(boot.activityDatabasePath, session, { ownerId: input.kind === "prior_owner" ? "prior-owner" : ownerId, runId: randomUUID(), at });
+  if (input.kind === "cleared") await seedReadAddressCleared(journal);
+  source.sessions = [{ topic: session.topic, lifecycleRevision: 1, grantRevisions: { "sui:mainnet": 1, "eip155:1": 1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 1 }, status: "present", session }];
   source.failure = "hold";
   const app = await createRuntimeApplication(boot, { info() {}, warn() {}, error() {} }, ownerId);
   const call = async (name: string, args: Record<string, unknown> = {}) => {
@@ -230,7 +225,7 @@ it.each([
     const settingsReference = settings._meta![CARD_METADATA_KEY] as Record<string, unknown>;
     const facts = (settings.structuredContent!.data as { data: SettingsView }).data.facts!;
     const available = input.kind === "selected" || input.kind === "prior_owner" || input.kind === "expiry" && input.offset < 0;
-    const expected = available ? { status: "available", account } : { status: "address_required" };
+    const expected = available ? { status: "available", account } : input.kind === "cleared" ? { status: "address_required", reason: "read_address_cleared" } : { status: "address_required" };
     expect(facts.walletAvailability).toMatchObject({ status: "available", walletRunId: runId });
     expect(facts.assetReadAccount).toEqual(expected);
     expect(facts.readAddress).toBe(input.kind === "cleared" ? undefined : account);
@@ -238,31 +233,18 @@ it.each([
     expect(reread.data.facts!.assetReadAccount).toEqual(expected);
     expect(reread.data.facts!.walletAvailability).toMatchObject({ status: "available", walletRunId: runId });
     expect(reread.data.facts!.readAddress).toBe(input.kind === "cleared" ? undefined : account);
-    const connect = (await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" })).structuredContent!.data as { data: Record<string, any> };
-    expect(connect.data.assetReadAccount).toEqual(expected);
-    expect(connect.data.usableConnectionId).toBe(input.kind === "terminal" || input.kind === "expiry" && input.offset >= 0
-      ? undefined : saved.connection.connectionId);
+    const interaction = (await call(TOOL_NAMES.sessionGetInteractionStatus)).structuredContent!.data as Record<string, any>;
+    expect(interaction.assetReadAccount).toEqual(expected);
+    expect(interaction.connection.connectionId).toBe(saved.connection.connectionId);
     expect(journal.getActiveAccountSync()).toEqual(storedBefore);
     expect(records.connection(saved.connection.connectionId)!.connection.status).toBe(input.kind === "terminal" ? input.status : "connected");
-    if (input.kind === "different_source" || input.kind === "cleared") {
-      const ref = (await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" }));
-      const card = ref.structuredContent!.data as { revision: number };
-      await call(CARD_TOOLS.act, { ...ref._meta![CARD_METADATA_KEY] as object, revision: card.revision,
-        input: { action: "use_account", walletRunId: runId, connectionId: saved.connection.connectionId, account } });
-      const selected = (await call(TOOL_NAMES.settingsCreateLocalSettingsSession)).structuredContent!.data as { data: SettingsView };
-      expect(selected.data.facts!.assetReadAccount).toEqual({ status: "available", account });
-      const selectedRead = (await call(CARD_TOOLS.read, settingsReference)).structuredContent!.data as { data: SettingsView };
-      expect(selectedRead.data.facts!.assetReadAccount).toEqual({ status: "available", account });
-      expect(journal.getActiveAccountSync()).toMatchObject({ address: account, walletId: saved.connection.connectionId });
-    }
-    expect(source.commands).toEqual(input.kind === "different_source" || input.kind === "cleared" ? ["init", "check_session"] : ["init"]);
+    expect(source.commands).toEqual(["init"]);
   } finally { await app.close(); journal.close(); vi.useRealTimers(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 it("publishes production Settings reconciliation facts from the same current connection evaluation without dispatching wallet work", async () => {
   const topic = "unrecorded-startup-session", address = `0x${"a".repeat(64)}`;
-  source.sessions = [{ topic, version: 1, status: "present", session: { topic, accounts: [address],
-    methods: ["sui_signTransaction"], chain: "sui:mainnet", expiresAt: new Date(Date.now() + 60000).toISOString() } }];
+  source.sessions = [{ topic, lifecycleRevision: 1, grantRevisions: { "sui:mainnet": 1, "eip155:1": 1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 1 }, status: "present", session: { topic, grants: suiGrants([address], ["sui_signTransaction"]), expiresAt: new Date(Date.now() + 60000).toISOString() } }];
   const directory = mkdtempSync(join(tmpdir(), "sui-settings-current-facts-"));
   const app = await createRuntimeApplication(loadBootConfig({ SUI_MCP_DATA_DIR: directory }), { info() {}, warn() {}, error() {} });
   const call = async (name: string, args: Record<string, unknown> = {}) => {
@@ -287,7 +269,7 @@ it("publishes production Settings reconciliation facts from the same current con
     expect(source.commands).toEqual(["init"]);
     source.children[0]!.emit("message", { packageVersion: SERVER_VERSION, runId: interaction.walletAvailability.walletRunId,
       type: "snapshot", ready: false, snapshot: { runId: interaction.walletAvailability.walletRunId, sequence: 2,
-        observedAt: new Date().toISOString(), sessions: [{ topic, version: 2, status: "absent" }] } } satisfies WalletEvent);
+        observedAt: new Date().toISOString(), sessions: [{ topic, lifecycleRevision: 2, grantRevisions: { "sui:mainnet": 2, "eip155:1": 2, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 2 }, status: "absent" }] } } satisfies WalletEvent);
     const current = (await call(CARD_TOOLS.read, reference)).structuredContent!.data as { data: SettingsView };
     expect(current.data.facts?.connectionReconciliationRequired).toBeUndefined();
     expect(current.data.facts?.walletAvailability.status).toBe("available");
@@ -300,8 +282,7 @@ it("publishes production Settings reconciliation facts from the same current con
 
 it("keeps ordinary MCP and Settings diagnosis neutral while an observed ready snapshot cannot commit", async () => {
   const topic = "unrecorded-state-sync-session", account = `0x${"b".repeat(64)}`;
-  source.sessions = [{ topic, version: 1, status: "present", session: { topic, accounts: [account], methods: ["sui_signTransaction"],
-    chain: "sui:mainnet", expiresAt: new Date(Date.now() + 60000).toISOString() } }];
+  source.sessions = [{ topic, lifecycleRevision: 1, grantRevisions: { "sui:mainnet": 1, "eip155:1": 1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 1 }, status: "present", session: { topic, grants: suiGrants([account], ["sui_signTransaction"]), expiresAt: new Date(Date.now() + 60000).toISOString() } }];
   const directory = mkdtempSync(join(tmpdir(), "sui-state-sync-answer-"));
   const boot = loadBootConfig({ SUI_MCP_DATA_DIR: directory });
   const app = await createRuntimeApplication(boot, { info() {}, warn() {}, error() {} });
@@ -372,6 +353,11 @@ it.each([
     return response.result;
   };
   try {
+    await vi.waitFor(async () => {
+      const response = await call(TOOL_NAMES.sessionGetInteractionStatus);
+      const availability = (response.structuredContent!.data as any).walletAvailability;
+      expect(availability.status).toBe(reason ? "unavailable" : "available");
+    });
     const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard);
     expect(source.init).toHaveBeenCalledTimes(initCalls);
     expect(fingerprint(WALLETCONNECT_PROJECT_ID)).toBe(approvedProjectFingerprint);
@@ -394,7 +380,7 @@ it.each([
         expect(JSON.stringify(await call(TOOL_NAMES.sessionGetWalletConnectionCard, { cardId: card.cardId }))).toContain(message);
         expect(JSON.stringify(await call(TOOL_NAMES.sessionWaitWalletConnectionCard, { cardId: card.cardId, timeoutMs: 1 }))).toContain(message);
         const ref = created._meta![CARD_METADATA_KEY] as Record<string, unknown>;
-        expect(JSON.stringify(await call(CARD_TOOLS.act, { ...ref, revision: card.revision, input: { action: "connect", walletRunId: (availability as { walletRunId: string }).walletRunId } }))).toContain(message);
+        expect(JSON.stringify(await call(CARD_TOOLS.act, { ...ref, revision: card.revision, input: (created.structuredContent as { data: { data: { automaticAction?: unknown } } }).data.data.automaticAction ?? { action: "connect", operationId: randomUUID(), chains: ["sui:mainnet"], walletRunId: (availability as { walletRunId: string }).walletRunId } }))).toContain(message);
       }
     }
     expect((await call(TOOL_NAMES.accountGetActiveAccount)).isError).not.toBe(true);
@@ -485,7 +471,7 @@ it.each(["expired_pairing", "inactive_pairing"] as const)("recovers the initial 
     expect(interaction.walletAvailability.status).toBe("initializing");
     expect(interaction.assetReadAccount.status).toBe("address_required");
     await vi.waitFor(() => expect(relay.calls.some((request) => request.method === "irn_unsubscribe")).toBe(true), { timeout: 10000 });
-    const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" });
+    const created = await call(TOOL_NAMES.sessionOpenWalletConnectionCard, {});
     const reference = created._meta![CARD_METADATA_KEY] as Record<string, unknown>;
     const current = payload(await call(CARD_TOOLS.read, reference));
     expect(current.state).toBe("ready"); expect(current.data.allowedActions).not.toContain("restart_wallet_service");
@@ -524,7 +510,7 @@ it.each(["expired_pairing", "inactive_pairing"] as const)("recovers the initial 
   }
 }, 25000);
 
-it("keeps an unrecorded SDK session blocked after Settings restart and Reset without fabricating approval", async () => {
+it("keeps an unrecorded SDK session unapproved after Settings restart and Reset", async () => {
   const directory = mkdtempSync(join(tmpdir(), "sui-runtime-reconciliation-")), relay = await walletRelay();
   source.realRelay = relay.url; relay.release(); await seedWalletSdk(directory, "session");
   const app = await createRuntimeApplication(loadBootConfig({ SUI_MCP_DATA_DIR: directory }), { info() {}, warn() {}, error() {} });
@@ -549,23 +535,20 @@ it("keeps an unrecorded SDK session blocked after Settings restart and Reset wit
   try {
     let context: Record<string, any> = {};
     await vi.waitFor(async () => { context = data(await call(TOOL_NAMES.sessionGetInteractionStatus)); expect(context.walletAvailability.status).toBe("available"); }, { timeout: 10000 });
-    expect(context).toMatchObject({ connections: [], manageableConnectionIds: [], connectionReconciliationRequired: true, assetReadAccount: { status: "address_required" } });
-    const connect = await call(TOOL_NAMES.sessionOpenWalletConnectionCard, { intent: "manage" });
+    expect(context).toMatchObject({ canDisconnect: false, connectionReconciliationRequired: true, assetReadAccount: { status: "address_required" } });
+    const connect = await call(TOOL_NAMES.sessionOpenWalletConnectionCard, {});
     const reference = connect._meta![CARD_METADATA_KEY] as Record<string, unknown>;
     const card = data(await call(CARD_TOOLS.read, reference));
     expect(card.data.allowedActions).toEqual(["cancel"]); expect(card.data.automaticAction).toBeUndefined();
-    const refused = await call(CARD_TOOLS.act, { ...reference, revision: card.revision,
-      input: { action: "connect", walletRunId: context.walletAvailability.walletRunId } });
-    expect(refused.isError).toBe(true); expect(JSON.stringify(refused.content)).toContain("card_conflict");
     const recovered = await applySettings("restart_wallet_service");
     expect(recovered.data.nextRunId).not.toBe(context.walletAvailability.walletRunId);
     expect(source.children).toHaveLength(2); expect(source.children[0]!.signalCode).toBe("SIGKILL");
     context = data(await call(TOOL_NAMES.sessionGetInteractionStatus));
-    expect(context).toMatchObject({ connectionReconciliationRequired: true, connections: [], manageableConnectionIds: [],
+    expect(context).toMatchObject({ connectionReconciliationRequired: true, canDisconnect: false,
       assetReadAccount: { status: "address_required" } });
     await applySettings("reset_local_data");
     const resetContext = data(await call(TOOL_NAMES.sessionGetInteractionStatus));
-    expect(resetContext).toMatchObject({ connectionReconciliationRequired: true, connections: [], manageableConnectionIds: [],
+    expect(resetContext).toMatchObject({ connectionReconciliationRequired: true, canDisconnect: false,
       assetReadAccount: { status: "address_required" } });
     expect(source.commands).toEqual(["init", "init"]);
   } finally { await app.close(); await relay.close(); rmSync(directory, { recursive: true, force: true }); }

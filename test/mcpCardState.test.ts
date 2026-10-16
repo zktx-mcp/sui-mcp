@@ -1,3 +1,4 @@
+import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -142,7 +143,7 @@ describe("DB-owned card admission, recovery and results", () => {
     const cards = new CardStore({ records: db.records, ownerId: "owner", now: () => now, execute: async () => ({ value: "saved" }) });
     const local = db.store.createLocalDataService(dataOptions);
     try {
-      await db.store.setActiveAccount(account, "wallet_connection", now);
+      await seedCurrentReadAccount(db.store, account, now);
       const created = await cards.create("account", choice, true);
       const backup = await local.exportLocalData();
       expect(JSON.stringify(backup)).not.toContain(created.snapshot.cardId);

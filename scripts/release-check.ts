@@ -1,3 +1,4 @@
+import { connectViewSchema } from "../src/core/session/workflowView.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -38,7 +39,7 @@ const requiredFiles = [
   "dist/runtime/walletSdkChildRuntime.js",
   "dist/runtime/walletSdkProcess.js",
   "dist/runtime/walletSdkIpc.js",
-  ...["account", "receipt", "chart", "connect", "review", "settings"].flatMap((kind) => [`dist/mcp-app/${kind}.html`, `dist/mcp-app/${kind}.notices.txt`]),
+  ...["account", "receipt", "chart", "connect", "disconnect", "review", "settings"].flatMap((kind) => [`dist/mcp-app/${kind}.html`, `dist/mcp-app/${kind}.notices.txt`]),
   "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt",
   "docs/UTILITY_INDEX.md",
   ...manifest.files.filter((path) => path.endsWith(".md")),
@@ -272,14 +273,14 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
       const response = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MSEC), redirect: "error" });
       if (response.status !== 404) throw new Error(`Retired Settings route is still exposed: ${path}`);
     }
-    stage = "packaged wallet child and retired-input rejection";
+    stage = "packaged wallet child and scoped-input rejection";
     const parentPid = transport.pid;
     const resultData = (value: Awaited<ReturnType<Client["callTool"]>>) => {
       const payload = value.structuredContent as { ok?: boolean; data?: unknown } | undefined;
       if (value.isError || payload?.ok !== true) throw new Error("Installed wallet service call failed.");
       return payload.data;
     };
-    const created = await client.callTool({ name: TOOL_NAMES.sessionOpenWalletConnectionCard, arguments: { intent: "manage" } });
+    const created = await client.callTool({ name: TOOL_NAMES.sessionOpenWalletConnectionCard, arguments: {} });
     const reference = cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]);
     let card = cardSnapshotSchema.parse(resultData(created));
     const current = async () => cardSnapshotSchema.parse(resultData(await client!.callTool({ name: CARD_TOOLS.read, arguments: reference })));
@@ -297,10 +298,10 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
     } });
     if (!refused.isError) throw new Error("Installed Connect card accepted its retired restart action.");
     card = await current();
-    const after = workflowViewSchema.parse(card.data);
+    const after = connectViewSchema.parse(card.data);
     if (card.state !== "ready" || after.walletAvailability.status !== "available" ||
-        after.walletAvailability.walletRunId !== priorRun || after.runtimeRecovery || after.automaticAction ||
-        !after.allowedActions.includes("connect") || parentPid === undefined || transport.pid !== parentPid) {
+        after.walletAvailability.walletRunId !== priorRun || after.operation || after.automaticAction?.action !== "connect" || after.automaticAction.operationId !== card.input.operationId ||
+        !after.allowedActions.includes("connect") || JSON.stringify(after.requestedChains) !== JSON.stringify(["sui:mainnet"]) || Object.hasOwn(after, "connection") || parentPid === undefined || transport.pid !== parentPid) {
       throw new Error("Installed wallet controls changed the SDK run or started pairing without user input.");
     }
     try {

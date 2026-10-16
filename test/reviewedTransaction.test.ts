@@ -52,7 +52,7 @@ async function readyReviewSession() {
     validateAdapterLifecycle: validateSupportedAdapterLifecycle
   });
   const { session } = await store.createReviewSession([plan], computeNow);
-  await activityStore.setActiveAccount(walletAccount, "wallet_connection", computeNow);
+  await activityStore.seedReadAccount(walletAccount, computeNow);
   await store.recordWalletConnected(session.id, walletAccount, computeNow);
 
   let materialDigest: Awaited<ReturnType<typeof recordTestTransactionMaterial>>["digest"] | undefined;

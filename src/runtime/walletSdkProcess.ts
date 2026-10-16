@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { walletUnavailable, WalletUnavailableError, WalletUserRejectedError, type WalletAvailability, type WalletSession,
   type WalletUnavailableReason } from "../core/session/walletConnection.js";
-import { WalletRunInterruptedError, WalletReplacementFailedError, type WalletRuntime, type WalletRun, type WalletRuntimeEvent, type WalletSnapshot } from "../core/session/walletRuntime.js";
+import { WalletRunInterruptedError, WalletReplacementFailedError, type WalletRuntime, type WalletRun, type WalletRuntimeEvent, type WalletSnapshot, type WalletSigningInput } from "../core/session/walletRuntime.js";
+import { WALLET_CHAINS, comparableGrantScope, type WalletChainId } from "../core/session/chainAccounts.js";
 import { walletCommandSchema, walletEventSchema, type WalletCommand, type WalletEvent, type WalletInit } from "./walletSdkIpc.js";
 
 type Reply = Extract<WalletEvent, { requestId: number }>;
@@ -109,10 +110,17 @@ export class WalletSdkProcess implements WalletRuntime {
         }
         topics.add(session.topic);
         const prior = run.snapshot?.sessions.find((entry) => entry.topic === session.topic);
-        if (prior && (session.version < prior.version || session.version === prior.version && !isDeepStrictEqual(session, prior))) {
+        if (prior && (session.lifecycleRevision < prior.lifecycleRevision ||
+            session.lifecycleRevision === prior.lifecycleRevision && session.status !== prior.status || WALLET_CHAINS.some((chain) =>
+              session.grantRevisions[chain] < prior.grantRevisions[chain] ||
+              session.lifecycleRevision !== prior.lifecycleRevision && session.grantRevisions[chain] === prior.grantRevisions[chain] ||
+              session.grantRevisions[chain] === prior.grantRevisions[chain] &&
+              !isDeepStrictEqual(comparableGrantScope(session.status === "present" ? session.session.grants.find((grant) => grant.chainId === chain) : undefined),
+                comparableGrantScope(prior.status === "present" ? prior.session.grants.find((grant) => grant.chainId === chain) : undefined))))) {
           this.lose(run, "wallet_state_unavailable"); return;
         }
       }
+      if (run.snapshot?.sessions.some((session) => !topics.has(session.topic))) { this.lose(run, "wallet_state_unavailable"); return; }
       const previous = run.snapshot;
       run.snapshot = event.snapshot;
       if (event.ready) { run.sdkReady = true; this.state = this.starting(run.id, "state_sync"); }
@@ -227,11 +235,11 @@ export class WalletSdkProcess implements WalletRuntime {
     const run = this.run;
     const assertCurrent = () => {
       if (run !== this.run || run.fenced || this.closed) throw new WalletRunInterruptedError(run.id);
-      if (this.state.status !== "available") throw new WalletUnavailableError("wallet_state_unavailable", this.state.message);
+      if (this.state.status !== "available") throw new WalletUnavailableError(this.state);
     };
     assertCurrent();
-    const call = (input: { type: "connect" } | { type: "disconnect" | "check_session"; topic: string } |
-      { type: "sign"; topic: string; account: string; transactionBytesBase64: string; sessionVersion: number }, operationId: string,
+    const call = (input: { type: "connect"; chains: WalletChainId[] } | { type: "disconnect" | "check_session"; topic: string } |
+      WalletSigningInput & { type: "sign" }, operationId: string,
       approval?: { approve(session: WalletSession): void; rejectApproval(error: Error): void }): Promise<Reply> => {
       assertCurrent();
       const requestId = ++run.serial;
@@ -242,28 +250,35 @@ export class WalletSdkProcess implements WalletRuntime {
       });
     };
     return { runId: run.id, assertCurrent,
-      connect: async (operationId) => {
+      connect: async (chains, operationId) => {
         let approve!: (session: WalletSession) => void, rejectApproval!: (error: Error) => void;
         const approval = new Promise<WalletSession>((resolve, reject) => { approve = resolve; rejectApproval = reject; });
         void approval.catch(() => {});
-        const reply = await call({ type: "connect" }, operationId, { approve, rejectApproval });
+        const reply = await call({ type: "connect", chains: [...chains] }, operationId, { approve, rejectApproval });
         assertCurrent();
         if (reply.type !== "pairing") throw new Error("Wallet pairing response is unavailable.");
         return { uri: reply.uri, expiresAt: reply.expiresAt, approval };
       },
       disconnect: async (topic, operationId) => { await call({ type: "disconnect", topic }, operationId); assertCurrent(); },
-      checkSession: async (topic, operationId) => {
+      checkSession: async (topic, operationId, chainId) => {
         const reply = await call({ type: "check_session", topic }, operationId); assertCurrent();
+        const current = run.snapshot?.sessions.find((item) => item.topic === topic);
         if (reply.type !== "checked" || reply.observation.topic !== topic || !run.snapshot || run.snapshot.sequence < reply.sequence ||
-            run.snapshot.sessions.find((item) => item.topic === topic)?.version !== reply.observation.version) {
+            !current || current.lifecycleRevision !== reply.observation.lifecycleRevision ||
+            (chainId ? current.grantRevisions[chainId] !== reply.observation.grantRevisions[chainId]
+              : !isDeepStrictEqual(current.grantRevisions, reply.observation.grantRevisions))) {
           throw new Error("The wallet session changed during confirmation.");
         }
-        return reply.observation;
+        return current;
       },
       sign: async (input, operationId) => {
         const reply = await call({ ...input, type: "sign" }, operationId); assertCurrent();
         if (reply.type !== "signed") throw new Error("The wallet signature response is unavailable.");
-        return { transactionBytes: reply.transactionBytes, signature: reply.signature, sessionVersion: reply.sessionVersion };
+        if (reply.chainId !== input.chainId || reply.lifecycleRevision !== input.lifecycleRevision || reply.grantRevision !== input.grantRevision) {
+          throw new Error("The signed response belongs to a changed wallet grant.");
+        }
+        return { transactionBytes: reply.transactionBytes, signature: reply.signature, chainId: reply.chainId,
+          lifecycleRevision: reply.lifecycleRevision, grantRevision: reply.grantRevision };
       }
     };
   }

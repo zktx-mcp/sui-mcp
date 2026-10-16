@@ -1,3 +1,4 @@
+import { connectViewSchema } from "../src/core/session/workflowView.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReviewSession } from "../src/core/action/types.js";
 import type { ReviewSnapshot } from "../src/core/session/status.js";
@@ -14,15 +15,21 @@ const review: ReviewSession = { id: "review", ownerId: "owner", reviewRevision: 
 const request: TransactionRequest = { attemptId: "attempt", reviewSessionId: "review", planId: "plan", reviewRevision: 1,
   account: `0x${"a".repeat(64)}`, transactionDigest: chainReceiptDigest, requestStatus: "awaiting_signature", revision: 0,
   createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() };
-const connection: CardSnapshot = { cardId: "card", kind: "connect", state: "running", revision: 1,
+const connection: CardSnapshot = { cardId: "card", kind: "connect", state: "ready", revision: 1,
   createdAt: new Date(0).toISOString(), expiresAt: new Date(1000).toISOString(), input: {}, pollAfterMs: 5000, inputRemainingMs: 0,
-  data: { kind: "connect", mode: "connect", allowedActions: [], manageableConnectionIds: [], actionRemainingMs: 1000, observe: true,
-    walletAvailability: { status: "available", walletRunId: "00000000-0000-4000-8000-000000000001" }, progress: { status: "waiting" }, boundary: CONNECT_BOUNDARY, connections: [] } };
+  data: { kind: "connect", mode: "connect", allowedActions: [], nextStep: { kind: "none" }, actionRemainingMs: 1000, observe: true,
+    requestedChains: ["sui:mainnet"],
+    operation: { operationId: "00000000-0000-4000-8000-000000000002", cardId: "card", connectionId: "connection", action: "connect", status: "running",
+      createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), expiresAt: new Date(1000).toISOString(), settlementPending: true },
+    walletAvailability: { status: "available", walletRunId: "00000000-0000-4000-8000-000000000001" }, progress: { status: "waiting" }, boundary: CONNECT_BOUNDARY,  } };
 const stateReader = (read: () => Promise<ReviewSession | undefined>, readRequest?: () => TransactionRequest) => async (): Promise<ReviewSnapshot | undefined> => {
   const session = await read();
   return session ? { session, hasReviewInput: false, request: readRequest?.(), walletAvailability: { status: "available", walletRunId: "00000000-0000-4000-8000-000000000001" }, progress: { status: readRequest ? "waiting" : "idle" } } : undefined;
 };
-const cardStore = (read: () => Promise<CardSnapshot>) => ({ readSaved: read }) as unknown as CardStore;
+const cardStore = (read: () => Promise<CardSnapshot>) => ({ readWalletOperation: async () => {
+  const card = await read(), data = connectViewSchema.parse(card.data);
+  return { card, operation: data.operation ?? null, walletAvailability: data.walletAvailability, evaluatedAt: card.createdAt };
+} }) as unknown as CardStore;
 afterEach(() => vi.useRealTimers());
 
 describe("bounded stored-state waits", () => {
@@ -51,12 +58,12 @@ describe("bounded stored-state waits", () => {
     vi.useFakeTimers(); const read = vi.fn(async () => connection);
     const wait = waitForWalletConnection(cardStore(read), "card", { timeoutMs: 100 });
     await vi.advanceTimersByTimeAsync(100);
-    await expect(wait).resolves.toMatchObject({ waitOutcome: "timed_out", snapshot: { state: "running" } });
+    await expect(wait).resolves.toMatchObject({ waitOutcome: "timed_out", card: { state: "ready", data: { operation: { status: "running" } } } });
     expect(read).toHaveBeenCalledTimes(2); expect(vi.getTimerCount()).toBe(0);
   });
   it("returns immediately for an unsubmitted connection card", async () => {
-    await expect(waitForWalletConnection(cardStore(async () => ({ ...connection, state: "ready", data: { ...connection.data as object, observe: false } })), "card"))
-      .resolves.toMatchObject({ waitOutcome: "status_reached", snapshot: { state: "ready" } });
+    await expect(waitForWalletConnection(cardStore(async () => ({ ...connection, state: "ready", data: { ...connection.data as object, operation: undefined, observe: false } })), "card"))
+      .resolves.toMatchObject({ waitOutcome: "status_reached", card: { state: "ready" } });
   });
   it.each(["connection", "request"] as const)("cleans the %s wait on host abort", async (kind) => {
     vi.useFakeTimers(); const controller = new AbortController();

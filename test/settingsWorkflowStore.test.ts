@@ -1,3 +1,4 @@
+import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,10 +30,10 @@ function fixture() {
     store.create(card);
     return { card, token, operation: store.forCard(card) };
   };
-  const admit = (entry: ReturnType<typeof create>, kind: "clear_read_address" | "reset_local_data" = "clear_read_address") => {
+  const admit = (entry: ReturnType<typeof create>, kind: "restore_endpoint" | "reset_local_data" = "restore_endpoint") => {
     const preparationId = randomUUID();
-    store.write(entry.operation, { ...entry.operation, draft: { kind }, phase: "prepared", preparationId, fingerprint: "read-address", preparedUserDataRevision: store.control().user_data_revision }, entry.card);
-    return store.admit(store.cards.get(entry.card.state.cardId)!, { action: "settings_confirm", operationId: entry.operation.operationId, preparationId }, () => "read-address");
+    store.write(entry.operation, { ...entry.operation, draft: kind === "restore_endpoint" ? { kind, endpoint: "grpc" } : { kind }, phase: "prepared", preparationId, fingerprint: "selected-settings", preparedUserDataRevision: store.control().user_data_revision }, entry.card);
+    return store.admit(store.cards.get(entry.card.state.cardId)!, { action: "settings_confirm", operationId: entry.operation.operationId, preparationId }, () => "selected-settings");
   };
   return { activity, store, db, now, create, admit };
 }
@@ -50,18 +51,18 @@ it("commits Settings identity with its card and rolls both back on a write failu
 it("invalidates a replacement confirmation on a same-count user-data change, once", async () => {
   const f = fixture();
   const address = `0x${"a".repeat(64)}`;
-  await f.activity.setActiveAccount(address, "wallet_connection", f.now);
+  await seedCurrentReadAccount(f.activity, address, f.now);
   const { card, operation } = f.create();
   const userRevision = f.store.control().user_data_revision;
   f.store.write(operation, { ...operation, draft: { kind: "reset_local_data" }, phase: "prepared",
     preparationId: randomUUID(), fingerprint: "prior-data", preparedUserDataRevision: userRevision }, card);
-  f.db.prepare("UPDATE accounts SET last_used_at=? WHERE sui_address=?").run("2026-10-04T00:00:01.000Z", address);
+  f.db.prepare("UPDATE accounts SET last_used_at=? WHERE address=?").run("2026-10-04T00:00:01.000Z", address);
   expect(f.db.prepare("SELECT count(*) AS count FROM accounts").get()).toEqual({ count: 1 });
   expect(f.store.control().user_data_revision).toBe(userRevision + 1);
   expect(f.store.forCard(card)).toMatchObject({ phase: "draft" });
   expect(f.store.forCard(card).preparationId).toBeUndefined();
   expect(f.store.cards.get(card.state.cardId)?.state.revision).toBe(2);
-  f.db.prepare("UPDATE accounts SET last_used_at=? WHERE sui_address=?").run("2026-10-04T00:00:02.000Z", address);
+  f.db.prepare("UPDATE accounts SET last_used_at=? WHERE address=?").run("2026-10-04T00:00:02.000Z", address);
   expect(f.store.cards.get(card.state.cardId)?.state.revision).toBe(2);
   expect(() => f.store.requireInput(card)).toThrow(SettingsConflict);
 });
@@ -70,7 +71,7 @@ it("keeps a completed operation immutable and releases only its own final reserv
   const f = fixture(); const a = f.create(), b = f.create();
   f.admit(a);
   expect(() => f.store.claimFinal(b.operation.operationId)).toThrow(SettingsConflict);
-  const result = { outcome: "completed" as const, recordedAt: f.now.toISOString(), message: "The default read address was cleared." };
+  const result = { outcome: "completed" as const, recordedAt: f.now.toISOString(), message: "The default network address was saved." };
   expect(f.store.finish(a.operation.operationId, result)).toBe(true);
   const revision = f.store.cards.get(a.card.state.cardId)?.state.revision;
   expect(f.store.finish(a.operation.operationId, result)).toBe(true);
@@ -108,6 +109,23 @@ it("normalizes typed input identity independently of key order", () => {
   expect(settingsIdentity({ value: "one" })).not.toBe(settingsIdentity({ value: "two" }));
 });
 
+it("records terminal-only upload retirement and its cleanup obligation in the same result commit", () => {
+  const f = fixture(), { card, operation } = f.create(), fileId = randomUUID();
+  // This synchronous Store check models file metadata; real file removal and
+  // owner-exit tests cover the physical artifact independently.
+  f.store.createFile({ fileId, operationId: operation.operationId, cleanupOperationId: operation.operationId,
+    role: "upload", relativePath: `.settings-staging/${fileId}.upload`, displayName: "synthetic-backup.json",
+    totalSize: 1, receivedSize: 1, sha256: "0".repeat(64), sealed: true, invalidated: false, cleanup: "pending" });
+  f.store.write(operation, { ...operation, draft: { kind: "import_local_data" }, phase: "sealed", fileId }, card);
+  expect(f.store.filesForCleanup(operation.operationId)).toEqual([]);
+  expect(f.store.finish(operation.operationId, { outcome: "interrupted", recordedAt: f.now.toISOString(), message: "This Settings change was cancelled. Nothing was applied." })).toBe(true);
+  const closed = f.store.cards.get(card.state.cardId)!;
+  expect(closed.state).toMatchObject({ state: "closed", reason: "cancelled", data: {
+    result: { outcome: "interrupted" }, temporaryFileCleanup: "pending", file: { fileId, cleanup: "pending" }, allowedActions: [], observe: false } });
+  expect(f.store.file(fileId)).toMatchObject({ invalidated: true, cleanup: "pending" });
+  expect(f.store.filesForCleanup(operation.operationId)).toHaveLength(1);
+});
+
 it.each([
   { name: "complete current upload", role: "upload", received: 8, invalidated: false, differentOperation: false, phase: "sealed" },
   { name: "incomplete upload", role: "upload", received: 7, invalidated: false, differentOperation: false, phase: "draft" },
@@ -117,7 +135,7 @@ it.each([
 ] as const)("uses the same Back and writer transition for $name", async (input) => {
   for (const source of ["back", "writer"] as const) {
     const f = fixture(); const address = `0x${"b".repeat(64)}`;
-    await f.activity.setActiveAccount(address, "wallet_connection", f.now);
+    await seedCurrentReadAccount(f.activity, address, f.now);
     const entry = f.create(), other = f.create(), fileId = randomUUID();
     f.store.createFile({ fileId, operationId: input.differentOperation ? other.operation.operationId : entry.operation.operationId,
       role: input.role, relativePath: "fixture", displayName: "backup.json", totalSize: 8, receivedSize: input.received,
@@ -127,7 +145,7 @@ it.each([
       preparedUserDataRevision: f.store.control().user_data_revision }, entry.card);
     const prepared = f.store.forCard(entry.card), card = f.store.cards.get(entry.card.state.cardId)!;
     if (source === "back") f.store.resetPreparation(prepared, card);
-    else f.db.prepare("UPDATE accounts SET last_used_at=? WHERE sui_address=?").run("2026-10-04T00:00:01.000Z", address);
+    else f.db.prepare("UPDATE accounts SET last_used_at=? WHERE address=?").run("2026-10-04T00:00:01.000Z", address);
     const reset = f.store.forCard(entry.card);
     expect(reset).toMatchObject({ phase: input.phase, fileId });
     for (const key of ["preparationId", "fingerprint", "preparation", "preparedUserDataRevision"]) expect(reset).not.toHaveProperty(key);
@@ -145,4 +163,24 @@ it("does not complete a draft or consume input when final admission rolls back",
   expect(f.store.control().active_operation_id).toBeNull();
   expect(f.store.cards.get(entry.card.state.cardId)).toMatchObject({ state: { state: "ready" } });
   expect(f.store.cards.get(entry.card.state.cardId)?.acceptedInput).toBeUndefined();
+});
+
+it.each(["retain", "replace_file", "drop_file", "change_effect", "finish"] as const)("owns upload cleanup when an operation transitions by %s", (transition) => {
+  const f = fixture(), entry = f.create(), fileId = randomUUID();
+  f.store.createFile({ fileId, operationId: entry.operation.operationId, role: "upload", relativePath: "fixture.upload",
+    displayName: "backup.json", totalSize: 8, receivedSize: 8, sha256: "0".repeat(64), sealed: true, invalidated: false, cleanup: "pending" });
+  f.store.write(entry.operation, { ...entry.operation, draft: { kind: "import_local_data" }, phase: "sealed", fileId }, entry.card);
+  const previous = f.store.forCard(entry.card), card = f.store.cards.get(entry.card.state.cardId)!;
+  const next = { ...previous };
+  if (transition === "replace_file") {
+    next.fileId = randomUUID();
+    f.store.createFile({ ...f.store.file(fileId)!, fileId: next.fileId, relativePath: "replacement.upload" });
+  } else if (transition === "drop_file") delete next.fileId;
+  else if (transition === "change_effect") next.draft = { kind: "clear_read_address" };
+  if (transition === "finish") f.store.finish(previous.operationId, { outcome: "interrupted", recordedAt: f.now.toISOString(), message: "Cancelled." });
+  else f.store.write(previous, next, card);
+  expect(f.store.file(fileId)).toMatchObject({ operationId: previous.operationId, cleanupOperationId: previous.operationId,
+    invalidated: transition !== "retain", cleanup: "pending" });
+  expect(f.store.filesForCleanup(previous.operationId).map((file) => file.fileId)).toEqual(transition === "retain" ? [] : [fileId]);
+  if (transition === "replace_file") expect(f.store.file(next.fileId!)?.invalidated).toBe(false);
 });

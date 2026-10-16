@@ -61,6 +61,9 @@
   box-sizing: border-box;
 }
 
+/* Keep the HTML hidden state authoritative over component display layouts. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--ui-bg);
@@ -218,6 +221,27 @@ body {
   gap: 5px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+
+.ui-field--check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  font-size: 14px;
+  color: var(--ui-text);
+  cursor: pointer;
+}
+
+.ui-checkbox {
+  font: inherit;
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--ui-accent);
+  cursor: inherit;
 }
 
 .ui-input,

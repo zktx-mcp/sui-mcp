@@ -20,7 +20,7 @@ It is not the contributor rulebook and it is not enforcement. Development rules 
 | Transaction material and execution | Verified supported swaps under user control | Stored mainnet material is used only after review and wallet approval. External proposals stay non-signable. Fiat cash-out, P&L, tax, cost-basis, route ranking and automatic settlement choice remain unsupported. |
 | Private-key custody, autonomous trading, fiat USD peg claims, and quote-only coverage or readiness claims | Unsupported safety and correctness boundary | Do not custody funds, hold private keys, or autonomously trade. Do not treat settlement assets as fiat USD, bank cash-out amounts, or peg guarantees. Do not turn quote-only conversion candidates into payment coverage, funding readiness, payment execution readiness, or signing readiness. |
 | Silent settlement-token selection and route ranking | Out of scope by current design | Do not silently choose USDC, USDT, or another settlement token for the user. Do not rank venues, choose routes, or make best-price recommendations. |
-| Other chains, autonomous trading, alerts, arbitrary Move calls, investment advice | Unsupported | Say the request is unsupported and redirect to available Sui mainnet read or review capabilities. |
+| Other-chain financial actions, autonomous trading, alerts, arbitrary Move calls, investment advice | Unsupported | Ethereum and Solana address management does not add other-chain asset reads, signing or execution. Say financial requests outside Sui are unsupported and redirect to available Sui mainnet read or review capabilities. |
 | Payment execution | Not a current capability | Intent evidence is separate from execution and does not build or execute payments. Do not describe payment execution as available. |
 | Lending, staking, relative balance actions | Unsupported | Do not describe executable actions for these categories as available product functionality. |
 
@@ -299,28 +299,62 @@ For common USD-denominated evidence questions:
 
 Describe an active wallet account as read context, not login, proof of
 ownership, standing signature approval or custody. Explicit public-address
-reads do not set that context. Account clearing does not disconnect a wallet.
+reads do not set that context. Account clearing does not disconnect a wallet. Activity tools with an optional
+`account` use saved read context when it exists. If it is absent or cleared, ask
+for an explicit Sui address for that read; do not ask for a wallet connection
+merely to restore a read filter.
 
-- For current asset reads with no address supplied by the user, read `session_get_interaction_status` and use `assetReadAccount.account` only when its status is `available`. If that default is unavailable and the requested tool accepts `account`, ask for a Sui address in chat. For `read_summarize_deepbook_account_inventory`, a typed address is unsupported: follow its connection/account-selection guidance instead. Do not copy a remembered or stored active address into an explicit argument to bypass this condition. Explicit user-provided addresses remain public reads without a connected wallet. A stored active account is not proof of a current connection.
-- If a different saved connection remains after disconnection, matching addresses do not carry the old default selection into it. The user can choose Use address in Connect. Use the returned `assetReadAccount`, not a count of recorded connections or an address match, to describe the default. A stored connection past its expiry is not a current usable choice or proof of remote removal.
-- Before opening a connection card, use the same status response's `connections`, `connectionConflict` when present, and `walletAvailability`. For a connect request, if the requested wallet is already connected, report that fact without opening another card. For a disconnect request, if no connection is recorded and wallet state is available, report that there is no connection to disconnect. Unavailable wallet state does not prove no connection. Do not ask for another pairing when one is pending.
+- For current asset reads with no address supplied by the user, read `session_get_interaction_status` and use `assetReadAccount.account` only when its status is `available`. If that default is unavailable and the requested tool accepts `account`, ask for a Sui address in chat. For `read_summarize_deepbook_account_inventory`, a typed address is unsupported: follow its current connection or read-address-clearing guidance instead. Do not copy a remembered or stored active address into an explicit argument to bypass this condition. Explicit user-provided addresses remain public reads without a connected wallet. A stored active account is not proof of a current connection.
+- One current connection supplies one fixed address per approved chain. Other wallet/account/address choices require disconnecting and reconnecting. Never propose Add connection or a default-account switch. A stored expired record is not proof of remote removal.
+- Before opening a connection card, read `session_get_interaction_status.connection`, `requestedChains`, `canDisconnect` and `walletAvailability`. An already connected wallet needs no additional pairing. Missing/unavailable observation does not prove absence. Pending work must use its existing card and operation, not another pairing.
 - Collect a missing account address or transaction hash in chat before opening an Account or Receipt card. Use a hash already supplied for the requested transaction; do not ask for it again. If a tool returns `input_required`, ask for its named input without retrying or claiming a failure. These cards have no input forms.
 
-For a connected-account-only read, use `session_get_interaction_status` to distinguish an unavailable wallet service, pending operations, and missing connection/selection. Report wallet-service unavailability and recovery guidance without proposing another pairing. If an operation is pending, use its existing cardId with the connection get/wait tools. Otherwise, explain that the user must request connection or account selection to continue; do not start that operation automatically.
+For a connected-account-only read, distinguish unavailable service, pending work,
+missing connection and explicit read-address clearing. Use the existing operation's
+cardId for get/wait while it is pending. Otherwise follow the user's connection
+request; do not initiate pairing automatically. Clearing read context is not a
+wallet disconnection or an invitation to bypass the read guard with a remembered address.
 
-1. `account_get_active_account` reports the stored selection, with `source` and `setAt`. For current assets without a user-provided address, use `session_get_interaction_status.assetReadAccount` to check whether that selection is a usable default. If not, request an address only for tools that accept `account`; connected-account-only tools require the connection/account-selection flow. Do not infer current connection from the stored selection.
-2. An explicit connect/reconnect/disconnect/account replacement request opens an internal
-   Connect card with `session_open_wallet_connection_card`: use `intent: connect` for requested pairing, `intent: disconnect` for requested disconnection, and `intent: manage` for inspection or account selection. The model must not call app-only actions on the user's behalf.
-For "disconnect my wallet", when the wallet service is available and the target is connected, open `session_open_wallet_connection_card` with `intent: disconnect`. For one connected target the card shows Confirm disconnect or Back directly; Back only returns to the connection view; it does not submit Cancel review or disconnect. The card starts no pairing. Do not substitute the Settings action to clear the default read address, claim disconnection is unsupported merely because there is no direct model-facing disconnect tool, or equate disconnection with revoking onchain permissions. If disconnection is already pending, read or wait on that exact card instead of opening another operation.
+1. `account_get_active_account` reports stored Sui read context, with its source
+   and time. Use `session_get_interaction_status.assetReadAccount` for current
+   asset eligibility. Tools with an `account` input accept a user-provided address;
+   connected-account-only tools do not. Stored context alone proves no connection.
+2. For an explicit connect request, open `session_open_wallet_connection_card`
+   with empty input. For disconnection, open `session_open_wallet_disconnection_card`.
+   The latter fixes the current exact session and shows Confirm disconnect and
+   Cancel. Cancel ends that card without disconnecting. Neither card can switch
+   purposes or act on a replacement session; another operation requires a new
+   user prompt and purpose card. The model must not call app-only actions for the
+   user. Disconnection does not revoke onchain permissions. If the requested wallet
+   is already connected, report current interaction status without another pairing.
+   A no-session-to-disconnect refusal needs no repeated status check or new Review.
+
+For "disconnect my wallet", open `session_open_wallet_disconnection_card` when the
+session is manageable. Confirm disconnect removes that exact session; Cancel ends
+only this card and leaves the session unchanged. The card starts no pairing.
+Do not substitute Clear saved read address or claim revocation of onchain permissions.
+If disconnection is already pending, read or wait on its exact card rather than
+creating another operation. For a connect request, if the requested wallet is already connected,
+report current interaction status without another pairing.
 
 3. `session_get_wallet_connection_card` and `session_wait_wallet_connection_card` use the
-   returned cardId. An unsubmitted card needs input; waiting does not create a
-   pairing. Pairing credentials/QR never belong in chat text.
-4. After connection/account selection, read `session_get_interaction_status` and confirm `assetReadAccount` is available before
-   stating which account is active. A connected session and active context are
-   separate facts, especially after clear or a multiple-account approval.
-5. A wait timeout does not prove failure, disconnection or a remote dialog's
-   cancellation. Report the actual stored outcome and pending user action.
+   returned cardId. The response's fixed `card` is separate from its current exact
+   `operation`, service availability and evaluation time. Waiting does not create a
+   pairing or follow a later operation. Without an admitted operation, waiting ends immediately. Pairing
+   credentials and QR data never belong in chat text.
+4. Settings selects networks for the next connection, default Sui. Only returned
+   requested networks are usable. A single distinct address binds automatically;
+   several addresses make that chain unavailable, with no chooser. Reconnect to
+   change the address or scope. Changing Settings does not modify current approval.
+5. A timeout does not prove failure, removal or cancellation of a wallet dialog.
+   Read the saved outcome and pending cleanup separately. An approval or
+   disconnection recorded as completed remains completed while cleanup is pending;
+   do not describe that result as stopped. SDK exit and late
+   response processing must not be called user cancellation.
+6. Explicit Cancel or Stop permanently ends that card's input. Cleanup cannot
+   restore it. Open a new card only for a new user request. Settings Clear saved
+   read address suppresses implicit read context across restart of the same
+   connection; it does not cancel a request, change fixed addresses or disconnect.
 
 Use `session_get_interaction_status` for bounded pending interactions. A Review
 status of `ready_for_wallet_review` is displayed as Ready for your review: the
@@ -331,7 +365,7 @@ success/failure. stopped, request_failed and outcome_unknown never imply chain
 failure or absence of execution. Use `session_get_execution_result` to read the
 known digest without resubmitting. `session_open_review_management` requires the
 exact reviewSessionId and attemptId and grants no new signing/refresh action.
-With one available wallet/account, the live Review card prepares and renews verified conditions automatically. The user inspects the PTB and amounts, then chooses Request wallet approval. Multiple valid connections must first be resolved through target-specific disconnection; several approved addresses belong to one connection. Failed preparation may need Retry review. Do not ask users to manually update after normal review-detail expiry; the card updates automatically when permitted. Receipt and completed Review show the actual transaction graph when private display metadata is available, followed by observed results. Additional facts are in Details; missing metadata means the graph is unavailable, not that the transaction has no inputs.
+A new Review fixes the current Sui account and connection before preparation. Its live card prepares and renews verified conditions automatically while that exact target qualifies. The user inspects the PTB and amounts, then chooses Request wallet approval. Use the exact fixed target. Reconnecting cannot retarget an existing Review; a replacement connection needs a new Review. Settings selects requested networks, default Sui; only a single valid returned address per chain is usable. Do not repeat already-determined chain/address choices in a card. Failed preparation may need Retry review. Do not ask users to manually update after normal review-detail expiry; the card updates automatically when permitted. Receipt and completed Review show the actual transaction graph when private display metadata is available, followed by observed results. Additional facts are in Details; missing metadata means the graph is unavailable, not that the transaction has no inputs.
 
 Frame recreation and chat navigation first reread the same DB state. Only a currently permitted live View can continue its backend-directed automatic preparation; completed, managed and public saved cards never restart it. SDK restoration does
 not replay a financial request or restore cleared read context.
@@ -339,13 +373,10 @@ not replay a financial request or restore cleared read context.
 Treat `walletAvailability` as the local connection service's state and
 `walletObservation` as its last confirmed observation, not the wallet app's live
 screen. `initializing` and `recovering` do not mean the user rejected anything.
-If `connectionConflict` is present, explain that several saved connections
-prevent using a wallet. On the user's request, open Connect/manage for them to
-confirm the connections they want to disconnect. Do not choose the first or
-most recent connection, change the default address or call `ui_act_card` for
-them. `allowedActions` describes permitted action types, not all buttons visible
-in a particular frame. In particular, a card without a target does not show
-Disconnect or Use account merely because a general action name was mentioned.
+One connection is current. Its fixed addresses, live grant and stored read context
+are separate facts. An old Review stays bound to its original account/connection;
+a replacement connection requires a new Review. `allowedActions` describes
+permitted app action types, never model authority or a mandatory visible button list.
 
 Connection-service recovery belongs to Settings. When the service is unavailable
 or a connection operation remains unresponsive, open
@@ -356,12 +387,12 @@ A new Settings card can explicitly supersede a startup still pending. Read the
 same operation's result; neither a new available run nor restart completion
 confirms an interrupted disconnect or a transaction result. Do not repeatedly
 request wallet approval or report recovery before its new run is observed.
-`manageableConnectionIds` names exact disconnect targets, not usable wallet
-choices. A terminal record may remain manageable when its SDK session is still
-present; do not describe the old failed operation as successful. If
+`canDisconnect` qualifies the current exact cleanup target, not financial usage.
+A terminal or older-data-generation record can remain disconnectable when its SDK
+session is still present or unusable; do not describe the old failed operation as successful. If
 `connectionReconciliationRequired` is true, explain that the service contains an
-unrecorded connection. Ask the user to remove that retained connection in the
-wallet app, then check its status. Settings/Troubleshooting can restart the
+unrecorded connection. New pairing and financial input are blocked. Ask the user
+to remove that retained connection in the wallet app, then check its status. Settings/Troubleshooting can restart the
 service to inspect it again; restarting does not approve an unrecorded session.
 Do not infer a free pairing slot from a failed or expired record.
 
@@ -370,7 +401,7 @@ procedure in the setup guide. All participating MCP connections must stop and th
 closing a peer or window can leave the owner alive. Follow the same parent
 stop/reopen procedure for stored endpoint or installation changes. Do not kill another app's processes.
 
-A failed `connectionAction: "disconnect"` means removal was not confirmed.
+A failed operation with `operation.action: "disconnect"` means removal was not confirmed.
 Direct the user to inspect/remove the retained connection in their wallet app.
 App restart does not prove remote revocation or cancel a transaction on Sui.
 Already submitted transactions keep their digest and remain readable; a new
@@ -484,26 +515,23 @@ For `read_list_review_activity`, `dataScope.recordCount` is the full matching lo
 
 For `read_get_review_session_detail`, transition rows with `isNoOp: true` are repeated lifecycle observations where the stored status did not change. Mention them only as audit details; do not count them as extra funnel progress.
 
-For local settings, local records or connection-service recovery, call `settings_create_local_settings_session` to open the internal Settings card. No external URL is returned. Explain Address for viewing assets, Local records, Troubleshooting or Advanced settings as needed and leave selection/confirmation to the user.
+For local settings, local records or connection-service recovery, call `settings_create_local_settings_session` to open the internal Settings card. No external URL is returned. Explain Address for viewing assets, Wallet networks, Local records, Troubleshooting or Advanced settings as needed and leave selection/confirmation to the user.
 
-For a backup, use the exact label Download backup in Local records. It prepares
-and verifies the snapshot internally and asks the app to save it in one user
-action. Do not instruct a separate Create backup step or confuse Download backup
-with Restore local records. If the actual download function is unsupported,
-the same file is saved once in the Sui MCP backup folder. Use the verified
-Backup saved result's Folder and File name for that local artifact. Do not
-describe that folder as the Host download destination. Suggested file name and Host acknowledgment do not establish where
-or whether a file was saved. Retry download is explicit and may create another
-copy after an unconfirmed earlier request. It uses the same snapshot only during
-its fixed transfer period; a new request after expiry or server restart captures
-current records. Cancel download does not delete a file already saved by the app.
-Use the same function-based product instructions across desktop apps. Missing
-advertisement is not proof of non-support, and timeout, cancellation or denial
-does not trigger local saving. Save a local copy is the explicit decision after
-an earlier possibly handled request. Retry save follows only a failure recorded as `not_published`; Check status settles uncertain saving or cleanup without
-another file effect. Report saved-file and cleanup facts separately.
+For a backup, use Download backup in Settings → Local records. Do not request a
+separate Create backup step. Report only the returned saved-file and delivery
+facts: Host acknowledgment does not prove a saved file or its destination.
+A completed delivery card cannot retry. For a requested retry of a retained
+backup, open `settings_create_local_settings_session` with `backupDelivery` and
+the exact recorded operation/file identifiers; the user chooses one delivery or
+local-save attempt there. To check current delivery or cleanup, open the same
+tool with `operationStatus`. Do not ask the user to press a control in an ended
+card. Expired or invalidated backups require a new backup request. These three
+card purposes and file outcomes are defined in [Settings Tools](MCP_TOOLS.md#settings-tools).
+Use the same function-based instructions across apps. Neither missing capability
+advertisement nor timeout, denial or uncertain delivery means method-not-found.
+A local copy after a possibly handled delivery requires explicit user consent.
 
-Ordinary MCP tools never apply a Settings change. Do not call `ui_act_card` or `ui_read_settings_file` as model work. Never request/paste raw backup bytes or card permissions in chat. Clear default address only changes read context, not wallet connections or admitted transactions. Endpoint changes require the shared parent to stop and reopen; a connection-service restart does not apply them. Report operation result, temporary-file cleanup and Host download acknowledgment as separate facts. A saved result is not proof that the Host saved a downloaded file. For restore validation refusal, let the user correct input or choose another file and prepare a new confirmation; reading or returning to a frame never applies it.
+Ordinary MCP tools never apply a Settings change. Do not call `ui_act_card` or `ui_read_settings_file` as model work. Never request/paste raw backup bytes or card permissions in chat. Clear saved read address belongs to Settings. It suppresses implicit Sui read context, not fixed wallet addresses or admitted transactions. Endpoint changes require the shared parent to stop and reopen; a connection-service restart does not apply them. Report operation result, temporary-file cleanup and Host download acknowledgment as separate facts. A saved result is not proof that the Host saved a downloaded file. For restore validation refusal, let the user correct input or choose another file and prepare a new confirmation; reading or returning to a frame never applies it.
 
 ## User Vocabulary
 
@@ -531,7 +559,7 @@ Do not silently turn vague words into amounts.
 | "Do you think I should buy this?" | Do not give investment advice. Offer price, liquidity, quote, and risk-input facts when supported. |
 | "Tell me when the price drops." | Say alerts are unsupported. Offer a one-time price or quote check. |
 | "Let's buy Bitcoin too." | Say this toolkit only exposes Sui mainnet surfaces. |
-| "Am I connected? / Am I logged in?" | Read `session_get_interaction_status.connections` with `walletAvailability`. When unavailable, report that connection state cannot be confirmed. The stored active account is not proof of a connection or login. Do not say the user is connected to DeepBook or signed in. |
+| "Am I connected? / Am I logged in?" | Read `session_get_interaction_status.connection` with `walletAvailability`. When unavailable, report that connection state cannot be confirmed. The stored active account is not proof of a connection or login. Do not say the user is connected to DeepBook or signed in. |
 | "Show my balances over time." | Held-balance history and P&L are not tool surfaces. Use `read_get_account_asset_timeline` only for stored raw net-flow bars over a UTC range; if `balanceStatus` is `unavailable_no_balance_anchor`, say held balances are unavailable. `read_summarize_wallet_assets` returns a current snapshot at `fetchedAt`. |
 | "How much profit did I make?" | Profit, tax, performance, and cost-basis calculations are not Sui MCP surfaces. Offer raw activity, balance snapshots, or quote evidence instead; do not provide a profit formula or hypothetical profit example. |
 | "Can you calculate my profit if I bought 10 SUI for 10 USDC?" | An assumed acquisition price does not change the boundary. P&L and accounting calculations are unsupported; do not provide a formula, worked example, tax treatment, or performance result. |

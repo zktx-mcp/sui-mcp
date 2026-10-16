@@ -138,9 +138,9 @@ async function main(): Promise<void> {
     });
     const reviewDependencies = createRuntimeReviewDependencies({ client: suiClient, chainIdentifier,
       expectedChainIdentifier: config.expectedChainIdentifier, materialStore: transactionMaterialStore, readService });
-    // Utility-only read context in this script's temporary DB. This does not
+    // Known-account history in this utility's temporary DB for optional review computation. This does not
     // create a live wallet session or prove address ownership.
-    await activityStore.setActiveAccount(smokeAddress, "wallet_connection", new Date(), { name: "Explicit smoke read fixture" });
+    await activityStore.upsertAccount(smokeAddress, "review_execution");
     server = createMcpServer({
       sessions,
       activityStore,
@@ -175,7 +175,7 @@ async function main(): Promise<void> {
       limit: ACTIVITY_SMOKE_LIMIT
     });
     const activitySummary = await callSmokeTool(client, TOOL_NAMES.readSummarizeSuiActivityScan, {
-      limit: ACTIVITY_SMOKE_LIMIT
+      account: smokeAddress, limit: ACTIVITY_SMOKE_LIMIT
     });
 
     assertSmokeOkStatus(wallet, TOOL_NAMES.readSummarizeWalletAssets);
@@ -191,7 +191,7 @@ async function main(): Promise<void> {
     });
     markCompleted(TOOL_NAMES.readScanSuiAccountActivity);
     activitySmoke.summary = summarizeActivitySmokePayload(activitySummary, TOOL_NAMES.readSummarizeSuiActivityScan, {
-      expectedAccountSource: "active_account_context",
+      expectedAccountSource: "explicit_filter",
       requireAnalysis: true,
       expectNoDetails: true
     });
@@ -205,6 +205,7 @@ async function main(): Promise<void> {
       });
       const functionActivitySummary = await callSmokeTool(client, TOOL_NAMES.readSummarizeSuiFunctionActivityScan, {
         function: smokeFunctionTarget,
+        account: smokeAddress,
         limit: ACTIVITY_SMOKE_LIMIT
       });
       functionActivitySmoke.scan = summarizeActivitySmokePayload(
@@ -223,7 +224,7 @@ async function main(): Promise<void> {
         functionActivitySummary,
         TOOL_NAMES.readSummarizeSuiFunctionActivityScan,
         {
-          expectedAccountSource: "active_account_context",
+          expectedAccountSource: "explicit_filter",
           expectedRelationship: "sent",
           requireFunction: true,
           requireAnalysis: true,

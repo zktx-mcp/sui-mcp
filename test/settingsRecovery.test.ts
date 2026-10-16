@@ -1,3 +1,4 @@
+import { suiGrants } from "./fixtures/walletGrants.js";
 import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -49,8 +50,7 @@ it("blocks wallet input after restart admission storage failure but performs no 
 
 it("rejects a changed recovery impact without changing service availability", async () => {
   const f = await fixture();
-  const connection = f.wallet.run(() => f.wallet.records.restoreConnection({ topic: "recorded-target", accounts: [f.wallet.account],
-    methods: ["sui_signTransaction"], chain: "sui:mainnet", expiresAt: new Date(f.wallet.now().getTime() + 60000).toISOString() }, f.wallet.now())).connection;
+  const connection = f.wallet.run(() => f.wallet.seedConnection({ topic: "recorded-target", grants: suiGrants([f.wallet.account], ["sui_signTransaction"]), expiresAt: new Date(f.wallet.now().getTime() + 60000).toISOString() })).connection;
   const prepared = await f.prepare({ kind: "restart_wallet_service" });
   f.wallet.run(() => f.wallet.records.updateConnection(connection.connectionId, {}, f.wallet.now()));
   expect((await f.confirm(prepared)).error?.code).toBe("card_conflict");
@@ -140,8 +140,8 @@ it("keeps a known-ready startup unavailable while its result cannot commit, then
   expect(f.wallet.run(() => f.records.control())).toMatchObject({ wallet_input_blocked: 1, active_operation_id: data(first).operationId });
   await expect(f.read(first)).rejects.toThrow("result could not be saved");
   const second = await f.create();
-  const selected = { ...await f.act(second, { action: "settings_select", draft: { kind: "restart_wallet_service" } }), permission: second.permission };
-  await expect(f.act(selected, { action: "settings_prepare", operationId: data(selected).operationId })).rejects.toThrow("result could not be saved");
+  await expect(f.act(second, { action: "settings_select", draft: { kind: "restart_wallet_service" } })).rejects.toThrow("result could not be saved");
+  expect(f.wallet.run(() => f.wallet.cardRecords.get(second.snapshot.cardId)?.acceptedInput)).toBeUndefined();
   expect(f.peers).toHaveLength(2); expect(f.peers[1]!.kills).toBe(0);
   f.wallet.advance(1000); f.db.exec("DROP TRIGGER reject_ready");
   const finished = await f.read(first);
@@ -153,14 +153,12 @@ it("keeps a known-ready startup unavailable while its result cannot commit, then
 
 it("reads a recorded selected connection without falsely diagnosing unrecorded presence before ready publication", async () => {
   const f = await fixture(), w = f.wallet;
-  const session = { topic: "known-ready-topic", accounts: [w.account], methods: ["sui_signTransaction"], chain: "sui:mainnet" as const,
-    expiresAt: new Date(w.now().getTime() + 60000).toISOString(), walletName: "Known synthetic wallet" };
+  const session = { topic: "known-ready-topic", grants: suiGrants([w.account], ["sui_signTransaction"]), expiresAt: new Date(w.now().getTime() + 60000).toISOString(), walletName: "Known synthetic wallet" };
   const snapshot = (runId: string, sequence: number) => ({ runId, sequence, observedAt: w.now().toISOString(),
-    sessions: [{ topic: session.topic, version: 1, status: "present" as const, session }] });
+    sessions: [{ topic: session.topic, lifecycleRevision: 1, grantRevisions: { "sui:mainnet": 1, "eip155:1": 1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 1 }, status: "present" as const, session }] });
   f.peers[0]!.emit("message", { packageVersion: SERVER_VERSION, runId: w.runtime.runId, type: "snapshot", ready: false, snapshot: snapshot(w.runtime.runId, 2) });
   // Declared prior journal approval/selection, not a real wallet UI approval.
-  const connection = w.run(() => w.records.restoreConnection(session, w.now())).connection;
-  await w.run(() => w.activity.setActiveAccount(w.account, "wallet_connection", w.now(), { id: connection.connectionId }));
+  const connection = w.run(() => w.seedConnection(session)).connection;
   expect(w.run(() => w.workflow.currentConnectionContext().assetReadAccount)).toEqual({ status: "available", account: w.account });
   f.starts.push("hold");
   const first = await f.prepare({ kind: "restart_wallet_service" }); await f.confirm(first);
@@ -178,7 +176,7 @@ it("reads a recorded selected connection without falsely diagnosing unrecorded p
   f.db.exec("DROP TRIGGER refuse_known_ready");
   expect(data(await f.read(first)).result?.outcome).toBe("completed");
   expect(w.run(() => w.workflow.currentConnectionContext().assetReadAccount)).toEqual({ status: "available", account: w.account });
-  expect(w.run(() => w.activity.getActiveAccountSync()?.walletId)).toBe(connection.connectionId);
+  expect(w.run(() => w.activity.getActiveAccountSync()?.connectionId)).toBe(connection.connectionId);
   expect(f.peers).toHaveLength(2); expect(f.peers[1]!.kills).toBe(0);
 });
 

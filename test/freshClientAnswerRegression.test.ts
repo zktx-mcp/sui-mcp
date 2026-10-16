@@ -1,3 +1,5 @@
+import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
+import { suiGrants } from "./fixtures/walletGrants.js";
 import type { ActivityStore } from "../src/core/activity/activityStore.js";
 import type { WalletWorkflow } from "../src/core/session/walletWorkflow.js";
 import { walletWorkflowFixture } from "./fixtures/walletWorkflow.js";
@@ -319,7 +321,7 @@ function createFreshClientReviewPlan(id: string): ActionPlan {
 }
 
 async function createReadyFreshClientReviewSession(sessions: InMemorySessionStore, activityStore: ActivityStore) {
-  await activityStore.setActiveAccount(accountAddress, "wallet_connection", new Date("2026-05-11T00:00:03.000Z"));
+  await seedCurrentReadAccount(activityStore, accountAddress, new Date("2026-05-11T00:00:03.000Z"));
 
   const reviewPlan = createFreshClientReviewPlan("plan_fresh_client_ready");
   const { session: reviewSession } = await sessions.createReviewSession(
@@ -472,11 +474,9 @@ const scenarioInvokers: Record<string, ScenarioInvoker> = {
   deepbook_inventory_discovery_not_detail_inventory: async (scenario) => {
     const f = await walletWorkflowFixture();
     try { return await f.run(async () => {
-      const { client, server, activityStore } = await connectFreshClient({ activityStore: f.activity, workflow: f.workflow });
+      const { client, server } = await connectFreshClient({ activityStore: f.activity, workflow: f.workflow });
       try {
-        const { connection } = await f.approve();
-        f.notify({ ...f.transport.session("fixture-topic")!, accounts: [accountAddress] });
-        await activityStore.setActiveAccount(accountAddress, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"), { id: connection.connectionId });
+        await f.connectSession({ topic: "inventory-source", grants: suiGrants([accountAddress]), expiresAt: new Date(f.now().getTime() + 60000).toISOString() });
         return textPayload(await client.callTool({ name: scenario.tool, arguments: {} }));
       } finally { await Promise.allSettled([client.close(), server.close()]); }
     }); } finally { f.close(); }
@@ -484,11 +484,11 @@ const scenarioInvokers: Record<string, ScenarioInvoker> = {
   deepbook_swap_review_signing_blocked: async (scenario) => {
     const f = await walletWorkflowFixture();
     const server = new McpServer({ name: "fresh-review", version: "1" });
-    registerActionTools(server, { sessions: f.sessions, activityStore: f.activity, cards: { store: f.cards }, logger });
+    registerActionTools(server, { sessions: f.sessions, activityStore: f.activity, cards: { store: f.cards }, workflow: f.workflow, logger });
     const client = new Client({ name: "fresh-review-client", version: "1" }, { capabilities: { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } });
     const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(b); await client.connect(a);
     try {
-      await f.run(() => f.activity.setActiveAccount(f.account, "wallet_connection"));
+      await f.approve();
       return textPayload(await f.run(() => client.callTool({ name: scenario.tool, arguments: {
         intent: { type: "swap", from: { symbol: "SUI", amount: "1" }, to: { symbol: "USDC" }, maxSlippageBps: 50, protocol: "deep" }
       } })));
@@ -499,7 +499,7 @@ const scenarioInvokers: Record<string, ScenarioInvoker> = {
       sessionTtlMs: DURABLE_SESSION_TTL_MS
     });
     try {
-      await activityStore.setActiveAccount(accountAddress, "wallet_connection", new Date("2026-05-11T00:00:03.000Z"));
+      await seedCurrentReadAccount(activityStore, accountAddress, new Date("2026-05-11T00:00:03.000Z"));
 
       const reviewPlan: ActionPlan = {
         id: "plan_fresh_client_wait",

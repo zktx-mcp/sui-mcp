@@ -7,8 +7,6 @@ import {
 } from "./status.js";
 import { SessionStoreError } from "./sessionStore.js";
 import type { CardStore } from "./cardSessionStore.js";
-import type { CardSnapshot } from "./cardSession.js";
-import { workflowViewSchema } from "./workflowView.js";
 import { WALLET_CONNECTION_POLL_SECONDS } from "./walletConnection.js";
 
 export const DEFAULT_WAIT_TIMEOUT_MS = 45_000;
@@ -35,21 +33,16 @@ type WaitOptions = {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 };
 
-export async function waitForWalletConnection(cards: CardStore, cardId: string, options: WaitOptions = {}): Promise<{
-  waitOutcome: WaitOutcome; snapshot: CardSnapshot;
-}> {
+export async function waitForWalletConnection(cards: CardStore, cardId: string, options: WaitOptions = {}) {
   const timeout = options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
   const started = Date.now(), sleep = options.sleep ?? sleepMs;
-  let snapshot: CardSnapshot;
   while (true) {
     assertNotAborted(options.signal);
-    snapshot = await cards.readSaved(cardId);
-    const view = workflowViewSchema.parse(snapshot.data);
-    if (snapshot.kind !== "connect") throw new SessionStoreError("input_invalid", "A connection card ID is required.");
-    if (view.progress.status === "unavailable") return { waitOutcome: "unavailable", snapshot };
-    if (!view.observe) return { waitOutcome: "status_reached", snapshot };
+    const state = await cards.readWalletOperation(cardId), operation = state.operation;
+    if (!operation || operation.status !== "running" && !operation.settlementPending) return { ...state, waitOutcome: "status_reached" as const };
+    if (state.walletAvailability.status !== "available") return { ...state, waitOutcome: "unavailable" as const };
     const remaining = timeout - (Date.now() - started);
-    if (remaining <= 0) return { waitOutcome: "timed_out", snapshot };
+    if (remaining <= 0) return { ...state, waitOutcome: "timed_out" as const };
     await sleep(Math.min(remaining, WALLET_CONNECTION_POLL_SECONDS * 1000), options.signal);
   }
 }

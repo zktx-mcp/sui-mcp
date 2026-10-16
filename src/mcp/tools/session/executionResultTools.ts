@@ -22,7 +22,7 @@ export function registerExecutionResultTools(server: McpServer, deps: McpServerD
       const state = await readCurrentReview(deps, reviewSessionId, true);
       if (!state) return errorToolResult({ kind: "session_not_found", details: { reviewSessionId } });
       const request = state.request;
-      return okToolResult({ ...reviewStatusResponse(state), userAnswerUse: executionResultUserAnswerUse({ hasConnectionConflict: !!state.connectionConflict, reconciliationRequired: !!state.connectionReconciliationRequired, hasRequest: !!request, hasExecutionResult: !!request?.execution }) });
+      return okToolResult({ ...reviewStatusResponse(state), userAnswerUse: executionResultUserAnswerUse({ reconciliationRequired: !!state.connectionReconciliationRequired, hasRequest: !!request, hasExecutionResult: !!request?.execution }) });
     } catch (error) { return sessionStoreToolError(error, deps.logger); }
   });
   server.registerTool(TOOL_NAMES.sessionWaitExecutionResult, {
@@ -34,7 +34,7 @@ export function registerExecutionResultTools(server: McpServer, deps: McpServerD
     try {
       const result = await waitForExecutionResult((id) => readCurrentReview(deps, id), reviewSessionId, { timeoutMs, signal: extra.mcpReq.signal });
       return okToolResult({ waitOutcome: result.waitOutcome, ...reviewStatusResponse(result),
-        userAnswerUse: executionResultUserAnswerUse({ hasConnectionConflict: !!result.connectionConflict, reconciliationRequired: !!result.connectionReconciliationRequired, hasRequest: !!result.request, hasExecutionResult: !!result.request?.execution, hasWaitOutcome: true }) });
+        userAnswerUse: executionResultUserAnswerUse({ reconciliationRequired: !!result.connectionReconciliationRequired, hasRequest: !!result.request, hasExecutionResult: !!result.request?.execution, hasWaitOutcome: true }) });
     } catch (error) { return sessionStoreToolError(error, deps.logger); }
   });
 }

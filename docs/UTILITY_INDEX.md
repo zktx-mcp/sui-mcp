@@ -64,9 +64,9 @@ is supplied; the actual mainnet checks remain enabled.
 The command checks metadata, types, tests, builds, package contents and licenses,
 then launches the installed package through stdio MCP with a new data directory
 and an independent port. It reads the registered tools and resources, creates a
-Settings card only in that temporary database, and checks the six internal
+Settings card only in that temporary database, and checks the internal
 HTML resources, app-only tools, scoped status and retired-route rejection. A scoped test card verifies
-that Connect rejects retired restart input and opening manage does not pair. The check
+that Connect rejects unsupported restart input and a model call does not start pairing. The check
 verifies the isolated SDK retains exclusive storage ownership until shutdown. It waits
 for process termination before removing its installation. A termination failure preserves the temporary files for cleanup
 after the process stops. It does not pair, sign, submit, publish, or mutate the
@@ -123,7 +123,7 @@ npm run smoke:mainnet
 
 DeepBook orderbook and raw-quantity quote reads use an internal mainnet SDK simulation sender placeholder, not a user's wallet. The display-amount quote path is covered by automated tests, not by this smoke script. Without the complete optional swap input group, the script does not run account-bound transaction-material computation or digest binding. See Optional account-bound review smoke for that explicit path; read-only success is not evidence that it ran.
 
-Wallet and activity reads use an explicitly synthetic active-account context in a temporary SQLite database. The script never creates a wallet connection, a review URL or an HTTP wallet result. Wallet approval is checked separately. This smoke script does not record raw GraphQL payloads, transaction bytes, signatures, raw transaction details, or compact transaction aggregates.
+Wallet and activity reads pass `SUI_MCP_SMOKE_ADDRESS` explicitly. All four live activity scan/summary calls require `accountSource: "explicit_filter"`. A temporary SQLite database stores known-account history for persistence and optional review computation, without creating a current wallet row or active read context. The script never creates a wallet connection, a review URL or an HTTP wallet result. Wallet approval is checked separately. This smoke script does not record raw GraphQL payloads, transaction bytes, signatures, raw transaction details, or compact transaction aggregates.
 
 ## Mainnet Read Smoke Notes
 
@@ -135,7 +135,7 @@ The smoke command calls:
 - DeepBook orderbook;
 - raw-quantity DeepBook quote;
 - `read_scan_sui_account_activity` for `SUI_MCP_SMOKE_ADDRESS` with limit 5;
-- `read_summarize_sui_activity_scan` through active account context with limit 5;
+- `read_summarize_sui_activity_scan` with the explicit `SUI_MCP_SMOKE_ADDRESS` and limit 5;
 - `read_inspect_sui_transaction` when `SUI_MCP_SMOKE_INSPECT_DIGEST` is set;
 - sent-function activity tools when `SUI_MCP_SMOKE_FUNCTION_TARGET` is set to a full `package::module::function`.
 
@@ -151,7 +151,8 @@ If `SUI_MCP_SMOKE_INSPECT_RANDOM_LATEST=true` is set and no digest is provided, 
 
 The default read path does not call display-amount quote or DeepBook account
 inventory. Account-bound review computation is separate within the same utility
-and runs only for the complete explicit swap input group. Use its recorded
+and runs only for the complete explicit swap input group. That optional path
+uses the known-account history already prepared in the temporary database; it does not create a live connection, card permission or signing authority. Use its recorded
 status and evidence stages rather than treating read-path success as material
 verification or wallet acceptance.
 
@@ -273,6 +274,7 @@ A partially configured group is an error. `SUI_MCP_SMOKE_SWAP_MAX_SLIPPAGE_BPS` 
 existing explicit override. The script uses the same runtime review composition,
 material store and evidence validation as the product, and records whether
 transaction review data was emitted. This can involve mainnet simulation but
-never wallet pairing, signing or submission. The temporary active-account
-fixture is not proof of a wallet connection or ownership. Without the complete
+never wallet pairing, signing or submission. The temporary database supplies
+known-account history for that explicit address; it does not create a current
+wallet connection, saved read context or proof of ownership. Without the complete
 optional group, the result records that review computation was not run.

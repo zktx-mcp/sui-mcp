@@ -294,7 +294,7 @@ export type ReviewSession = LocalSessionBase & {
   // prove that a computation ran, nor describe current action permission.
   preparationError?: string;
   walletConnectionId?: string;
-  walletConnectionRevision?: number;
+  walletGrantRevision?: number;
   currentAttemptId?: string;
   status: InternalSessionStatus;
   plans: ActionPlan[];

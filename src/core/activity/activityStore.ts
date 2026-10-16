@@ -9,9 +9,9 @@ import type {
   ReviewState
 } from "../action/types.js";
 import type { ExternalActivityTransactionDetail } from "./transactionActivityDetails.js";
+import type { WalletChainId } from "../session/chainAccounts.js";
 
 export type AccountSource = "wallet_connection" | "review_execution";
-export type ActiveAccountSource = "wallet_connection" | "cleared";
 export type ReviewTransitionEvent =
   | "created"
   | "opened"
@@ -35,6 +35,7 @@ export const EXTERNAL_ACTIVITY_COVERAGE_SCAN_MAX_RECORDS = 100;
 
 export type AccountRecord = {
   id: number;
+  chainId: WalletChainId;
   address: string;
   firstSeenAt: string;
   lastUsedAt: string;
@@ -42,18 +43,15 @@ export type AccountRecord = {
   lastSource: AccountSource;
 };
 
-export type ActiveAccountWallet = {
-  name?: string | undefined;
-  id?: string | undefined;
-};
-
 export type ActiveAccountRecord = {
   accountId: number;
+  chainId: WalletChainId;
+  revision: number;
   address: string;
-  source: Exclude<ActiveAccountSource, "cleared">;
+  source: "wallet_connection";
   setAt: string;
   walletName?: string;
-  walletId?: string;
+  connectionId?: string;
 };
 
 export type ExternalActivityRelationship = "affected" | "sent";
@@ -393,9 +391,7 @@ export interface ActivityStore {
   finalizeReviewEvaluation?(candidate: ReviewEvaluationCandidate, clock: () => Date): ReviewEvaluation;
   upsertAccount(address: string, source: AccountSource, now?: Date): Promise<AccountRecord>;
   getKnownAccount(address: string): Promise<AccountRecord | undefined>;
-  setActiveAccount(address: string, source: Exclude<ActiveAccountSource, "cleared">, now?: Date, wallet?: ActiveAccountWallet): Promise<ActiveAccountRecord>;
   getActiveAccount(): Promise<ActiveAccountRecord | undefined>;
-  clearActiveAccount(now?: Date): Promise<void>;
   recordReviewSession(input: ReviewSessionEvidenceInput): Promise<void>;
   recordReviewSessionWithLiveSession?(input: ReviewSessionEvidenceInput, live: LiveReviewSessionMutation): Promise<boolean>;
   recordReviewTransition(input: ReviewTransitionInput): Promise<void>;

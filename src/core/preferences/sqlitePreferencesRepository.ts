@@ -10,6 +10,7 @@ import {
   type SuiGrpcUrlSettingRecord
 } from "./preferencesStore.js";
 import { parseGraphqlUrl, parseGrpcUrl } from "../suiEndpoint.js";
+import { DEFAULT_WALLET_CHAINS, parseWalletChains, type WalletChainId } from "../session/chainAccounts.js";
 
 type SqliteDatabase = Database.Database;
 type LocalSettingRow = {
@@ -29,6 +30,12 @@ export class SqlitePreferencesRepository implements PreferencesRepository {
     );
     insert.run("suiGrpcUrl", encodeSettingValue("suiGrpcUrl", defaults.suiGrpcUrl), now.toISOString());
     insert.run("suiGraphqlUrl", encodeSettingValue("suiGraphqlUrl", defaults.suiGraphqlUrl), now.toISOString());
+    insert.run("walletConnectionChains", encodeSettingValue("walletConnectionChains", DEFAULT_WALLET_CHAINS), now.toISOString());
+  }
+
+  getWalletConnectionChainsSync(): WalletChainId[] {
+    const record = this.getLocalSettingSync("walletConnectionChains");
+    return record ? parseWalletChains(record.value) : [...DEFAULT_WALLET_CHAINS];
   }
 
   async getSuiGrpcUrl(): Promise<SuiGrpcUrlSettingRecord | undefined> {
@@ -126,6 +133,7 @@ function rowToLocalSetting(row: LocalSettingRow): LocalSettingRecord {
 }
 
 function encodeSettingValue(key: LocalSettingKey, value: unknown): string {
+  if (key === "walletConnectionChains") return JSON.stringify(parseWalletChains(value));
   if (key === "suiGrpcUrl") {
     if (typeof value !== "string") {
       throw new PreferencesStoreError("invalid_value", "suiGrpcUrl setting value must be a string", { key });
@@ -148,6 +156,7 @@ function decodeSettingValue(key: LocalSettingKey, valueJson: string): unknown {
   } catch {
     throw new PreferencesStoreError("malformed_json", "Malformed local setting JSON", { key });
   }
+  if (key === "walletConnectionChains") return parseWalletChains(parsed);
   if (key === "suiGrpcUrl") {
     return asSuiGrpcUrlValue(parsed);
   }

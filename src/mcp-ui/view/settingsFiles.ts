@@ -61,7 +61,7 @@ export async function uploadSettingsFile(file: File, transport: SettingsViewTran
 }
 
 export type SettingsDownloadStatus = "pending" | "backup_unverified" | "acknowledged" | "not_completed" | "unconfirmed" | "unsupported";
-export async function downloadSettingsFile(file: { operationId: string; fileId: string; displayName: string; totalSize: number; sha256: string; attemptId?: string },
+export async function downloadSettingsFile(file: { operationId: string; fileId: string; displayName: string; totalSize: number; sha256: string; attemptId: string },
   transport: SettingsViewTransport, status: (value: SettingsDownloadStatus) => void, active: () => boolean): Promise<SettingsDownloadStatus | undefined> {
   status("pending");
   let data: Uint8Array;
@@ -69,7 +69,7 @@ export async function downloadSettingsFile(file: { operationId: string; fileId: 
     data = new Uint8Array(file.totalSize);
     let offset = 0;
     while (offset < data.length && active()) {
-      const value = await transport.readFile({ operationId: file.operationId, fileId: file.fileId, offset, ...(file.attemptId ? { attemptId: file.attemptId } : {}) });
+      const value = await transport.readFile({ operationId: file.operationId, fileId: file.fileId, offset, attemptId: file.attemptId });
       const chunk = settingsDecode(value.chunkBase64);
       if (value.totalSize !== data.length || value.sha256 !== file.sha256 || !chunk.length || offset + chunk.length > data.length) throw new Error("Part of the downloaded backup does not match the original file.");
       data.set(chunk, offset); offset += chunk.length;
@@ -77,10 +77,10 @@ export async function downloadSettingsFile(file: { operationId: string; fileId: 
     if (!active()) return;
     if (offset !== data.length || bytesToHex(sha256(data)) !== file.sha256) throw new Error("The complete downloaded backup could not be checked against the original file.");
   } catch {
-    if (file.attemptId && active()) { try { await transport.readCurrent(); } catch { /* The lifecycle owns current-read recovery. */ } }
+    if (active()) { try { await transport.readCurrent(); } catch { /* The lifecycle owns current-read recovery. */ } }
     if (active()) status("backup_unverified"); return "backup_unverified";
   }
-  if (file.attemptId) {
+  {
     try {
       const read = await transport.readCurrent();
       const current = settingsViewSchema.parse(read.snapshot.data);
@@ -99,7 +99,7 @@ export async function downloadSettingsFile(file: { operationId: string; fileId: 
   }
   try {
     if (!active()) return;
-    const response = await (file.attemptId ? transport.download(file.displayName, settingsBase64(data), file.attemptId) : transport.download(file.displayName, settingsBase64(data)));
+    const response = await transport.download(file.displayName, settingsBase64(data), file.attemptId);
     const outcome = response.unsupported === true ? "unsupported" : response.isError === true ? "not_completed" : "acknowledged";
     if (active()) status(outcome);
     return outcome;

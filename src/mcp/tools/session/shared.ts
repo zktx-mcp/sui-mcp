@@ -1,7 +1,7 @@
 import type { McpServerDeps } from "../../server.js";
 import type { ReviewSnapshot } from "../../../core/session/status.js";
 import { walletObservationSchema } from "../../../core/session/walletRuntime.js";
-import { walletAvailabilitySchema, workflowProgressSchema, walletUnavailable, connectionConflictSchema } from "../../../core/session/walletConnection.js";
+import { walletAvailabilitySchema, workflowProgressSchema, walletUnavailable } from "../../../core/session/walletConnection.js";
 import { z } from "zod";
 import { actionPlanSchema, executionPollingStatusSchema, internalSessionStatusSchema, reviewStateOutputSchema } from "../../../core/action/schemas.js";
 import { EXECUTION_STATUS_CATEGORIES } from "../../../core/session/status.js";
@@ -19,7 +19,7 @@ export const timeoutInputSchema = z.number().int().min(1).max(MAX_WAIT_TIMEOUT_M
 export function waitExecutionInputSchema() { return { reviewSessionId: z.string().min(1), timeoutMs: timeoutInputSchema }; }
 export const reviewStatusResponseShape = {
   connectionReconciliationRequired: z.literal(true).optional(),
-  connectionConflict: connectionConflictSchema.optional(), walletAvailability: walletAvailabilitySchema, walletObservation: walletObservationSchema.optional(), progress: workflowProgressSchema,
+  walletAvailability: walletAvailabilitySchema, walletObservation: walletObservationSchema.optional(), progress: workflowProgressSchema,
   reviewSessionId: z.string(), status: internalSessionStatusSchema, reviewRevision: z.number().int().nonnegative(),
   account: z.string().optional(), plans: z.array(actionPlanSchema), reviewState: reviewStateOutputSchema.optional(),
   pollingStatus: executionPollingStatusSchema, statusCategory: executionStatusCategorySchema(), pollingHint: executionPollingHintSchema(),

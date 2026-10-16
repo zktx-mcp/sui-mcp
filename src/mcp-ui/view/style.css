@@ -10,4 +10,3 @@ body { color: var(--ui-text); background: var(--ui-bg); }
    existing 400px chart height when the card has sufficient width. */
 .card-chart { height: clamp(280px, 75cqi, 400px); width: 100%; min-width: 0; }
 .card-progress-hint { display: flex; gap: 10px; align-items: center; color: var(--ui-text-muted); font-size: 12px; margin-block: 12px; }
-.card-progress-hint[hidden] { display: none; }

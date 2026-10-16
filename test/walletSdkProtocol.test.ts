@@ -1,3 +1,4 @@
+import { suiGrants } from "./fixtures/walletGrants.js";
 import { SERVER_VERSION } from "../src/mcp/serverInfo.js";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
@@ -22,9 +23,7 @@ class Peer extends EventEmitter {
   receive(event: WalletEvent) { this.emit("message", event); }
   snapshot(runId: string, sequence: number, version: number, ready = false, account = sdkFixtureAccount) {
     this.receive({ packageVersion: SERVER_VERSION, runId, type: "snapshot", ready, snapshot: { runId, sequence,
-      observedAt: "2030-01-01T00:00:00.000Z", sessions: [{ topic: sdkFixtureTopic, status: "present", version, session: {
-        topic: sdkFixtureTopic, accounts: [account], methods: ["sui_signTransaction"], chain: "sui:mainnet", expiresAt: "2099-01-01T00:00:00.000Z"
-      } }] } });
+      observedAt: "2030-01-01T00:00:00.000Z", sessions: [{ topic: sdkFixtureTopic, status: "present", lifecycleRevision: 1, grantRevisions: { "sui:mainnet": version, "eip155:1": 1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 1 }, session: { topic: sdkFixtureTopic, grants: suiGrants([account], ["sui_signTransaction"]), expiresAt: "2099-01-01T00:00:00.000Z" } }] } });
   }
 }
 const cleanups: (() => Promise<void>)[] = [];
@@ -70,8 +69,7 @@ it("does not use a check response superseded by a newer session observation", as
   const refused = expect(pending).rejects.toThrow("changed during confirmation");
   peer.snapshot(run.runId, 2, 2, false, `0x${"d".repeat(64)}`);
   peer.receive({ packageVersion: SERVER_VERSION, runId: run.runId, type: "checked", requestId: 1, operationId: "final-check", sequence: 1,
-    observation: { topic: sdkFixtureTopic, version: 1, status: "present", session: { topic: sdkFixtureTopic, accounts: [sdkFixtureAccount],
-      methods: ["sui_signTransaction"], chain: "sui:mainnet", expiresAt: "2099-01-01T00:00:00.000Z" } } });
+    observation: { topic: sdkFixtureTopic, lifecycleRevision: 1, grantRevisions: { "sui:mainnet": 1, "eip155:1": 1, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": 1 }, status: "present", session: { topic: sdkFixtureTopic, grants: suiGrants([sdkFixtureAccount], ["sui_signTransaction"]), expiresAt: "2099-01-01T00:00:00.000Z" } } });
   await refused;
   expect(peer.sent.filter((message) => message.type === "sign")).toHaveLength(0);
 });

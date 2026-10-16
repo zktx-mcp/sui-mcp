@@ -1,9 +1,11 @@
 import { z } from "zod";
-import { suiAddressStringSchema } from "../suiAddress.js";
+import { walletChainResultsSchema, fixedChainAccount, walletChainSchema, walletChainsSchema, walletGrantsSchema, walletGrantAccount,
+  walletGrantRevisionsSchema, SUI_MAINNET_WALLET_CHAIN, type WalletChainId, type WalletGrant } from "./chainAccounts.js";
 import type { WalletSessionInspection } from "./walletRuntime.js";
+import type { PendingWalletConnectionOperation } from "./walletConnectionOperations.js";
 import { transactionRequestStatusSchema } from "./transactionRequest.js";
 
-export const SUI_MAINNET_WALLET_CHAIN = "sui:mainnet" as const;
+export { SUI_MAINNET_WALLET_CHAIN } from "./chainAccounts.js";
 export const SUI_SIGN_TRANSACTION_METHOD = "sui_signTransaction" as const;
 export const WALLET_CONNECTION_POLL_SECONDS = 5;
 export const walletRunIdSchema = z.string().uuid();
@@ -28,7 +30,7 @@ export function walletUnavailable(reason: WalletUnavailableReason, walletRunId?:
   return { status: "unavailable", reason, message, ...(walletRunId === undefined ? {} : { walletRunId }) };
 }
 export class WalletUnavailableError extends Error {
-  constructor(readonly reason: WalletUnavailableReason, message = walletUnavailable(reason).message) { super(message); }
+  constructor(readonly availability: Exclude<WalletAvailability, { status: "available" }>) { super(availability.message); }
 }
 export const workflowProgressSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("idle") }).strict(),
@@ -50,7 +52,7 @@ export const walletConnectionStatusSchema = z.enum([
 export const walletRecoveryImpactSchema = z.object({
   runId: z.string().uuid(),
   connections: z.array(z.object({ connectionId: z.string().min(1), revision: z.number().int().nonnegative(),
-    status: walletConnectionStatusSchema, accounts: z.array(suiAddressStringSchema), walletName: z.string().optional(),
+    status: walletConnectionStatusSchema, chainResults: walletChainResultsSchema, walletName: z.string().optional(),
     sdkPending: z.boolean(), disconnectPending: z.boolean() }).strict()),
   preparations: z.array(z.object({ id: z.string().min(1), revision: z.number().int().nonnegative(),
     review_revision: z.number().int().nonnegative(), preparation_id: z.string().nullable(), wallet_connection_id: z.string().nullable() }).strict()),
@@ -60,63 +62,90 @@ export const walletRecoveryImpactSchema = z.object({
 }).strict();
 export type WalletRecoveryImpact = z.infer<typeof walletRecoveryImpactSchema>;
 export const walletConnectionSchema = z.object({
-  connectionId: z.string().min(1),
-  status: walletConnectionStatusSchema,
-  revision: z.number().int().nonnegative(),
-  accounts: z.array(suiAddressStringSchema),
-  methods: z.array(z.string()),
-  chain: z.literal(SUI_MAINNET_WALLET_CHAIN),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-  expiresAt: z.string().datetime(),
-  walletName: z.string().optional(),
-  reason: z.string().optional()
-}).strict();
+  connectionId: z.string().min(1), status: walletConnectionStatusSchema,
+  revision: z.number().int().nonnegative(), requestedChains: walletChainsSchema,
+  chainResults: walletChainResultsSchema, approvedAt: z.string().datetime().optional(),
+  grants: walletGrantsSchema, grantRevisions: walletGrantRevisionsSchema,
+  lifecycleRevision: z.number().int().nonnegative(),
+  createdAt: z.string().datetime(), updatedAt: z.string().datetime(), expiresAt: z.string().datetime(),
+  walletName: z.string().optional(), reason: z.string().optional()
+}).strict().superRefine((connection, context) => {
+  if (connection.chainResults.some((item) => !connection.requestedChains.includes(item.chainId)) ||
+      connection.approvedAt && connection.chainResults.length !== connection.requestedChains.length ||
+      !connection.approvedAt && connection.chainResults.length) {
+    context.addIssue({ code: "custom", message: "Approval results must match the exact requested networks." });
+  }
+});
 export type WalletConnection = z.infer<typeof walletConnectionSchema>;
-export type ConnectionView = WalletConnection & { pendingAction?: "disconnect" };
-export const connectionConflictSchema = z.object({
-  reason: z.literal("multiple_connections"),
-  connectionIds: z.array(z.string().min(1)).min(2).refine((ids) => new Set(ids).size === ids.length)
-}).strict();
-export type ConnectionConflict = z.infer<typeof connectionConflictSchema>;
-export const CONNECTION_CONFLICT_MESSAGE = "More than one wallet connection is saved. Disconnect the connections you no longer need before continuing.";
-export const CONNECTION_RECONCILIATION_MESSAGE = "A wallet connection in the connection service is not recorded here. Remove the retained connection in your wallet app, then check its status. If needed, open Settings and use Troubleshooting to restart the connection service and inspect it again. Restarting does not approve an unrecorded connection.";
-export type StoredReadAccount = { address: string; walletId?: string | undefined };
+export const connectionChainStateSchema = z.object({ chainId: walletChainSchema,
+  status: z.enum(["available", "multiple_accounts", "not_approved", "invalid_response", "unavailable"]), address: z.string().optional(),
+  suiSigningScopeApproved: z.boolean(), reason: z.string().optional() }).strict();
+export type ConnectionView = WalletConnection & {
+  sessionPresence?: "present" | "absent" | "unusable" | "unconfirmed";
+  disconnectImpact?: { impactId: string; requestCount: number; chains: WalletChainId[] };
+  chainStates?: z.infer<typeof connectionChainStateSchema>[] };
+export const CONNECTION_RECONCILIATION_MESSAGE = "An unexpected wallet session is retained by the connection service. Remove it in your wallet app, then check status. Only one wallet connection can be used here.";
 export const assetReadAccountSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("available"), account: suiAddressStringSchema }).strict(),
-  z.object({ status: z.literal("address_required") }).strict()
+  z.object({ status: z.literal("available"), account: z.string() }).strict(),
+  z.object({ status: z.literal("address_required"), reason: z.literal("read_address_cleared").optional() }).strict()
 ]);
 export type AssetReadAccount = z.infer<typeof assetReadAccountSchema>;
 
-// Private facts from the current SDK run, joined to the journal by topic.
-// Unknown inspection is not evidence of an empty connection service.
+// Recorded session identity and current-run facts; unknown is not absence.
 export type WalletConnectionPresence = {
-  confirmed: boolean; connections: { connectionId: string; expiresAt: string }[]; unrecorded: boolean; pendingConnectionIds: string[];
+  confirmed: boolean; managed: boolean; dataCurrent: boolean; pending: boolean;
+  hasRecordedSession: boolean; unrecorded: boolean;
+  observation?: { status: "present" | "absent" | "unusable"; expiresAt?: string };
 };
-export function walletConnectionSelection(connections: readonly ConnectionView[], at: number,
-  presence: WalletConnectionPresence, stored?: StoredReadAccount): {
-  connection?: ConnectionView; conflict?: ConnectionConflict; pairingAllowed: boolean; assetReadAccount: AssetReadAccount;
-  manageableConnectionIds: string[]; connectionReconciliationRequired?: true;
-} {
-  const connected = connections.filter((item) => item.status === "connected" && Date.parse(item.expiresAt) > at);
-  const pending = presence.pendingConnectionIds.length > 0 || connections.some((item) => item.pendingAction || item.status === "awaiting_approval");
-  const presentIds = presence.connections.map((item) => item.connectionId);
-  const occupied = new Set([...connected.map((item) => item.connectionId), ...presentIds]);
-  const reconciliation = presence.confirmed && presence.unrecorded && !pending;
-  const connection = presence.confirmed && !presence.unrecorded && occupied.size === 1 && connected.length === 1 &&
-    presence.connections.some((item) => item.connectionId === connected[0]!.connectionId && Date.parse(item.expiresAt) > at) && !pending ? connected[0] : undefined;
-  return {
-    ...(occupied.size > 1 ? { conflict: { reason: "multiple_connections" as const,
-      connectionIds: [...occupied].sort() } } : {}),
-    ...(reconciliation ? { connectionReconciliationRequired: true as const } : {}),
-    manageableConnectionIds: connections.filter((item) => !presence.pendingConnectionIds.includes(item.connectionId) && !item.pendingAction && item.status !== "awaiting_approval" &&
-      (item.status === "connected" || presence.confirmed && presentIds.includes(item.connectionId))).map((item) => item.connectionId),
-    ...(connection ? { connection } : {}),
-    pairingAllowed: presence.confirmed && !presence.unrecorded && occupied.size === 0 && !pending,
-    assetReadAccount: connection && stored?.walletId === connection.connectionId && connection.accounts.includes(stored.address)
-      ? { status: "available", account: stored.address } : { status: "address_required" }
-  };
+function connectionSessionPresence(connection: ConnectionView | undefined,
+  presence: WalletConnectionPresence): NonNullable<ConnectionView["sessionPresence"]> {
+  if (!presence.confirmed || !presence.managed) return "unconfirmed";
+  if (presence.hasRecordedSession) return presence.observation?.status ?? "unconfirmed";
+  // A settled attempt without approval has no session to inspect. Pending
+  // responses or unrecorded SDK sessions cannot establish that absence.
+  return !connection?.approvedAt && !presence.pending && !presence.unrecorded ? "absent" : "unconfirmed";
 }
+export function usableWalletConnection(connection: ConnectionView | undefined, at: number,
+  presence: WalletConnectionPresence, connectionId: string, chainId: WalletChainId, address?: string): ConnectionView | undefined {
+  if (!connection || connection.connectionId !== connectionId || !presence.hasRecordedSession || !presence.confirmed || !presence.managed ||
+      !presence.dataCurrent || presence.pending || presence.observation?.status !== "present") return undefined;
+  const fixed = fixedChainAccount(connection, chainId);
+  return fixed && (address === undefined || address === fixed) && connection.status === "connected" &&
+    Date.parse(connection.expiresAt) > at && Date.parse(presence.observation.expiresAt!) > at &&
+    walletGrantAccount(connection.grants, chainId, fixed) ? connection : undefined;
+}
+export function walletConnectionEligibility(connection: ConnectionView | undefined, at: number,
+  presence: WalletConnectionPresence, readAccount?: string, readAddressCleared = false) {
+  const usable = connection && usableWalletConnection(connection, at, presence, connection.connectionId, SUI_MAINNET_WALLET_CHAIN);
+  const sessionPresence = connectionSessionPresence(connection, presence);
+  const manageable = !!(connection && !presence.pending && ["present", "unusable"].includes(sessionPresence));
+  return { ...(presence.confirmed && presence.unrecorded ? { connectionReconciliationRequired: true as const } : {}),
+    ...(usable ? { connection: usable } : {}), manageable,
+    pairingAllowed: presence.confirmed && presence.managed && !presence.unrecorded && !presence.pending && sessionPresence === "absent",
+    assetReadAccount: usable && readAccount && readAccount === fixedChainAccount(usable, SUI_MAINNET_WALLET_CHAIN) && !readAddressCleared ? { status: "available" as const, account: readAccount }
+      : { status: "address_required" as const, ...(readAddressCleared ? { reason: "read_address_cleared" as const } : {}) } };
+}
+export function connectionHasSuiSigningScope(connection: WalletConnection, account: string): boolean {
+  const grant = walletGrantAccount(connection.grants, SUI_MAINNET_WALLET_CHAIN, account);
+  return fixedChainAccount(connection, SUI_MAINNET_WALLET_CHAIN) === account &&
+    !!grant?.methods.includes(SUI_SIGN_TRANSACTION_METHOD) && ["accountsChanged", "chainChanged"].every((event) => grant.events.includes(event));
+}
+export function projectWalletConnection(connection: ConnectionView | undefined, at: number,
+  presence: WalletConnectionPresence, available: boolean): ConnectionView | undefined {
+  const sessionPresence = available ? connectionSessionPresence(connection, presence) : "unconfirmed";
+  return connection && { ...connection, sessionPresence, chainStates: connection.chainResults.map((result) => {
+    const address = result.status === "bound" ? result.address : undefined;
+    const usable = !!(available && address && usableWalletConnection(connection, at, presence, connection.connectionId, result.chainId, address));
+    return { chainId: result.chainId, status: result.status === "bound" ? usable ? "available" as const : "unavailable" as const : result.status,
+      ...(address ? { address } : {}), suiSigningScopeApproved: result.chainId === SUI_MAINNET_WALLET_CHAIN && !!address && connectionHasSuiSigningScope(connection, address),
+      ...(!usable ? { reason: sessionPresence === "absent" ? "The wallet session is no longer present. Connect again to use this network."
+        : result.status === "multiple_accounts" ? "The wallet returned several addresses. Disconnect and connect again with one account for this network."
+        : result.status === "not_approved" ? "The wallet did not approve this network."
+          : result.status === "invalid_response" ? "The wallet returned invalid account information."
+            : "This fixed address is not currently usable through this connection." } : {}) };
+  }) };
+}
+
 export type WalletConnectionStatus = WalletConnection["status"];
 export class WalletUserRejectedError extends Error {
   constructor() { super("The wallet request was rejected by the user."); }
@@ -128,7 +157,10 @@ export type WalletConnectionRecord = {
   ownerId: string;
   topic?: string;
   sdkPending: boolean;
+  disconnectPending: boolean;
+  pendingOperation?: PendingWalletConnectionOperation;
   runId?: string;
+  current: boolean; dataEpoch: number; readAddressCleared: boolean;
 };
 
 // Shared recorded connection facts only. Each operation checks its own expiry,
@@ -140,21 +172,19 @@ export function isOwnedConnectedWallet(record: WalletConnectionRecord | undefine
 
 export type WalletSession = {
   topic: string;
-  accounts: string[];
-  methods: string[];
-  chain: typeof SUI_MAINNET_WALLET_CHAIN;
+  grants: WalletGrant[];
   expiresAt: string;
   walletName?: string | undefined;
 };
 
 export interface WalletTransport {
   restore(): Promise<WalletSession[]>;
-  connect(): Promise<{ uri: string; expiresAt: string; approval: Promise<WalletSession> }>;
+  connect(chains: readonly WalletChainId[]): Promise<{ uri: string; expiresAt: string; approval: Promise<WalletSession> }>;
   disconnect(topic: string): Promise<void>;
   sign(input: { topic: string; account: string; transactionBytesBase64: string }): Promise<{
     transactionBytes: string; signature: string;
   }>;
-  onSessionChanged(listener: (topic: string, selectionChanged?: boolean) => void): () => void;
+  onSessionChanged(listener: (topic: string, changedChains?: readonly WalletChainId[]) => void): () => void;
   session(topic: string): WalletSession | undefined;
   inspect(topic: string): WalletSessionInspection;
   inspectAll(): WalletSessionInspection[];

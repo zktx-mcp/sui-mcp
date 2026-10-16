@@ -1,3 +1,5 @@
+import { seedReadAddressCleared, seedCurrentReadAccount } from "./fixtures/readAccount.js";
+import { suiGrants } from "./fixtures/walletGrants.js";
 import type { ActivityStore } from "../src/core/activity/activityStore.js";
 import type { WalletWorkflow } from "../src/core/session/walletWorkflow.js";
 import { walletWorkflowFixture } from "./fixtures/walletWorkflow.js";
@@ -137,13 +139,14 @@ async function connectTestClient(
     readService?: SuiReadService;
     transactionActivitySource?: SuiTransactionActivitySource;
     sessionTtlMs?: number;
+    sessions?: McpServerDeps["sessions"];
     cards?: McpServerDeps["cards"];
   } = {}
 ) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const activityStore = options.activityStore ?? new InMemoryActivityStore();
   const localSettings = options.localSettings ?? (await createDefaultLocalSettings());
-  const sessions = new InMemorySessionStore({
+  const sessions = options.sessions ?? new InMemorySessionStore({
     activityStore,
     logger: testLogger,
     validateAdapterLifecycle: validateSupportedAdapterLifecycle,
@@ -434,7 +437,7 @@ describe("MCP discoverability", () => {
       expect(client.getInstructions()).toContain("mainnet-only");
       expect(client.getInstructions()).toContain("Ordinary MCP tools return evidence or internal cards");
       expect(client.getInstructions()).toContain("never signing authority, bytes or signatures");
-      expect(client.getInstructions()).toContain("Only user card selection and wallet approval");
+      expect(client.getInstructions()).toContain("Only user card input and wallet approval authorize WalletConnect");
       expect(client.getInstructions()).toContain("Request status is separate from chain success/failure");
       expect(client.getInstructions()).toContain("toolAvailability.requiredToolsAvailable");
       expect(client.getInstructions()).toContain("userAnswerUse.answerFields");
@@ -474,6 +477,7 @@ describe("MCP discoverability", () => {
         "ui://sui-mcp/account.html",
         "ui://sui-mcp/chart.html",
         "ui://sui-mcp/connect.html",
+        "ui://sui-mcp/disconnect.html",
         "ui://sui-mcp/receipt.html",
         "ui://sui-mcp/review.html",
         "ui://sui-mcp/settings.html"
@@ -876,7 +880,7 @@ describe("MCP discoverability", () => {
   it("exposes live read-only tools through MCP", async () => {
     const walletFixture = await walletWorkflowFixture();
     try { await walletFixture.run(async () => {
-    const { client, server, activityStore } = await connectTestClient({ activityStore: walletFixture.activity, workflow: walletFixture.workflow });
+    const { client, server } = await connectTestClient({ activityStore: walletFixture.activity, workflow: walletFixture.workflow });
     try {
       const tools = await client.listTools();
       const deepbookReadToolNames = new Set<string>([
@@ -1000,9 +1004,7 @@ describe("MCP discoverability", () => {
           details: { reason: "connected_account_required", followUp: { tool: TOOL_NAMES.sessionGetInteractionStatus } }
         }
       });
-      const { connection: selectedConnection } = await walletFixture.approve();
-      walletFixture.notify({ ...walletFixture.transport.session("fixture-topic")!, accounts: [walletAccount] });
-      await activityStore.setActiveAccount(walletAccount, "wallet_connection", undefined, { id: selectedConnection.connectionId });
+      await walletFixture.connectSession({ topic: "inventory-source", grants: suiGrants([walletAccount]), expiresAt: new Date(walletFixture.now().getTime() + 60000).toISOString() });
       const wallet = await client.callTool({
         name: TOOL_NAMES.readSummarizeWalletAssets,
         arguments: {}
@@ -1914,7 +1916,7 @@ describe("MCP discoverability", () => {
         ok: false,
         error: { kind: "active_account_not_set" }
       });
-      await activityStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:03.000Z"));
+      await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-05-11T00:00:03.000Z"));
       const { session: reviewSession } = await sessions.createReviewSession([reviewPlan], new Date("2026-05-11T00:01:00.000Z"));
       await sessions.recordWalletConnected(reviewSession.id, walletAccount, new Date("2026-05-11T00:01:02.000Z"));
       const reviewState: ReviewState = {
@@ -2066,7 +2068,7 @@ describe("MCP discoverability", () => {
       expect(tools.tools.find((tool) => tool.name === TOOL_NAMES.readSummarizeSuiActivityScan)?.description)
         .toMatch(/requested-account facts/);
 
-      await activityStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       const digestLookup = await client.callTool({
         name: TOOL_NAMES.readInspectSuiTransaction,
         arguments: { digest: "5".repeat(44) }
@@ -2679,7 +2681,7 @@ describe("MCP discoverability", () => {
   it("returns stored account asset timeline evidence without claiming balances or complete wallet history", async () => {
     const { client, server, activityStore } = await connectTestClient();
     try {
-      await activityStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-06-26T19:40:00.000Z"));
+      await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-06-26T19:40:00.000Z"));
 
       const scanNeeded = await client.callTool({
         name: TOOL_NAMES.readGetAccountAssetTimeline,
@@ -2904,7 +2906,7 @@ describe("MCP discoverability", () => {
       transactionActivitySource: mixedDetailsSource
     });
     try {
-      await activityStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+      await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await client.callTool({
         name: TOOL_NAMES.readScanSuiAccountActivity,
         arguments: { relationship: "sent" }
@@ -2952,7 +2954,7 @@ describe("MCP discoverability", () => {
     }
   });
 
-  it("refuses swap review preparation without an active wallet account", async () => {
+  it("refuses swap review creation when its wallet service dependency is absent", async () => {
     const { client, server } = await connectTestClient();
     try {
       const result = await client.callTool({
@@ -2971,7 +2973,7 @@ describe("MCP discoverability", () => {
       // refuse instead of creating a hollow proposal that can never compute.
       expect(textPayload(result)).toMatchObject({
         ok: false,
-        error: { kind: "active_account_not_set", details: { action: "connect_wallet_connection" } }
+        error: { kind: "wallet_unavailable", details: { action: "check_exact_wallet_account", reason: "wallet_unavailable" } }
       });
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
@@ -2981,7 +2983,7 @@ describe("MCP discoverability", () => {
   it("reports blocked execution waits as user action required through MCP", async () => {
     const { client, server, sessions, activityStore } = await connectTestClient({ sessionTtlMs: durableFixtureSessionTtlMs });
     try {
-      await activityStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:03.000Z"));
+      await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-05-11T00:00:03.000Z"));
       const { session: reviewSession } = await sessions.createReviewSession([reviewPlan], new Date("2026-05-11T00:01:00.000Z"));
       await sessions.recordWalletConnected(reviewSession.id, walletAccount, new Date("2026-05-11T00:01:02.000Z"));
       await sessions.recordReviewState(
@@ -3043,7 +3045,7 @@ describe("MCP discoverability", () => {
         ok: true,
         data: { status: "none" }
       });
-      await activityStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:03.000Z"));
+      await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-05-11T00:00:03.000Z"));
 
       const active = await client.callTool({ name: TOOL_NAMES.accountGetActiveAccount });
       expect(JSON.parse((active.content as Array<{ text?: string }>)[0]?.text ?? "")).toMatchObject({
@@ -3108,7 +3110,7 @@ describe("MCP discoverability", () => {
 
     try {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-      await activityStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:03.000Z"));
+      await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-05-11T00:00:03.000Z"));
       const result = await client.callTool({
         name: TOOL_NAMES.readSummarizeWalletAssets,
         arguments: { account: walletAccount }
@@ -3169,7 +3171,7 @@ describe("MCP discoverability", () => {
     const { client, server, activityStore } = await connectTestClient({ readService });
 
     try {
-      await activityStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:03.000Z"));
+      await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-05-11T00:00:03.000Z"));
       const result = await client.callTool({
         name: TOOL_NAMES.readSummarizeWalletAssets,
         arguments: { account: walletAccount }
@@ -3192,9 +3194,6 @@ describe("MCP discoverability", () => {
     const activityStore = new InMemoryActivityStore();
     const getActiveAccount = vi
       .spyOn(activityStore, "getActiveAccount")
-      .mockRejectedValue(new Error("local database unavailable"));
-    const clearActiveAccount = vi
-      .spyOn(activityStore, "clearActiveAccount")
       .mockRejectedValue(new Error("local database unavailable"));
     const serverWithLogger = createMcpServer({
       sessions: new InMemorySessionStore({
@@ -3247,13 +3246,11 @@ describe("MCP discoverability", () => {
       await expect(replacementClient.callTool({ name: "account.clear_active_account", arguments: {} })).rejects.toMatchObject({
         code: -32602, message: "Tool account.clear_active_account not found"
       });
-      expect(clearActiveAccount).not.toHaveBeenCalled();
       expect(logger.error).toHaveBeenCalledWith("activity store call failed", {
         error: "local database unavailable"
       });
     } finally {
       getActiveAccount.mockRestore();
-      clearActiveAccount.mockRestore();
       await Promise.allSettled([serverWithLogger.close(), replacementClient.close()]);
     }
   });
@@ -3263,7 +3260,7 @@ describe("MCP discoverability", () => {
     const activityStore = new InMemoryActivityStore();
     // Account-bound prepare needs an active account to reach the (mocked)
     // session store call this test exercises.
-    await activityStore.setActiveAccount(walletAccount, "wallet_connection", new Date("2026-05-11T00:00:00.000Z"));
+    await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const sessions = new InMemorySessionStore({
       activityStore,
       logger,
@@ -3305,18 +3302,6 @@ describe("MCP discoverability", () => {
         {
           name: TOOL_NAMES.sessionWaitExecutionResult,
           arguments: { reviewSessionId: "review", timeoutMs: 1 }
-        },
-        {
-          name: TOOL_NAMES.actionStartReview,
-          arguments: {
-            intent: {
-              type: "swap",
-              from: { symbol: "SUI", amount: "1" },
-              to: { symbol: "USDC" },
-              maxSlippageBps: 50,
-              protocol: "deep"
-            }
-          }
         },
         {
           name: TOOL_NAMES.actionCreateProposalReview,
@@ -3363,16 +3348,16 @@ it.each(["missing_selection", "disconnected", "expired", "pending_disconnect", "
     const approved = f.transport.session("fixture-topic");
     if (condition === "disconnected") f.notify();
     if (condition === "sdk_missing") vi.spyOn(f.transport, "session").mockReturnValue(undefined);
-    if (condition === "different_account") vi.spyOn(f.transport, "session").mockReturnValue({ ...approved!, accounts: [replacementWalletAccount] });
+    if (condition === "different_account") vi.spyOn(f.transport, "session").mockReturnValue({ ...approved!, grants: suiGrants([replacementWalletAccount]) });
     if (condition === "expired") vi.spyOn(f.transport, "session").mockReturnValue({ ...approved!, expiresAt: new Date(f.now().getTime() - 1).toISOString() });
     if (condition === "unavailable") vi.spyOn(f.transport, "session").mockImplementation(() => { throw new Error("PRIVATE SDK FAILURE"); });
     if (["sdk_missing", "different_account", "expired", "unavailable"].includes(condition)) f.observe();
-    if (condition === "cleared") await f.activity.clearActiveAccount(f.now());
+    if (condition === "cleared") await seedReadAddressCleared(f.activity);
     if (condition === "database_error") vi.spyOn(f.activity, "getActiveAccount").mockRejectedValue(new Error("PRIVATE DB FAILURE"));
     if (condition === "pending_disconnect") {
       const pending = new Promise<void>((resolve) => { finishDisconnect = resolve; });
       vi.mocked(f.transport.disconnect).mockImplementationOnce(() => pending);
-      const card = await f.createConnection(); await f.act(card, { action: "disconnect", connectionId });
+      const card = await f.createDisconnection(); await f.act(card, { action: "disconnect", connectionId });
     }
     const { client, server } = await connectTestClient({ activityStore: f.activity, readService,
       ...(condition === "workflow_absent" ? {} : { workflow: f.workflow }) });
@@ -3385,9 +3370,10 @@ it.each(["missing_selection", "disconnected", "expired", "pending_disconnect", "
       expect(error.details.field).toBeUndefined(); expect(error.details.action).not.toBe("provide_account");
       expect(JSON.stringify(error)).not.toMatch(/Please provide a Sui address|PRIVATE SDK FAILURE|PRIVATE DB FAILURE/);
       expect(inventory).not.toHaveBeenCalled();
+      if (condition === "cleared") expect(error.details.message).toContain("The saved read address was cleared in Settings");
       if (!unavailable && condition !== "database_error") {
         expect(error.details.followUp).toMatchObject({ tool: TOOL_NAMES.sessionGetInteractionStatus,
-          answerFields: ["walletAvailability", "connections", "pendingWalletConnections", "assetReadAccount"] });
+          answerFields: ["walletAvailability", "connection", "pendingWalletConnections", "assetReadAccount"] });
         const tools = (await client.listTools()).tools;
         expect(tools.some((tool) => tool.name === error.details.followUp.tool)).toBe(true);
         const state = (textPayload(await client.callTool({ name: error.details.followUp.tool, arguments: {} })) as { data: unknown }).data;
@@ -3413,4 +3399,71 @@ it.each(["missing_selection", "disconnected", "expired", "pending_disconnect", "
     }
     inventory.mockRestore(); f.close();
   }
+});
+
+
+it("asks for an explicit address across activity reads after Clear without changing the live wallet", async () => {
+  const f = await walletWorkflowFixture();
+  try { await f.run(async () => {
+    const { connection } = await f.approve();
+    const { client, server, sessions } = await connectTestClient({ activityStore: f.activity, workflow: f.workflow });
+    try {
+      const { session } = await sessions.createReviewSession([reviewPlan], f.now());
+      await sessions.recordWalletConnected(session.id, f.account, f.now());
+      await seedReadAddressCleared(f.activity);
+      const current = f.records.currentConnection();
+      const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [
+        { name: TOOL_NAMES.readListReviewActivity, arguments: {} },
+        { name: TOOL_NAMES.readSummarizeReviewFunnel, arguments: {} },
+        { name: TOOL_NAMES.readGetReviewSessionDetail, arguments: { reviewSessionId: session.id } },
+        { name: TOOL_NAMES.readScanSuiAccountActivity, arguments: {} },
+        { name: TOOL_NAMES.readSummarizeSuiActivityScan, arguments: {} },
+        { name: TOOL_NAMES.readScanSuiFunctionActivity, arguments: { function: "0x2::coin::transfer" } },
+        { name: TOOL_NAMES.readSummarizeSuiFunctionActivityScan, arguments: { function: "0x2::coin::transfer" } },
+        { name: TOOL_NAMES.readSummarizeSuiAccountActivity, arguments: {} },
+        { name: TOOL_NAMES.readGetAccountAssetTimeline, arguments: {
+          start: "2026-06-26T19:40:00.000Z", end: "2026-06-26T20:10:00.000Z"
+        } }
+      ];
+      for (const call of calls) {
+        expect(textPayload(await client.callTool(call))).toMatchObject({ ok: false,
+          error: { kind: "active_account_not_set", details: { action: "provide_account" } } });
+        const explicit = textPayload(await client.callTool({ ...call, arguments: { ...call.arguments, account: f.account } }));
+        expect(explicit).toMatchObject({ ok: true, data: call.name === TOOL_NAMES.readGetAccountAssetTimeline
+          ? { account: f.account, coverage: { accountSource: "explicit_filter" } }
+          : { accountSource: "explicit_filter" } });
+      }
+      expect(f.records.currentConnection()).toEqual(current);
+      expect(f.workflow.resolveReviewTarget()).toEqual({ status: "available", connectionId: connection.connectionId, account: f.account });
+      expect(f.transport.disconnect).not.toHaveBeenCalled(); expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+    } finally { await client.close(); await server.close(); }
+  }); } finally { f.close(); }
+});
+
+it("reports an unrecorded wallet session through the review gateway without creating another review or financial effect", async () => {
+  const f = await walletWorkflowFixture();
+  try { await f.run(async () => {
+    const { connection } = await f.approve(), ready = await f.prepare(connection.connectionId);
+    const { client, server } = await connectTestClient({ activityStore: f.activity, workflow: f.workflow,
+      sessions: f.sessions, cards: { store: f.cards } });
+    const createSession = vi.spyOn(f.sessions, "createReviewSession"), createCard = vi.spyOn(f.cards, "create");
+    try {
+      const originalReview = f.sessions.readReviewSession(ready.session.id);
+      expect(originalReview).toMatchObject({ status: "ready_for_wallet_review", walletConnectionId: connection.connectionId, account: f.account });
+      f.notify({ topic: "unrecorded-gateway-session", grants: suiGrants([f.account]), expiresAt: connection.expiresAt });
+      expect(f.runtime.availability().status).toBe("available");
+      expect(f.records.isUsableConnection(connection.connectionId)).toBe(true);
+      const result = await client.callTool({ name: TOOL_NAMES.actionStartReview, arguments: { intent: {
+        type: "swap", from: { symbol: "SUI", amount: "1" }, to: { symbol: "USDC" }, maxSlippageBps: 50, protocol: "deep"
+      } } });
+      expect(result.isError).toBe(true);
+      expect(textPayload(result)).toMatchObject({ ok: false, error: { kind: "input_invalid",
+        details: { reason: "connection_state_unconfirmed", action: "check_exact_wallet_account" } } });
+      expect(createSession).not.toHaveBeenCalled(); expect(createCard).not.toHaveBeenCalled();
+      expect(f.sessions.readReviewSession(ready.session.id)).toEqual(originalReview);
+      expect(f.records.currentRequest(ready.session.id)).toBeUndefined();
+      expect(f.quote).toHaveBeenCalledOnce(); expect(f.connect).toHaveBeenCalledOnce();
+      expect(f.transport.disconnect).not.toHaveBeenCalled(); expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+    } finally { createSession.mockRestore(); createCard.mockRestore(); await client.close(); await server.close(); }
+  }); } finally { f.close(); }
 });

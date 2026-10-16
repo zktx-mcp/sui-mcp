@@ -33,7 +33,7 @@ User-requested bounded transaction scans can store normalized facts only when a 
 
 The default Sui mainnet gRPC and GraphQL endpoints are stored in the local SQLite settings table on first run.
 
-To inspect settings or change local data, ask for the internal Settings card. Ordinary MCP creates an unsubmitted card or reads settings; scoped app-only preparation/confirmation owns changes. No external page or Settings HTTP API remains.
+To inspect settings or change local data, ask for the internal Settings card. Ordinary MCP creates an unsubmitted card or reads settings; scoped app-only user input applies changes. Endpoint changes, data replacement and service restart require their concrete impact confirmation. No external page or Settings HTTP API exists.
 
 Endpoint changes apply after the MCP server restarts.
 
@@ -84,8 +84,7 @@ WAL mode can create companion files next to the main database, such as `sui-mcp.
 
 ## Tables
 
-- `accounts`: normalized Sui account addresses and first/last use timestamps.
-- `active_account_context`: a single-row read context. It can point to one active account or be cleared.
+- `accounts`: normalized `(chain_id, address)` identities and first/last use timestamps for supported mainnets.
 - `review_sessions`: review session header, current status, full action plan JSON, and materialized requested intent JSON when present.
 - `review_state_snapshots`: append-only account-bound `ReviewState` snapshots with status and reason columns for queryability.
 - `review_status_transitions`: append-only review lifecycle timing for funnel and review-timing analysis.
@@ -93,20 +92,21 @@ WAL mode can create companion files next to the main database, such as `sui-mcp.
 - `review_executions`: verified chain success/failure, keyed by `attempt_id` and bound to review session, account, plan and digest. Wallet rejection and uncertainty never create a chain failure row.
 - `external_activity_scans`: user-requested digest lookups, bounded account scans, or sent-function scans, including request window, endpoint host, chain identifier, continuation metadata, coverage signals, and internal scan-kind provenance.
 - `external_activity_transactions`: normalized Sui transaction facts linked to a known local account and the first/last scan that observed them. The optional detail JSON stores typed facts such as capped Move call targets, raw balance changes, object changes, event summaries, gas raw cost fields, execution errors, and truncation flags when GraphQL returns them. Each stored detail JSON value is capped at 64 KiB.
-- `local_settings`: allowlisted local settings. The current key set is `suiGrpcUrl` and `suiGraphqlUrl`, stored as JSON-encoded text and applied after restart.
+- `local_settings`: allowlisted local settings. The keys are `suiGrpcUrl`, `suiGraphqlUrl` and `walletConnectionChains`, stored as JSON. Endpoints apply after restart; requested networks apply only to new connections.
 - `coin_metadata_cache`: account-independent positive cache for Sui coin metadata used only to format wallet balance display amounts. Rows are keyed by normalized coin type and verified mainnet chain identifier, expire after 24 hours, and are excluded from local data export/import. Read or write failures for this cache block affected wallet unit reads with `metadata_cache_unavailable`; they are not reported as unavailable token decimals.
 
 The following live session tables hold runtime session state in the shared database so the shared backend can serve cards and sessions created by participating clients (see [Shared local server](#shared-local-server)):
 
 - `live_review_sessions`: the live review session record — status, bound
-  account, preparation/connection revision, current attempt reference,
+  account, preparation/Sui grant revision, current attempt reference,
   plan/review-state JSON, timestamps, revision and write-contract marker —
   keyed by session id.
 - `live_private_review_artifacts`: per-session private review evidence (the transaction-material handle, its digest commitment, and derived evidence), cascade-deleted with its review session.
 - `live_transaction_materials`: locally built unsigned transaction bytes stored as a BLOB behind a redacted handle, with a TTL; retained for the admitted request. Terminal request cleanup removes only material still owned by that revision, preserving newer preparation. Owner replacement deletes old private material while retaining immutable review and chain-result evidence.
-- `live_wallet_connections`: verified connection facts, private topic and callback state.
+- `live_wallet_connections`: connection history and at most one current row, enforced by nullable `current_slot` (NULL or 1) and UNIQUE. The row owns its admission `data_epoch`, private topic, immutable requested scope/`chainResults`, current grants, per-chain grant revisions and `read_address_cleared`. Fixed addresses use chain/address identity, not replaceable public account IDs.
+- `wallet_connection_operations`: at most one Connect/Disconnect operation per card (unique card_id), exact input, owner/run/data epoch, deadline, immutable result and pending SDK settlement. Operation identity is distinct from connection identity.
 - `live_read_cards`: public card state with private permission hash, scope, operation and CAS revision.
-- `settings_operations`: one draft/upload/preparation/admission/result identity per Settings card, with owner/data epoch, user-data revision, fingerprint and SDK supersession/checkpoint facts. A download stores its typed snapshot lifetime and per-attempt delivery reports in private `preparation_json`, separately from the immutable result. Updating delivery never reserializes a terminal `result_json`.
+- `settings_operations`: one draft/upload/preparation/admission/result identity per ordinary Settings card; read-only status and new backup-delivery cards reference that operation rather than duplicating it, with owner/data epoch, user-data revision, fingerprint and SDK supersession facts. Wallet network saving binds the selected and previously displayed networks, applies the setting and records its result atomically. A download stores its typed snapshot lifetime and per-attempt delivery reports in private `preparation_json`, separately from the immutable result. Updating delivery never reserializes a terminal `result_json`.
 - `settings_files`: private file identity, original operation, upload/export role, generated paths, lengths/hash, chunk reservation and seal/invalidation/cleanup state. `cleanup_operation_id` separately names the operation responsible for cleanup; replacement can transfer that responsibility without changing the file identity, public path or input eligibility.
 - `settings_control`: current data epoch/user-data revision, one final-operation slot, one file-I/O reservation and the SDK input block owner. These are semantic state/authority facts, not release-version counters.
 
@@ -116,7 +116,7 @@ Database columns use snake_case. MCP and HTTP JSON fields use camelCase, so the 
 
 Table relationships:
 
-- `active_account_context.account_id` and `review_sessions.account_id` point to `accounts.id` when an account is present.
+- `accounts` has an id primary key and unique `(chain_id,address)`. Sui financial history references Sui account rows; another chain cannot become a Sui history or signer target. There is no mutable per-chain default selector.
 - `review_state_snapshots`, `review_status_transitions`, and `review_executions` point to `review_sessions.id` through `review_session_id` and can also point to `accounts.id` through `account_id`.
 - `external_activity_scans.account_id` points to `accounts.id`. It records which known local account the user-requested lookup or scan was scoped to.
 - `external_activity_transactions.account_id` points to `accounts.id`, and `first_scan_id` / `last_scan_id` point to `external_activity_scans.scan_id`. `known_sender_account_id` points to `accounts.id` only when the sender is also a known local account. Non-known party account addresses are not stored; normalized detail JSON keeps account-owner and event-sender fields only when they match the known local account.
@@ -144,24 +144,34 @@ never recreates that result from a callback after deleting it. Rollback
 preserves the prior data, permissions and admission state.
 The private `live_wallet_connections` service journal remains because replacing
 user data does not end SDK sessions. It cannot restore old card permissions or
-transaction authority and is not imported from a backup. Reset clears the
-default address; an imported default still needs its exact current connection
-ID and approved address. Outstanding connection SDK callbacks also block replacement.
+transaction authority and is not imported from a backup. Reset/import advance the data generation and restore no active wallet context.
+The retained connection is available for cleanup only; a new explicit connection
+is required for new financial input. Outstanding connection SDK callbacks also block replacement.
 
 User-data and wallet/request writers invalidate affected preparations and
-increment their card revision in the same transaction. The trigger and `settings_back`
+increment their active card revision in the same transaction; they never update a closed card. The trigger and `settings_back`
 reuse one SQL transition: a complete, sealed, non-invalidated upload belonging
 to that operation returns to sealed; other preparations return to draft. Old
 confirmations cannot apply. Backup checking and final I/O still verify physical content;
 a manifest alone is not proof of a valid file.
+
+Settings operation writes atomically invalidate an upload when its input is
+replaced, its draft changes away from import, or its use ends. The file keeps its
+identity and cleanup owner until physical cleanup succeeds. Back that preserves
+an eligible selected upload does not invalidate it. Filesystem cleanup runs after
+the stored effect/result; cleanup failure cannot repeat that effect or replace
+its immutable result.
 
 A `download_backup` admission consumes one card input and captures one local-data
 snapshot in the same SQLite transaction. The export role and exact generated
 `.settings-staging/<fileId>.download` namespace identify its private file; an
 export role or display name alone is insufficient. File bytes are not stored
 in operation JSON or nested in exported local data. Physical write, fsync, length and SHA checks
-finish before the snapshot becomes available. `result` is immutable preparation
-evidence; delivery reports have separate typed state and atomic attempt identity.
+finish before the snapshot becomes available; readiness does not end its card.
+Delivery attempts bind their owning card IDs in the existing journal. The card
+closes with its Host report, verified local publication, expiry, failure or Cancel.
+A new explicit delivery uses a new card, the exact same file and original TTL.
+Late reports update the domain journal without altering an ended card.
 
 An exact unsupported download report can atomically reserve final/file I/O and
 admit local publication of that same snapshot. An earlier possibly handled
@@ -177,8 +187,8 @@ is committed before exclusive same-volume hard-link publication. The source and
 target must name the recorded file and pass size/SHA checks before `saved` is
 committed. Existing destinations are never overwritten or removed. Private
 unlink follows that result and actual descriptor closure; the final file has
-no automatic expiry. Historical export path validation remains distinct from
-the private `.download` row identity.
+no automatic expiry. Private cleanup validates the exact `.download` row identity and never removes
+a user backup.
 
 Unknown file effects remain `saving`, retaining their source and reservations.
 A failed DB result write retains the ended physical outcome for settlement.
@@ -213,7 +223,7 @@ cleanup stays visible. Another operation's reservation is never released.
 An explicit same-result read may finish its cleanup or verify an existing
 published export, never regenerate a backup, repeat Host delivery, reapply data
 or replace an SDK run. Files/permissions/SDK credentials/private transaction
-material are excluded from public backups. Clearing the default address does
+material are excluded from public backups. Clearing the saved read address does
 not invalidate account-independent coin metadata or disconnect the wallet.
 
 Non-terminal review session expiry is recorded lazily when the session is read or mutated after its TTL. Review-session expiry has no background worker; private download retention uses the separate owner timer described above.
@@ -228,7 +238,11 @@ All state-writing MCP callers use this owner, including reads that save activity
 
 ### Read cards
 
-`live_read_cards` owns the card kind (account, receipt, chart, connect, review or settings), permission hash, backend owner, revision, original/accepted input, state/reason and saved result or scoped workflow operation reference. Business request status is not copied into a separate card state machine. Admission and result writes use conditional updates. Expiry is applied by the backend to unsubmitted input; a View timer only requests state. Frame recreation and chat navigation perform no close transition. The backend rejects late writes after local data replacement or owner changes, and recovery closes unfinished cards without repeating their source query.
+`live_read_cards` owns the card kind (account, receipt, chart, connect, disconnect, review or settings), permission hash, backend owner, revision, original/accepted input, state/reason and saved result or scoped workflow operation reference. Domain request state remains in its existing journal. At closure, a typed public
+result is saved atomically in live_read_cards.result_json. A database trigger
+rejects updates to closed rows. Domain callbacks skip them; closed reads return
+only that saved result, not current wallet or Settings projections. Connect and
+Disconnect terminal results exclude addresses and QR data. Admission and result writes use conditional updates. Expiry is applied by the backend to unsubmitted input; a View timer only requests state. Frame recreation and chat navigation perform no close transition. The backend rejects late writes after local data replacement or owner changes, and recovery closes unfinished cards without repeating their source query.
 
 The same record contains a model-safe result and, for receipts, separately validated UI-only input values and PTB display data. They are projections of one source read. They are not activity evidence or serialized signing material. Public saved resources exclude the private partition, and product backups exclude card records and permission hashes entirely.
 
@@ -279,48 +293,61 @@ perform a current session check. After digest, signer and mainnet verification,
 the parent performs a final session check before the synchronous submission CAS
 and dispatch. A later remote event is not presumed already known.
 
-Historical service-recovery results in `live_read_cards` remain readable;
-Connect accepts no new service-restart input. Parent recovery closes unfinished
-cards as `server_restarted`. SDK callback flags remain pending until actual
-child exit, while parent verification, submission and lookup flags remain until
-their own work ends. SDK readiness does not clear those independent guards.
+Connect accepts no service-restart input; Settings owns that operation. Parent
+recovery closes old card input and settles interrupted management outcomes without
+replaying effects. Pending SDK work is released only after actual child exit or
+confirmed acquisition of its private store by a new child. Parent verification,
+submission and lookup retain their independent completion guards.
 
-Initial SDK restoration considers the entire known connection set, including
-prior-owner records, before publishing current eligibility. Confirmed known
-connected records transfer to the new owner. Known terminal records with a
-present SDK session transfer management metadata without changing their outcome.
-Multiple known occupied connections are management targets, not usable wallet
-choices: `connectionConflict` is derived from the journal and current supervisor
-snapshot, with no additional table. Targeted disconnection remains
-available while new pairing, account use, review preparation and signing are
-blocked. The final submission transaction applies the same single-connection
-rule. Failed/stopped records and unknown SDK sessions do not restore authority.
+Recovery evaluates the one current slot against a fresh SDK run, including rows
+from a previous owner or data generation. Missing exact topics require the SDK
+session check before absence is recorded. Confirmed absence plus settled I/O
+releases occupancy; a stale connected row is not a permanent lock. A valid approved
+current-generation session can regain usage. Terminal, unusable or older-generation
+sessions receive cleanup ownership only, allowing exact Disconnect without granting
+financial authority. Immutable results and read-address suppression remain intact.
+Unknown SDK sessions are never adopted and block new pairing/financial inputs.
 
-`active_account_context.wallet_id` preserves the connection through which the
-default address was selected. Current eligibility requires that exact ID and
-an approved address in the sole unexpired connection, with no pending connection
-operation. Missing source IDs remain valid historical/import data but require
-explicit selection before current default use. Eligibility is derived at the
-database evaluation time and published to cards as `usableConnectionId` and
-`assetReadAccount`; Views do not recount recorded connections. Stored status, disconnection outcomes and historical
-account records retain their separate meanings.
-The store reads the current run's private supervisor snapshot inside evaluation
-and immediate admission. Missing inspection does not mean an empty service.
-`manageableConnectionIds` names exact nonpending recorded disconnect targets,
-including known terminal records whose SDK sessions remain present. They are not
-usable account choices. `connectionReconciliationRequired: true` means a present
-SDK session has no journal target after ordinary registration/cleanup has ended;
-it blocks pairing, account use and unsubmitted signing until the user removes the
-retained connection in the wallet app and a complete current-run observation
-confirms absence. Settings can explicitly restart the service to inspect it
-again; restart alone does not resolve retained presence. Topics remain private. A pending registration
-is not reported as a reconciliation failure.
+Fixed identity is `(chainId, normalizedAddress)`. Import/reset account-ID reuse
+cannot retarget private connections. Public backups contain address history,
+records and settings, excluding selectors, private grants, operations and authority.
+Data replacement increments the generation and does not activate restored accounts.
+The retained private session can be disconnected without rewriting its old epoch.
+Settings Clear saved read address changes only `read_address_cleared`; reconciling
+the same session does not reset it. Another explicit connection supplies new facts.
 
-An admission that changes connection eligibility or targets also publishes the
-owner's ready Connect/Review card revisions in that same transaction, after
-consuming its own input. A competing admission after the confirmation read
-therefore invalidates the earlier revision even before the SDK returns a QR or
-approval. Publication failure rolls back admission; no SDK operation starts.
+The store reads the current supervisor snapshot inside evaluation and atomic
+admission. Missing inspection is not an empty service. `canDisconnect` qualifies
+the current exact target, while `usableConnectionId` qualifies its transaction
+usage. Reconciliation notices reveal no private topic. Pending approval publication
+is not reported as an unexpected session. Current slot transfer, new connection,
+operation and card admission commit or roll back together before SDK I/O.
+
+Management admission publishes its exact operation and affected current card
+facts atomically. Scoped grant/impact revisions reject conflicting input,
+while an unrelated chain update does not reject a still-valid Sui target.
+Publication failure rolls back admission before SDK I/O. A reconnection cannot
+retarget a bound Review. Grant changes invalidate only the affected chain. Admission consumes the card's one operation. Its final result closes input;
+no later connection state can attach another effect.
+
+After an SDK approval arrives, its exact operation, connection, run and data
+generation own private topic retention before success publication. Retention
+grants cleanup ownership only. Connection approval, immutable chain results,
+address history and the operation's success result then commit in one transaction.
+A failed success publication rolls those public effects back without discarding
+the retained cleanup target. A duplicate response for the same completed operation
+and topic reads its saved result without changing addresses or read suppression.
+An unrelated topic is neither adopted nor disconnected.
+
+If cleanup ownership cannot yet be recorded, the workflow retains the private
+response and cleanup-only write in its existing per-operation pending writes.
+Its callback is not settled merely because the response arrived. Once retention
+and cleanup are resolved, database retries never repeat remote disconnection or
+retry failed success publication. Unconfirmed remote removal remains an exact
+cleanup target for explicit Disconnect; it is not successful absence or financial
+authority. Owner/run/data-generation changes fence the old callback. If no topic
+could be retained before the parent exits, recovery cannot infer its ownership:
+the resulting unrecorded session blocks new pairing and financial input.
 
 Service-loss authority revocation is retained against its SDK run and data
 generation until it commits. Current wallet-state reads retry that database
@@ -353,9 +380,9 @@ This is not availability during an unreadable database or a bypass of authority
 revocation failures.
 
 Connection facts and workflow maintenance have separate internal contracts.
-`readConnectionFacts(at)` collects recorded connections, current-run SDK presence,
+`readConnectionFacts(at)` collects the current recorded connection, current-run SDK presence,
 pending work and read-address provenance from one SQLite read snapshot. The
-shared selector and qualification projection compute eligibility from those
+shared qualification projection computes eligibility from those
 facts; they do not update requests, expire connections or repair callbacks.
 Settings general facts use this diagnostic path and stored counts, so another
 request's refused deadline write does not prevent opening or reading Settings.
@@ -408,7 +435,7 @@ running. `ReviewSession.preparationError`, stored in `live_review_sessions.prepa
 is a saved review message: it can record a failed preparation or invalidation
 caused by a wallet connection change. Its presence does not prove that a
 computation ran. The View labels it Earlier review message and keeps it distinct
-from current account-selection guidance and a command delivery failure. These
+from current wallet-availability guidance and a command delivery failure. These
 fields describe different facts; none grants action or retry authority.
 
 Signature admission independently checks the current material handle, expiry,
@@ -419,9 +446,9 @@ Revision-specific evidence validity does not remove session/account pending-work
 or data-replacement protections. Mandatory activity rows commit with the state;
 optional event-log failures do not roll back that commit or repeat an operation.
 
-Review preparation also checks the immutable bound account against current read
-context and the selected account before writing preparation state. The same pure
-account rule supplies evaluated choices. A selection mismatch is a current
+Review preparation checks the immutable bound account against the current fixed
+connection and explicit app input before writing preparation state. Saved read
+context suppression does not alter that target. A target mismatch is a current
 restriction, not a stored preparation error or an activity transition.
 
 Request interruption consumes both its internal origin and the request phase.
@@ -465,9 +492,12 @@ and public backup export also read recorded facts without advancing live
 requests or treating imported history as authority. Replacement warnings do not
 claim an earlier stored-counts snapshot is the number being deleted now.
 
-Disconnect progress is the existing running Connect card's accepted disconnect
-action and connection reference. Connection updates preserve that operation
-until its result is recorded; no additional persisted connection status is used.
+Workflow `pendingOperation` is derived from the current connection's one running
+or SDK-pending operation, carrying its identity, action, status and settlement
+flag. It uses the same read transaction as the card result. This summary creates
+no new persisted state or authority. A completed disconnect with pending
+settlement stays completed; only a running disconnect is in progress. Connection
+updates preserve the original operation result and card input lifetime.
 
 ### Current format and backups
 
@@ -479,7 +509,7 @@ With a new empty data directory, users configure account context and endpoints; 
 
 ## Boundaries
 
-The active account is a read context only. It is not signing authorization, login, authentication for transactions, custody, permission for transactions, or proof of ownership. It stores at most one address per database file; setting a new active account replaces the previous one without revoking anything onchain.
+The active account is the current connection's saved Sui read context. It is not signing authorization, login, custody or proof of ownership. Settings can suppress this context without changing the connection's fixed address or requests. Changing the wallet address requires disconnecting and reconnecting. Accounts retained in history are not current choices.
 
 NDJSON event logs remain optional audit/debug logs. They are not the product activity source of truth. User-facing activity summaries read from SQLite. Event log write failures do not fail product session transitions or SQLite evidence writes.
 

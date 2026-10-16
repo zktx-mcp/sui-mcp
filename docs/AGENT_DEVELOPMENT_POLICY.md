@@ -24,7 +24,7 @@ Target repository structure:
 - `src/review-server/`: loopback HTTP routing and Host/Origin checks; no public
   browser page or Settings mutation API.
 - `review-app/`: shared card display helpers/styles; no external Settings page.
-- `src/mcp-ui/`: internal Account, Receipt, Chart, Connect, Review and Settings cards, their
+- `src/mcp-ui/`: internal Account, Receipt, Chart, Connect, Disconnect, Review and Settings cards, their
   common lifecycle and view code.
 - `src/runtime/shared/`: authenticated server ownership and MCP forwarding.
 - `registry/`: local policy, allowlists, aliases, and generated mainnet metadata.
@@ -93,6 +93,17 @@ implementation history, prior states, migration history, decision history,
 planning rationale, or "why we changed this" notes in README, `docs/`,
 `protocols/`, runtime instructions, MCP resources, tool descriptions, or
 user-facing strings. Keep that history in ignored `.WORK` notes.
+
+Public examples, screenshots, release material and routine work reports must
+not expose complete real wallet account addresses, including test accounts.
+Use shortened addresses for presentation and deliberately synthetic account
+values for new or revised executable examples and fixtures. Remove linked
+transaction identifiers or encoded address inputs from public examples when
+they reveal the same real account. Keep illustrative data clearly labelled;
+do not present synthetic data as observed mainnet evidence. Show a complete
+real account address in a work report only when the user explicitly requests
+it. These publication and reporting rules do not change runtime API fields,
+exact account bindings, onchain evidence or transaction-target verification.
 
 Reviewed English development records may live under
 `submission/ethglobal-tokyo-2026/`, with translations and retrospective summaries

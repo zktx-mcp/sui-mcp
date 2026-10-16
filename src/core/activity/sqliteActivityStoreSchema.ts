@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { EXTERNAL_ACTIVITY_SCAN_MAX_LIMIT } from "./activityStore.js";
 import { ActivityStoreError, type SqliteDatabase } from "./sqliteActivityStoreTypes.js";
 import { SETTINGS_RESET_PREPARATION_SQL } from "../session/settingsPreparationSql.js";
+import { WALLET_CHAINS } from "../session/chainAccounts.js";
 import {
   LIVE_REVIEW_SESSION_INSERT_TRIGGER,
   LIVE_REVIEW_SESSION_UPDATE_TRIGGER,
@@ -10,28 +11,18 @@ import {
 
 const EXTERNAL_ACTIVITY_SCAN_INDEX_SQL = `CREATE INDEX IF NOT EXISTS idx_external_activity_scans_account_fetched
   ON external_activity_scans(account_id, fetched_at)`;
+const WALLET_CHAIN_SQL = WALLET_CHAINS.map((chain) => `'${chain}'`).join(",");
 
 const CURRENT_SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS accounts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sui_address TEXT NOT NULL UNIQUE,
+      chain_id TEXT NOT NULL CHECK (chain_id IN (${WALLET_CHAIN_SQL})),
+      address TEXT NOT NULL,
       first_seen_at TEXT NOT NULL,
       last_used_at TEXT NOT NULL,
       first_source TEXT NOT NULL CHECK (first_source IN ('wallet_connection', 'review_execution')),
-      last_source TEXT NOT NULL CHECK (last_source IN ('wallet_connection', 'review_execution'))
-    );
-
-    CREATE TABLE IF NOT EXISTS active_account_context (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
-      source TEXT NOT NULL CHECK (source IN ('wallet_connection', 'cleared')),
-      set_at TEXT NOT NULL,
-      wallet_name TEXT,
-      wallet_id TEXT,
-      CHECK (
-        (source = 'cleared' AND account_id IS NULL)
-        OR (source = 'wallet_connection' AND account_id IS NOT NULL)
-      )
+      last_source TEXT NOT NULL CHECK (last_source IN ('wallet_connection', 'review_execution')),
+      UNIQUE (chain_id,address)
     );
 
     CREATE TABLE IF NOT EXISTS review_sessions (
@@ -142,15 +133,38 @@ const CURRENT_SCHEMA_SQL = `
       status TEXT NOT NULL,
       revision INTEGER NOT NULL CHECK (revision >= 0),
       topic TEXT UNIQUE,
-      sdk_pending INTEGER NOT NULL CHECK (sdk_pending IN (0,1)),
+      current_slot INTEGER UNIQUE CHECK (current_slot IS NULL OR current_slot=1),
+      data_epoch INTEGER NOT NULL CHECK (data_epoch >= 0),
+      read_address_cleared INTEGER NOT NULL DEFAULT 0 CHECK (read_address_cleared IN (0,1)),
       connection_json TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS wallet_connection_operations (
+      operation_id TEXT PRIMARY KEY,
+      card_id TEXT NOT NULL UNIQUE,
+      owner_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      data_epoch INTEGER NOT NULL CHECK (data_epoch >= 0),
+      action TEXT NOT NULL CHECK (action IN ('connect','disconnect')),
+      connection_id TEXT NOT NULL REFERENCES live_wallet_connections(id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK (status IN ('running','completed','failed','stopped')),
+      input_json TEXT NOT NULL,
+      result_json TEXT,
+      sdk_pending INTEGER NOT NULL CHECK (sdk_pending IN (0,1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_wallet_connection_pending ON wallet_connection_operations(connection_id,sdk_pending);
+    CREATE TRIGGER IF NOT EXISTS wallet_connection_result_immutable
+    BEFORE UPDATE ON wallet_connection_operations WHEN OLD.result_json IS NOT NULL AND NEW.result_json IS NOT OLD.result_json
+    BEGIN SELECT RAISE(ABORT,'Account management results are immutable'); END;
     CREATE TABLE IF NOT EXISTS live_request_authority (
       attempt_id TEXT PRIMARY KEY REFERENCES review_requests(attempt_id) ON DELETE RESTRICT,
       owner_id TEXT NOT NULL,
       run_id TEXT,
       connection_id TEXT NOT NULL REFERENCES live_wallet_connections(id) ON DELETE RESTRICT,
-      connection_revision INTEGER NOT NULL,
+      grant_revision INTEGER NOT NULL,
       can_submit INTEGER NOT NULL CHECK (can_submit IN (0,1)),
       sdk_pending INTEGER NOT NULL CHECK (sdk_pending IN (0,1)),
       submit_pending INTEGER NOT NULL CHECK (submit_pending IN (0,1)),
@@ -231,7 +245,7 @@ const CURRENT_SCHEMA_SQL = `
       preparation_run_id TEXT,
       preparation_error TEXT,
       wallet_connection_id TEXT,
-      wallet_connection_revision INTEGER,
+      wallet_grant_revision INTEGER,
       current_attempt_id TEXT,
       plans_json TEXT NOT NULL,
       review_state_json TEXT,
@@ -252,7 +266,7 @@ const CURRENT_SCHEMA_SQL = `
       id TEXT PRIMARY KEY,
       owner_id TEXT NOT NULL,
       token_hash TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK (kind IN ('account', 'receipt', 'chart', 'connect', 'review', 'settings')),
+      kind TEXT NOT NULL CHECK (kind IN ('account', 'receipt', 'chart', 'connect', 'disconnect', 'review', 'settings')),
       state TEXT NOT NULL CHECK (state IN ('ready', 'running', 'closed')),
       reason TEXT CHECK (reason IN ('completed', 'expired', 'failed', 'server_restarted', 'cancelled')),
       error TEXT,
@@ -260,7 +274,7 @@ const CURRENT_SCHEMA_SQL = `
       created_at TEXT NOT NULL,
       expires_at TEXT NOT NULL,
       input_json TEXT NOT NULL,
-      scope TEXT NOT NULL DEFAULT 'read' CHECK (scope IN ('read', 'connect', 'review', 'review_manage', 'settings')),
+      scope TEXT NOT NULL DEFAULT 'read' CHECK (scope IN ('read', 'connect', 'disconnect', 'review', 'review_manage', 'settings')),
       operation_id TEXT,
       accepted_input_json TEXT,
       result_json TEXT,
@@ -300,7 +314,6 @@ const CURRENT_SCHEMA_SQL = `
       next_run_id TEXT,
       supersedes_operation_id TEXT,
       superseded_by_operation_id TEXT,
-      checkpoint TEXT,
       CHECK ((phase='terminal' AND result_json IS NOT NULL) OR (phase!='terminal' AND result_json IS NULL))
     );
     CREATE TRIGGER IF NOT EXISTS settings_immutable_result
@@ -326,6 +339,10 @@ const CURRENT_SCHEMA_SQL = `
     CREATE TRIGGER IF NOT EXISTS live_read_cards_insert_revision
     BEFORE INSERT ON live_read_cards WHEN NEW.revision != 0
     BEGIN SELECT RAISE(ABORT, 'card insert requires revision zero'); END;
+    CREATE TRIGGER IF NOT EXISTS live_card_terminal_immutable
+    BEFORE UPDATE ON live_read_cards WHEN OLD.state='closed'
+    BEGIN SELECT RAISE(ABORT, 'Closed card results and permissions are immutable'); END;
+
     CREATE TRIGGER IF NOT EXISTS live_read_cards_update_revision
     BEFORE UPDATE ON live_read_cards WHEN NEW.revision != OLD.revision + 1
     BEGIN SELECT RAISE(ABORT, 'card update requires the next revision'); END;
@@ -428,13 +445,13 @@ function externalActivityScansTableSql(): string {
 // Exported user data has one durable revision, including writers outside Settings.
 // A prepared confirmation is invalidated once, in the writer's own transaction.
 function settingsRevisionTriggers(): string {
-  const userTables = ["accounts", "active_account_context", "review_sessions", "review_state_snapshots",
+  const userTables = ["accounts", "review_sessions", "review_state_snapshots",
     "review_status_transitions", "review_executions", "review_requests", "external_activity_scans",
     "external_activity_transactions", "local_settings"];
-  const walletTables = ["live_wallet_connections", "live_review_sessions", "live_request_authority"];
+  const walletTables = ["live_wallet_connections", "wallet_connection_operations", "live_review_sessions", "live_request_authority"];
   const invalidate = (condition: string) => `
     UPDATE live_read_cards SET revision=revision+1
-      WHERE id IN (SELECT card_id FROM settings_operations WHERE phase='prepared' AND (${condition}));
+      WHERE state!='closed' AND id IN (SELECT card_id FROM settings_operations WHERE phase='prepared' AND (${condition}));
     ${SETTINGS_RESET_PREPARATION_SQL}
       WHERE phase='prepared' AND (${condition});`;
   return [...new Set([...userTables, ...walletTables])].flatMap((table) =>
@@ -444,7 +461,6 @@ function settingsRevisionTriggers(): string {
         ${userTables.includes(table) ? "UPDATE settings_control SET user_data_revision=user_data_revision+1 WHERE id=1;" : ""}
         ${invalidate([...(userTables.includes(table) ? ["kind IN ('import_local_data','reset_local_data')"] : []),
           ...(walletTables.includes(table) || table === "review_requests" ? ["kind='restart_wallet_service'"] : []),
-          ...(table === "local_settings" ? ["kind IN ('set_endpoint','restore_endpoint')"] : []),
-          ...(table === "active_account_context" ? ["kind='clear_read_address'"] : [])].join(" OR ") || "0")}
+          ...(table === "local_settings" ? ["kind IN ('set_endpoint','restore_endpoint')", `kind='set_wallet_networks' AND ${event === "DELETE" ? "OLD" : "NEW"}.key='walletConnectionChains'`] : [])].join(" OR ") || "0")}
       END;`)).join("\n");
 }

@@ -16,7 +16,7 @@ cause another signing or submission request. Request failures and unknown
 outcomes are separate from independently observed chain success/failure.
 
 Account, Receipt and Chart cards provide read-only evidence independently of
-signing. Connect, Review and Settings also run inside the MCP host. Settings
+signing. Connect, Disconnect, Review and Settings also run inside the MCP host. Settings
 provides local data controls and explicit connection-service recovery. Human-readable review is not a guarantee of safety or
 of complete interpretation of every transaction detail; the raw PTB structure
 and addresses remain inspectable.
@@ -27,13 +27,13 @@ Users can ask ordinary questions:
 - "How much are my USD-denominated assets together?"
 - "What is the shortfall?"
 
-This document describes `@zktx.io/sui-mcp@0.7.0`. Confirm that version is
+This document describes `@zktx.io/sui-mcp@0.8.0`. Confirm that version is
 published before using npm installation commands. For a local build, follow
 [Developer Checkout Setup](docs/MCP_SETUP.md#developer-checkout-setup).
 
 ## Product Scope in Two Layers
 
-- **Implemented:** Sui mainnet read evidence, non-signable external proposal review, and account-bound DeepBook swap review using protocol-agnostic adapters. Six internal cards use the same SQLite state and permission model. The backend verifies stored material, ownership, quote/policy provenance, human-readable facts, simulation and PTB evidence before an explicit user request. WalletConnect carries bytes only between the backend and wallet; ordinary MCP responses expose facts, request status and observed execution results. Settings owns endpoint and read-address controls, local backup/import/reset, and explicit connection-service recovery. Settings operations require scoped user confirmation; ordinary MCP calls only create the card or read settings.
+- **Implemented:** Sui mainnet read evidence, non-signable external proposal review, and account-bound DeepBook swap review using protocol-agnostic adapters. Account, Receipt, Chart, Connect, Disconnect, Review and Settings cards use the same SQLite state and scoped permission model. The backend verifies stored material, ownership, quote/policy provenance, human-readable facts, simulation and PTB evidence before an explicit user request. WalletConnect carries bytes only between the backend and wallet; ordinary MCP responses expose facts, request status and observed execution results. Settings owns endpoint and read-address controls, local backup/import/reset, and explicit connection-service recovery. Settings operations require scoped user confirmation; ordinary MCP calls only create the card or read settings.
 - **Safety boundaries:** no private-key custody, no MCP or AI autonomous execution, no forwarding of opaque external transaction bytes to a wallet, and no peg guarantee. The current product does not silently choose settlement tokens or routes. It does not provide fiat cash-out, P&L, tax or cost-basis support.
 
 DeepBook provides the current scoped Sui conversion, price, and orderbook
@@ -92,20 +92,31 @@ The current release can run as a local stdio MCP server and expose mainnet Sui D
 It also includes:
 
 - a local review server bound to `127.0.0.1`;
-- a local SQLite store for active account read context and review evidence;
+- a local SQLite store for chain-qualified address history and review evidence;
 - MCP output checks that reject forbidden executable, signing, token, seed, and
   key-material field names from responses.
 
 ## Screens
 
-**Wallet connection.** Connect one Sui mainnet wallet and use one of its approved
-addresses. A manage card shows Connect wallet when no connection is active;
-opening it alone does not pair. A connect-intent card starts pairing after its
-View confirms permission and current state. Each disconnection requires the
-user to confirm its exact target. Connection is not transaction approval.
+**Wallet connection.** One WalletConnect connection provides one fixed address
+per approved chain. Settings chooses networks for the next connection, defaulting
+to Sui. The wallet may return a subset. Sui, Ethereum and Solana mainnet addresses
+are supported; financial actions remain Sui-only. A chain returning multiple
+addresses is unavailable for that connection; there is no account selector.
+Changing the wallet, address or network scope requires disconnecting and connecting
+again. Connect and Disconnect are separate purpose cards. Connect starts one
+pairing after authenticated View confirmation; Disconnect asks for one exact-target
+confirmation. Ended cards show a fixed address-free result and accept no further
+operation. Current addresses are available through read-only connection status.
+Connection is not transaction approval.
 
-
-**Review and result.** The internal Review card automatically prepares and renews verified conditions for one selected wallet/account. Users inspect its transaction graph, amounts and costs, then choose Request wallet approval and approve in their wallet. One wallet connection is used at a time; choose among its approved addresses when needed. Conflicting saved connections must be resolved through targeted disconnection. Failed preparation has an explicit retry. Receipt and completed Review show the executed transaction graph, actual asset changes and net network fee. Supplementary facts are in one Details slide; earlier estimates in Review remain distinct from actual chain results. Missing graph or receipt data is marked unavailable. Cards use a single document layout without nested card panels.
+**Review and result.** The Review card prepares and renews verified conditions for
+its fixed Sui account and connection. Disconnecting and reconnecting cannot retarget an
+existing review. A replacement connection requires a new review. Users inspect the graph,
+amounts and costs, then choose Request wallet approval and approve in their wallet.
+Failed preparation has an explicit retry. Receipt and completed Review show the
+executed graph, observed asset changes and net network fee. Details supplements
+the same facts. Missing graph or receipt data is marked unavailable.
 
 **DeepBook USDC chart.** `ui_open_chart` opens an internal MCP Apps card with
 official DeepBookV3 Indexer candles and volume for one selected USDC pool.

@@ -89,6 +89,7 @@ export class InMemoryActivityStore implements ActivityStore {
       ? { ...existing, lastUsedAt: timestamp, lastSource: source }
       : {
           id: this.nextAccountId++,
+          chainId: "sui:mainnet",
           address: normalized,
           firstSeenAt: timestamp,
           lastUsedAt: timestamp,
@@ -99,16 +100,16 @@ export class InMemoryActivityStore implements ActivityStore {
     return { ...account };
   }
 
-  async setActiveAccount(
+  async seedReadAccount(
     address: string,
-    source: "wallet_connection",
     now = new Date()
   ): Promise<ActiveAccountRecord> {
-    const account = await this.upsertAccount(address, source, now);
+    const account = await this.upsertAccount(address, "wallet_connection", now);
     this.activeAccount = {
       accountId: account.id,
+      chainId: "sui:mainnet", revision: (this.activeAccount?.revision ?? -1) + 1,
       address: account.address,
-      source,
+      source: "wallet_connection",
       setAt: now.toISOString()
     };
     return { ...this.activeAccount };
@@ -118,7 +119,7 @@ export class InMemoryActivityStore implements ActivityStore {
     return this.activeAccount ? { ...this.activeAccount } : undefined;
   }
 
-  async clearActiveAccount(): Promise<void> {
+  async clearReadFixture(): Promise<void> {
     this.activeAccount = undefined;
   }
 
@@ -525,8 +526,8 @@ export class InMemoryActivityStore implements ActivityStore {
           };
     }
     if (!this.activeAccount) {
-      throw new ActivityStoreReadError("active_account_not_set", "Active account read context is not set", {
-        action: "connect_wallet_connection"
+      throw new ActivityStoreReadError("active_account_not_set", "No saved read address is set. Provide an explicit Sui account for this read.", {
+        action: "provide_account"
       });
     }
     return {

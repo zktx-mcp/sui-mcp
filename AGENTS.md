@@ -15,11 +15,16 @@ evidence. Users inspect independently built or verified transaction material
 and approve each transaction in their own wallet. The current backend builds
 account-bound DeepBook swap material, verifies its digest, ownership,
 quote/policy provenance, human-readable facts, simulation and PTB visualization,
-and exposes internal Connect and Review cards alongside Account, Receipt,
+and exposes internal Connect, Disconnect and Review cards alongside Account, Receipt,
 Chart and Settings cards. Settings owns scoped local data/configuration actions
 and explicit connection-service recovery; ordinary MCP calls do not apply them.
 
-WalletConnect is the only connection and signing transport. An explicit,
+WalletConnect is the only connection and signing transport. Settings specifies
+networks for new connections, initially Sui. One current connection supports
+Sui, Ethereum and Solana mainnet address management with one fixed address per
+chain. Changing the wallet, address or approved network scope requires disconnection
+and a new connection. Stored address history is not another current connection. Financial actions remain Sui-only.
+No bridge execution or other-chain signing is implied by address support. An explicit,
 permission-checked card action is admitted atomically in SQLite before the
 backend requests a wallet signature. The backend verifies the returned bytes'
 digest and signer against that admitted review, checks Sui mainnet, and submits
@@ -31,7 +36,7 @@ separate facts. No card or model receives transaction bytes or signatures.
 Implemented surfaces and deliberately sequenced work remain distinct:
 
 - Current surfaces: read-only evidence and external proposal review, internal
-  Connect/Review cards for the supported swap adapter, backend WalletConnect
+  Connect/Disconnect cards and Review cards for the supported swap adapter, backend WalletConnect
   signing and receipt observation, and internal Settings/file/data controls. Ordinary MCP tools
   create cards or read evidence; they do not authorize signing or execution.
 - Release preparation requires final package verification and actual Host

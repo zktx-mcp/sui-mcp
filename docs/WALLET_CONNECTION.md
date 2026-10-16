@@ -1,173 +1,163 @@
 # Wallet Connection
 
-WalletConnect provides approved Sui mainnet account context and a transport for
-individual wallet requests. It is not login, proof of address ownership, custody, or standing permission to transact. Frontend behavior is defined in
+WalletConnect provides approved mainnet account context and a transport for
+individual Sui wallet requests. It is not login, proof of address ownership, custody, or standing permission to transact. Frontend behavior is defined in
 [Frontend Policy](https://github.com/zktx-mcp/sui-mcp/blob/main/docs/FRONTEND_POLICY.md)
 in the source repository; tools are in [MCP Tools](MCP_TOOLS.md).
 
-## Connection and read account
+## One connection, fixed addresses
 
-`session_open_wallet_connection_card` takes an intent: `connect`, `disconnect` or `manage` (the default). A connect-intent card automatically starts one pairing after the View confirms current state with its UI permission, unless a connection or operation already exists. Manage opens connection controls without starting pairing; Connect wallet starts it only after the user clicks. Disconnect opens target-specific confirmation when one connection is available; the user chooses Confirm disconnect or returns with Back. No model-facing call can disconnect or request a signature. Public saved reads never start pairing. QR data stays in UI metadata bound to the exact card, connection and revision; reopening a waiting card preserves that pairing.
+Settings → Wallet networks specifies the networks requested on the next connection.
+The default is Sui. Supported address networks are Sui (`sui:mainnet`), Ethereum
+(`eip155:1`) and Solana (`solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`), all mainnet.
+Only Sui supports asset reads, transaction review, signing and submission. Address
+support on another chain is not bridge execution or other-chain signing.
 
-Sui MCP uses one wallet connection at a time across all clients sharing a
-data directory. That connection can approve several Sui mainnet addresses; other
-chains are not supported. The same connection rule controls displayed actions,
-restoration, SDK observations and atomic SQLite admission. An unexpired connected wallet, pending approval or pending disconnection
-prevents another pairing, including requests from different cards. A competing
-card retains its own permission and reports the existing connection; it does not
-inherit another card's QR or waiting controls. A failed connection attempt needs
-an explicit retry even if the other connection later ends. If multiple valid connections are saved, none is selected for account use,
-review preparation or signing. The Connect card shows each exact target for
-user-confirmed disconnection. After recorded disconnections leave one valid
-connection and no pending connection operation, that connection becomes usable;
-with no recorded or SDK-present connection and no pending operation, a new pairing is allowed. Terminal history alone does not
-block it. A failed disconnect remains unconfirmed in the wallet app; its SDK
-session cannot revive the failed product record.
-The current SDK snapshot also gates pairing and account use. A known failed or
-disconnected record whose SDK session remains present is a disconnect target
-on a new card, not a usable wallet. `manageableConnectionIds` identifies those
-exact targets and ordinary connected targets, including expired records.
-An unmapped SDK session in a published available run sets
-`connectionReconciliationRequired: true` after pending registration/cleanup
-ends. An initializing or state_sync memory snapshot does not establish this
-diagnosis, and an absent flag does not prove session absence. Pairing, account use, preparation and signing
-remain blocked. Remove the retained connection in the wallet app, then confirm
-its absence through the current connection service. Settings/Troubleshooting
-can explicitly restart the service to inspect it again, but restarting never
-promotes an unrecorded or failed session into a usable connection. The card does
-not invent a connection ID or report physical SDK failure.
-The SDK's availability and a recorded terminal outcome alone do not prove absence.
+There is one current product connection. It supplies at most one fixed address
+per chain. Change the wallet, account, address or approved network scope by
+disconnecting, waiting for confirmed removal and connecting again. Historical
+connection records are retained for existing transaction references; they are
+not simultaneous connections or account choices. Connect contains no chain or
+account selectors and offers no additional-connection action.
+Connect and Disconnect are separate one-purpose cards. `session_open_wallet_connection_card`
+opens a connection request with no intent selector. Its initial authenticated UI
+confirmation admits one pairing request. `session_open_wallet_disconnection_card`
+opens a confirmation for the exact current session. Ordinary calls never apply
+these effects. If there is no current session to disconnect, the gateway returns
+`no_session_to_disconnect` without creating a card or wallet operation.
+Disconnection does not revoke onchain permissions.
 
-The backend validates accounts, Sui mainnet namespace, methods and expiry before
-recording a connection. A single wallet-approved account can become read context
-from an explicit connection; multiple approved accounts require an explicit
-selection. The active read account is stored in SQLite until changed or cleared.
-SDK restoration and status reads never undo a user clearing that context. The stored selection is separate from its eligibility as a default for current asset reads. Implicit asset reads require a usable current wallet connection for the selected address; disconnection, expiry, pending disconnection, multiple-connection conflict or unavailable wallet state removes that default. Tools with an `account` input may still read an explicit address; connected-account-only tools require connection/account selection or recovery of wallet availability. Explicit-address public reads and saved transaction/activity reads remain available. `session_get_interaction_status.assetReadAccount` supplies that default-account decision alongside `connections` and `walletAvailability`.
+Every ended Connect or Disconnect card contains its recorded result, time,
+wallet name when available, and network approval results. It contains no addresses,
+QR code or further operation controls. The result does not claim that a past
+approval is still a current connection. Read current fixed addresses through
+`session_get_interaction_status`; saved history and transaction targets keep their
+own exact addresses. Changing current state never rewrites an ended card.
 
-| Connection state | Available behavior |
-| --- | --- |
-| Unsubmitted card | Automatic pairing for connect intent; manual Connect wallet for manage intent; address selection and target-specific disconnect when permitted |
-| Multiple valid saved connections | Resolve through target-specific disconnect; no new pairing, address use, review preparation or signature |
-| awaiting_approval | Same private QR and approval observation; Stop connecting |
-| connected | View approved accounts and expiry; a new card may select another operation |
-| rejected / failed / expired / stopped / disconnected | View the recorded outcome; new operations need a new card |
+The request uses saved networks as optional namespaces. Sui requests
+`sui_signTransaction`, `accountsChanged` and `chainChanged`; Ethereum and Solana
+request addresses with no financial methods. An empty saved network set disables
+new requests. Changing Settings affects only future connections, not a request
+already admitted or an approved connection. Saving a changed scope ends unsent
+Connect cards that captured different networks; they never reopen when the setting
+returns to its earlier value.
 
-`session_get_interaction_status` reports the last confirmed wallet-service observation and stored connections. SDK events and command checks apply review/request invalidation through the same database owner. An ordinary status read does not wait for a fresh SDK request, change the selected account or start a wallet operation. `walletObservation` identifies the local service run, observation order and check time; it is not proof of the wallet app's current screen or online status. See the [interaction API](MCP_TOOLS.md) for the response contract.
+Only requested, valid returned accounts are used. Each requested chain records
+one immutable result: a bound address, not approved, multiple accounts, or invalid
+response. One valid distinct address binds automatically. Multiple distinct
+addresses make only that chain unavailable; none is chosen silently. Other valid
+returned chains remain usable. A later grant update cannot replace a fixed
+address or fill a missing result. To obtain a different result, reconnect.
+An omitted chain is not proof of permanent wallet non-support.
 
-An admitted disconnect is a pending card operation, distinct from the last
-confirmed connection state. The same connection cannot be selected for another
-operation while disconnection is pending. Cards and wait tools observe its
-stored completion or failure; a connected-session update is not completion of
-the disconnect. A restart does not replay an unfinished disconnect or restore
-that connection as usable. The wallet app may still retain the connection.
+Each card admits at most one fixed operation and keeps one final result. SDK
+settlement is a separate current fact; it does not reopen or rewrite that result.
+Use the [Session Tools API](MCP_TOOLS.md#session-tools) for exact card/operation
+reads and bounded waits. Opening a model-facing gateway grants no wallet effect;
+the authenticated UI initiates the permitted operation. Frame recreation never
+repeats pairing. QR credentials remain private UI metadata.
 
-If the SDK disconnect ends but its local completion write fails, current reads
-settle the operation once storage recovers. An available SDK with no such session
-confirms local disconnection; an unavailable SDK or retained session produces an
-unconfirmed failure and wallet-app guidance. Reading never repeats disconnect.
-Approval storage failure can also leave a connection in the wallet app. Local
-failure or expiry does not prove remote revocation; remove retained connections
-in the wallet app. No fixed cleanup period is promised, and an SDK session alone
-never restores product authority.
+Cancel or Stop permanently ends that card's input and hides its QR. SDK cleanup
+continues independently; late approval cannot create address or signing authority.
+Cleanup completion never reopens the card or starts a new request. A new user
+request needs a new card. A timeout, SDK exit or late response is not user
+cancellation. Failed disconnection does not prove remote removal; a retained
+session can still be explicitly disconnected from a new exact-target Disconnect card.
+Recovery uses current session evidence separately from that recorded failure.
+A settled attempt without approval or a recorded session reference has no
+session when current-run ownership is confirmed, no connection work remains and
+no unrecorded SDK session is retained. It does not require repeated status checks.
+Pending approval or cleanup, a missing observation for a recorded session, and
+unavailable service remain unconfirmed. Once absence is confirmed and pending
+cleanup ends, the user can request a new Connect card. An ended card never regains
+input. An existing Review tied to the ended
+connection needs a new Review after reconnection; a declined connection alone
+does not require a transaction Review.
 
-Chat navigation and frame recreation are not transitions. Local stopping does
-not claim that a remote wallet dialog closed. A late approval cannot revive a
-stopped connection. An unavailable backend wallet service keeps ordinary reads
-available and makes connection cards unavailable with an explicit explanation.
+Disconnect confirmation binds the exact connection, networks and affected
+pending approvals. Changed impact requires fresh confirmation. Pending connection
+or cleanup I/O blocks another Connect even if the stored result is stopped,
+failed or expired. Only current-run absence confirmation plus settled I/O releases
+that constraint. An idle or historical row alone cannot establish absence.
 
-The product supplies its public WalletConnect project identifier without user
-configuration or an override. Shared Relay service limits can affect connection
-availability across installations. An initialization failure does not establish
-that the user omitted a setting or that a transaction failed. A failure to
-restore saved connections or subscribe to wallet changes disables wallet operations until the wallet service is recovered;
-it cannot leave signing available without account/chain change observation.
-Stored review, request and verified execution facts remain readable through
-session tools and cards as well as ordinary evidence tools. `walletAvailability`
-describes the backend wallet dependency; it is not connection approval or
-transaction authorization. An unavailable dependency does not erase a saved
-result or prove chain failure. Startup diagnostics contain safe failure stages,
-not the project ID, SDK error bodies or wallet credentials.
+`session_get_interaction_status` exposes singular `connection`, `requestedChains`,
+`canDisconnect` and the last `walletObservation`. `assetReadAccount` describes
+whether the fixed Sui address is currently available for implicit asset reads.
+`account_get_active_account` reports its saved read context, not live eligibility
+or signing permission. Explicit-address reads remain public and do not select
+an account. Settings can clear the saved read address without changing the wallet,
+fixed addresses or transaction targets; this suppression survives restart of the
+same connection. A fresh explicit connection can supply a new read address.
 
-The wallet SDK runs in a separate child process. The parent retains database
-authority, transaction verification, submission and chain-result observation.
-An unresponsive wallet service does not prevent ordinary reads or access to
-stored results. Normal startup is shown as initialization, not as a wallet
-rejection. No implicit asset account is offered until the current service run
-confirms a usable connection.
+Current service availability, exact session presence, data generation, fixed
+address and per-chain grant must all match for new financial input. Chain-local
+changes invalidate that chain's old authority irreversibly; another chain's change
+does not invalidate an unchanged Sui grant. A Review remains bound to its original
+connection and account after reconnection. A new wallet needs a new Review.
 
-Settings owns explicit connection-service restart. Open its Troubleshooting
-section, inspect the current run and affected requests, then confirm the
-restart. Connect manages connections/approved addresses and retains individual
-Disconnect controls for conflicting saved sessions; it does not own global
-service controls. A restart waits for old child exit, new run reservation and
-complete ready observation. Unsubmitted signing authority is revoked at
-admission; late signatures cannot submit. Already submitted transactions keep
-their original digest and observation. A new explicit Settings operation may
-supersede a still-pending startup without erasing a known failure.
+An unrecorded SDK session is never adopted by address, order or recency. It blocks
+new connection and financial input while saved facts remain readable. Remove
+unwanted retained sessions in the wallet app and check status. An already admitted
+transaction retains its own exact grant and submission checks. Restarting does not
+approve an unrecorded session or prove its removal.
 
-Restart completion does not confirm an interrupted disconnect or remove a
-remote session. Check retained connections in the wallet app. If Settings or
-the parent is unavailable, fully quit all apps using Sui MCP and reopen them;
-closing a peer/window can leave the owner running. Stored endpoints and installation changes require the shared parent backend to
-exit and restart. Client disable/refresh controls can supply this when all
-participating processes exit; otherwise fully quit and reopen the apps.
+The backend owns the WalletConnect SDK in a child process with private session
+storage. The parent owns SQLite admission, verification, submission and chain
+observation. An initialization or observation failure disables affected wallet
+operations, not saved result reads, and is never reported as wallet rejection or
+chain failure. Startup diagnostics omit credentials and SDK error bodies.
+The product supplies its public project identifier without user configuration;
+shared Relay limits can affect availability.
 
-A new owner records interrupted connection approval as stopped and unconfirmed
-disconnection as failed. It does not repeat either request or restore their
-wallet authority. Already submitted transactions remain readable by their digest.
-Historical service-recovery cards retain their recorded outcomes; they grant
-no new restart input. See [setup troubleshooting](MCP_SETUP.md#wallet-connection-boundary).
+Settings → Troubleshooting owns explicit connection-service restart. The user
+confirms the run and affected requests. Restart waits for actual old-child exit,
+new-run reservation and a ready observation. It revokes unsubmitted signing
+authority; late signatures cannot submit. Submitted transactions keep the same
+digest and result observation. A new Settings operation may supersede a pending
+startup without erasing a known failure.
 
-An interrupted wallet operation reports `progress.status: "unavailable"` and a
-bounded wait returns `waitOutcome: "unavailable"` with the recorded facts. It does
-not pretend that the operation completed or the wait timed out. A completed
-request returns its saved result immediately. The backend can still verify the
-known digest of an already submitted transaction without WalletConnect. No
-financial request is replayed when reading or recovering results.
+Recovery reconciles only the retained current topic. A missing snapshot entry is
+checked through the existing SDK session check; it is not assumed absent. A normal
+approved connection in the current data generation can regain usage after a new
+ready run. A stopped, terminal or older-generation connection receives cleanup
+ownership only. Its original result, fixed addresses and read-address suppression
+remain unchanged. Confirmed absence releases stale occupancy, including records
+from an earlier owner; it does not replay a connection or financial effect.
+An unadmitted purpose card is not ended merely by an SDK run change; its original target and input deadline remain fixed. Ended cards are not reevaluated.
 
-A failed disconnect means disconnection was not confirmed. Inspect the connection
-in your wallet app and remove it there if it remains listed. Local service
-recovery does not verify remote removal. A card for an earlier successful
-connection may show that the connection is now unavailable; that is not proof
-that its original pairing failed.
+An approved SDK response is first retained privately for exact-session cleanup.
+That retention alone creates no usable connection, address history or signing
+authority. The connection and its fixed addresses become usable only after the
+success result commits. If that publication fails, the session is cleaned up or
+retained for explicit Disconnect; later reads do not retry the failed connection
+as a success or repeat remote disconnection. A duplicate response for the same
+already completed approval preserves that result and does not disconnect it.
 
-Initialization is described neutrally. A pending card command shows that its
-response has not arrived yet; a pending disconnection can show the app-restart
-procedure without declaring a timeout or failure. These notices do not diagnose a hung service,
-assert admission, or automatically send another command. The same-request check
-takes priority when a signing request's delivery is uncertain. Review messages
-preserve whether preparation was invalidated by wallet selection, a requested
-disconnect, multiple-connection conflict, or service loss. Historical messages
-retain their original cause.
+A new owner stops interrupted connection approval and records unconfirmed
+disconnection as failed. It expires old input and never replays financial work.
+Pending SDK cleanup remains visible separately from immutable results. Bounded
+waits report actual progress, including unavailable service, rather than implying
+completion or remote cancellation. Known submitted digests remain readable without
+WalletConnect. If Settings or the parent cannot be reached, stop all participating
+MCP connections so the shared parent exits before reopening; a peer/window closing
+alone may leave it alive. See [setup troubleshooting](MCP_SETUP.md#wallet-connection-boundary).
 
 ## Transaction approval
 
-A default address is qualified by the connection through which it was selected.
-If that connection ends and another connection approves the same address,
-choose Use address in the remaining connection's card before using it as the
-default or preparing a new review. The saved address remains readable history.
-A restored connection with the same ID retains its selection; a cleared or
-source-less selection is never inferred from matching addresses. New explicit
-connections that approve one address still select it automatically.
+The current fixed Sui address must have a usable exact connection for a new
+Review. Clearing its saved read context does not change that transaction target.
+SDK restoration can recover the same approved current-generation connection;
+backup restore cannot activate an account or restore wallet authority.
 
-The backend publishes the current usable connection and default-address
-eligibility. A recorded connection whose expiry has passed is not an additional
-usable wallet, even before the next SDK observation updates its record.
-Recorded targets remain available for appropriate disconnection; they do not
-block the sole usable connection's address selection or review choices.
-
-A single available wallet/account is displayed without a selection dropdown.
-A permitted live Review card automatically prepares and renews verified conditions for that target. Multiple valid wallet connections block preparation and signing; resolve the conflict in Connect. Several approved addresses inside the single wallet require address selection there. A failed computation offers Retry review rather than repeating automatically. The explicit approval button selects the displayed transaction revision; automatic preparation never requests a signature. Backend
-account, connection, revision and material checks remain authoritative.
-
-An existing review keeps its original account binding. Preparing or updating it
-requires that account to be the selected read account as well as an approved
-account on the chosen connection. If read context changes from A to B, select A
-again to update the same review, or request a new review for B. The card explains
-the current selection restriction separately from saved review messages, which
-can record a preparation failure or connection change. A refused incompatible
-selection starts no preparation and records no failed review. Read context alone does not revoke already verified A signing
-evidence or alter an admitted request.
+A new Sui review uses the one current fixed account and connection, with no
+public account/connection selector. An unavailable target is reported before
+creating an empty review. The initial card already fixes the account and
+connection before preparation. Its target remains visible through preparation
+failure, read-address clearing and temporary unavailability. Disconnecting and reconnecting cannot move that review to the
+replacement connection, even for the same address. Start a new Review instead.
+The normal card shows its target without a selector and prepares or renews
+evidence when permitted. Only Request wallet approval and approval in the wallet
+authorize the transaction.
 
 Preparation execution and its stored outcome are separate. If execution has
 ended but both success and failure writes failed, the next current-state read
@@ -191,8 +181,11 @@ before admission, update the review; no signature request is sent. Once admitted
 the transaction remains fixed and the saved signing deadline applies. Reading
 or recovering an admitted attempt does not require a fresh quote or send it again.
 
-Wallet account/chain selection changes and connection conflicts invalidate affected unadmitted review
-data and pending submission permission in the same connection-change transaction.
+Changes to the target Sui grant or connection lifecycle invalidate affected
+unadmitted review material and pending submission permission atomically. Other
+chain grants, display metadata and list order do not invalidate Sui authority.
+Per-chain revisions remain monotonic even if a grant changes and later returns
+to the earlier value. Unknown event scope invalidates the entire connection.
 If that write fails, wallet operations are disabled until service recovery; a late
 signature cannot continue under an unrecorded old permission.
 Before submission, an explicit user stop, an SDK connection change and a
@@ -202,7 +195,9 @@ After submission, connection updates and disconnect requests do not stop
 independent chain observation, including a lookup that has not started yet.
 Only the explicit transaction `stop_waiting` action stops that observation;
 later connection events neither resume it nor extend its deadline. An explicit
-result read can still inspect the same digest. No event resends the transaction.
+result read through a new management card can still inspect the same digest.
+An ended card cannot resume observation. A new exact-attempt result card can
+perform one lookup; its final recorded result also stays fixed. No event resends the transaction.
 Callbacks already dispatched to submit or read a transaction may still record
 verified facts and settle their own pending flags while the same DB owner is
 valid. Wallet failure alone does not end an SDK promise. Server shutdown, owner
@@ -237,8 +232,8 @@ SDK sessions may be reconciled with existing connection records; abandoned
 pairings and financial requests are not replayed. An unknown outcome may later
 be resolved by reading the known transaction digest.
 
-Data replacement is refused while signature/submission callbacks or initial
-chain observation remain unsettled. Removing finished local records cannot
+Data replacement is refused while admitted management operations, their SDK
+cleanup, signature/submission callbacks or initial chain observation remain unsettled. Removing finished local records cannot
 cancel or reverse an on-chain transaction. Public export/import never restores
 card permissions, SDK secrets, private request authority or live pending work.
 Local data replacement does not revoke the wallet app's connection approval.

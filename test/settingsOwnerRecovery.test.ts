@@ -4,13 +4,14 @@ import { mkdtemp, readFile, rm, writeFile, readdir, unlink } from "node:fs/promi
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { acquireDataDirectoryOwner } from "../src/runtime/shared/ownerLease.js";
 import type { CardResponse } from "../src/core/session/cardSession.js";
 import type { SettingsDraft, SettingsView } from "../src/core/session/settingsOperation.js";
 
 type Event = { event: string; name?: string; message?: string; card: CardResponse & { permission: string }; creations: number; publications: number;
+  recoveryResults?: Record<string, SettingsView>;
   control: { data_epoch: number; active_operation_id: string | null; file_io_id: string | null; wallet_input_blocked: number }; account: { address: string } | null };
 const children: ChildProcess[] = [], directories: string[] = [];
 afterEach(async () => {
@@ -33,8 +34,8 @@ async function actor(directory: string, fault = "none") {
     }
     throw new Error(`Fixture observation ${name} did not arrive: ${diagnostic}`);
   };
-  await next("ready");
-  return { child, next, send: (value: unknown) => child.send(value as object),
+  const ready = await next("ready");
+  return { child, next, recoveryResults: ready.recoveryResults, send: (value: unknown) => child.send(value as object),
     async kill() { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; } };
 }
 const view = (event: Event) => event.card.snapshot.data as SettingsView;
@@ -49,17 +50,20 @@ it("keeps the committed snapshot result and settles ended cleanup after actual p
     const operationId = view(prepared).operationId;
     const operation = db.prepare("SELECT phase,result_json FROM settings_operations WHERE operation_id=?").get(operationId) as { phase: string; result_json: string };
     const file = db.prepare("SELECT file_id,relative_path,cleanup FROM settings_files WHERE operation_id=?").get(operationId) as { file_id: string; relative_path: string; cleanup: string };
-    expect(operation.phase).toBe("terminal"); const originalResult = JSON.parse(operation.result_json);
-    expect(originalResult).toMatchObject({ outcome: "completed", completionScope: "backup_snapshot" }); expect(file.cleanup).toBe("complete");
+    expect(operation.phase).toBe("terminal"); const originalResult = operation.result_json ? JSON.parse(operation.result_json) : null;
+    expect(originalResult).toMatchObject({ outcome: "completed", completionScope: "backup_delivery" }); expect(file.cleanup).toBe("complete");
     expect(db.prepare("SELECT file_io_id FROM settings_control WHERE id=1").get()).toEqual({ file_io_id: file.file_id });
     await expect(readFile(join(dir, file.relative_path))).rejects.toMatchObject({ code: "ENOENT" });
     expect(() => acquireDataDirectoryOwner(join(dir, "activity.sqlite"))).toThrow("runtime owner");
     await first.kill(); db.exec("DROP TRIGGER refuse_finished_release");
-    const second = await actor(dir); second.send({ command: "read", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
-    const restored = await second.next("read"); expect(view(restored).result).toEqual(originalResult);
+    const second = await actor(dir); second.send({ command: "status", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
+    const restored = await second.next("read");
+    expect(view(restored).result).toMatchObject({ ...originalResult, recordedAt: expect.any(String) });
+    expect(Date.parse(view(restored).result!.recordedAt)).toBeGreaterThanOrEqual(Date.parse(restored.card.snapshot.createdAt));
     expect(restored.control).toMatchObject({ file_io_id: null, active_operation_id: null }); expect(restored.creations).toBe(0);
     expect(view(restored).download?.allowedFileActions).toEqual([]);
-    second.send({ command: "read" }); expect(view(await second.next("read")).result).toEqual(originalResult);
+    second.send({ command: "read", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
+    expect(view(await second.next("read")).result).toEqual(originalResult);
     await second.kill();
   } finally { db.close(); }
 }, 25000);
@@ -79,7 +83,7 @@ it.each(["write_before", "write_partial", "write_after", "sync_before", "sync_af
     expect(await readdir(join(dir, "backups")).catch(() => [])).toEqual([]);
     expect(() => acquireDataDirectoryOwner(join(dir, "activity.sqlite"))).toThrow("runtime owner");
     await first.kill(); db.exec("DROP TRIGGER IF EXISTS refuse_result"); db.close();
-    const second = await actor(dir); second.send({ command: "read", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
+    const second = await actor(dir); second.send({ command: "status", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
     const recovered = await second.next("read");
     expect(view(recovered).result?.outcome).toBe("interrupted");
     expect(view(recovered).download).toMatchObject({ availability: "ended", endReason: "server_restarted", allowedFileActions: [] });
@@ -89,17 +93,6 @@ it.each(["write_before", "write_partial", "write_after", "sync_before", "sync_af
     await second.kill();
   }, 25000);
 
-it.each([false, true])("reads a historical published artifact after owner exit and never deletes the user's file (changed=%s)", async (changed) => {
-  const dir = await directory(), first = await actor(dir);
-  first.send({ command: "historical_export" }); const prepared = await first.next("historical_export"); await first.kill();
-  const path = join(dir, "backups", `${view(prepared).operationId}.json`);
-  if (changed) await writeFile(path, Buffer.from("user replacement"));
-  const bytes = await readFile(path), second = await actor(dir);
-  second.send({ command: "read", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
-  const result = await second.next("read"); expect(view(result).result?.outcome).toBe(changed ? "interrupted" : "completed");
-  expect(await readFile(path)).toEqual(bytes); expect(result.creations).toBe(0); await second.kill();
-}, 25000);
-
 it("reports unavailable exclusive snapshot creation and allows another Settings action", async () => {
   const dir = await directory(), first = await actor(dir, "unsupported_create");
   first.send({ command: "prepare", draft: { kind: "download_backup" } }); await first.next("prepared");
@@ -108,7 +101,7 @@ it("reports unavailable exclusive snapshot creation and allows another Settings 
   do { first.send({ command: "read" }); result = await first.next("read"); } while (!view(result).result);
   expect(view(result).result?.outcome).toBe("failed"); expect(result.creations).toBe(0);
   expect(await readdir(join(dir, ".settings-staging"))).toEqual([]);
-  first.send({ command: "prepare", draft: { kind: "clear_read_address" } }); await first.next("prepared");
+  first.send({ command: "prepare", draft: { kind: "restore_endpoint", endpoint: "grpc" } }); await first.next("prepared");
   first.send({ command: "confirm" }); expect(view(await first.next("admitted")).result?.outcome).toBe("completed"); await first.kill();
 }, 25000);
 
@@ -117,7 +110,7 @@ it.each(["reset_local_data", "import_local_data"] as const)("preserves %s commit
   first.send({ command: "prepare", draft: { kind } satisfies SettingsDraft }); const prepared = await first.next("prepared");
   first.send({ command: "confirm" }); const committed = await first.next("admitted"); expect(view(committed).result?.outcome).toBe("completed");
   await first.kill(); const second = await actor(dir);
-  second.send({ command: "read", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
+  second.send({ command: "status", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
   const restored = await second.next("read"); expect(view(restored).result).toEqual(view(committed).result); expect(restored.control.data_epoch).toBe(1);
   expect(restored.card.snapshot.state).toBe("closed"); expect(view(restored).allowedActions).toEqual([]);
   second.send({ command: "read" }); expect((await second.next("read")).control.data_epoch).toBe(1); await second.kill();
@@ -126,11 +119,46 @@ it.each(["reset_local_data", "import_local_data"] as const)("preserves %s commit
 it.each(["reset_local_data", "import_local_data"] as const)("does not apply %s when the prepared parent exits before commit", async (kind) => {
   const dir = await directory(), first = await actor(dir, kind === "import_local_data" ? "verify_before" : "none");
   first.send({ command: "prepare", draft: { kind } }); const prepared = await first.next("prepared");
+  const upload = kind === "import_local_data" ? view(prepared).file! : undefined;
+  let uploadPath: string | undefined;
+  if (upload) {
+    const db = new Database(join(dir, "activity.sqlite"));
+    try {
+      const stored = db.prepare("SELECT relative_path,role,invalidated,cleanup FROM settings_files WHERE file_id=? AND operation_id=?")
+        .get(upload.fileId, view(prepared).operationId) as { relative_path: string; role: string; invalidated: number; cleanup: string };
+      expect(stored).toMatchObject({ role: "upload", invalidated: 0, cleanup: "pending" });
+      uploadPath = join(dir, stored.relative_path);
+      const bytes = await readFile(uploadPath);
+      expect(upload.sealed).toBe(true); expect(bytes.length).toBe(upload.totalSize);
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(upload.sha256);
+    } finally { db.close(); }
+  }
   if (kind === "import_local_data") { first.send({ command: "confirm" }); await first.next("boundary"); }
   await first.kill(); const second = await actor(dir);
-  second.send({ command: "read", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
+  if (upload) expect(second.recoveryResults?.[prepared.card.snapshot.cardId]).toMatchObject({
+    result: { outcome: "interrupted" }, temporaryFileCleanup: "pending", file: { fileId: upload.fileId, cleanup: "pending" }, allowedActions: [], observe: false });
+  second.send({ command: "status", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
   const restored = await second.next("read"); expect(view(restored).result?.outcome).toBe("interrupted");
-  expect(restored.control.data_epoch).toBe(0); expect(restored.account?.address).toBe(`0x${"a".repeat(64)}`); await second.kill();
+  expect(restored.control.data_epoch).toBe(0); expect(restored.account?.address).toBe(`0x${"a".repeat(64)}`);
+  if (upload) {
+    expect(view(restored)).toMatchObject({ temporaryFileCleanup: "complete", file: {
+      fileId: upload.fileId, sha256: upload.sha256, totalSize: upload.totalSize, cleanup: "complete"
+    } });
+    const db = new Database(join(dir, "activity.sqlite"));
+    try {
+      expect(db.prepare("SELECT file_id,invalidated,cleanup FROM settings_files WHERE operation_id=?").all(view(prepared).operationId))
+        .toEqual([{ file_id: upload.fileId, invalidated: 1, cleanup: "complete" }]);
+      const raw = db.prepare("SELECT result_json FROM live_read_cards WHERE id=?").get(prepared.card.snapshot.cardId) as { result_json: string };
+      expect(JSON.parse(raw.result_json)).toEqual(second.recoveryResults![prepared.card.snapshot.cardId]);
+    } finally { db.close(); }
+    await expect(readFile(uploadPath!)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(join(dir, ".settings-staging"))).toEqual([]);
+    expect(restored.control).toMatchObject({ active_operation_id: null, file_io_id: null });
+    const originalResult = view(restored).result;
+    second.send({ command: "read" });
+    expect(view(await second.next("read")).result).toEqual(originalResult);
+  }
+  await second.kill();
 }, 25000);
 
 it.each(["stopping", "starting"])("ends an admitted Settings restart as interrupted after actual parent exit during %s", async (phase) => {
@@ -140,9 +168,9 @@ it.each(["stopping", "starting"])("ends an admitted Settings restart as interrup
   let current: Event;
   do { first.send({ command: "read" }); current = await first.next("read"); } while (view(current).phase !== phase);
   expect(current.control.wallet_input_blocked).toBe(1); await first.kill();
-  const second = await actor(dir); second.send({ command: "read", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
+  const second = await actor(dir); second.send({ command: "status", reference: { cardId: prepared.card.snapshot.cardId, permission: prepared.card.permission } });
   const restored = await second.next("read"); expect(view(restored).result?.outcome).toBe("interrupted");
-  expect(restored.card.snapshot.reason).toBe("server_restarted"); expect(restored.control).toMatchObject({ active_operation_id: null, wallet_input_blocked: 0 });
+  expect(restored.card.snapshot.input).toHaveProperty("operationStatus"); expect(restored.control).toMatchObject({ active_operation_id: null, wallet_input_blocked: 0 });
   expect(view(restored).result?.message).not.toContain("before this operation was confirmed");
   await second.kill();
 }, 25000);
@@ -155,10 +183,10 @@ it.each(["source_identity_before", "link_before", "link_after", "saved_before", 
     first.send({ command: "confirm" }); await first.next("admitted"); first.send({ command: "unsupported" });
     const cut = await first.next("boundary"); expect(cut.name).toBe(fault);
     const db = new Database(join(dir, "activity.sqlite"));
-    let originalResult: unknown, fileId: string;
+    let fileId: string;
     try {
       const row = db.prepare("SELECT file_id,result_json,preparation_json FROM settings_operations WHERE operation_id=?").get(id) as { file_id: string; result_json: string; preparation_json: string };
-      fileId = row.file_id; originalResult = JSON.parse(row.result_json);
+      fileId = row.file_id;
       const save = JSON.parse(row.preparation_json).download.localSave;
       expect(save.status).toBe(fault.startsWith("cleanup_") ? "saved" : "saving");
       if (fault === "source_identity_before") expect(save.sourceIdentity).toBeUndefined(); else expect(save.sourceIdentity).toMatchObject({ device: expect.any(String), inode: expect.any(String) });
@@ -168,9 +196,9 @@ it.each(["source_identity_before", "link_before", "link_after", "saved_before", 
     const target = join(dir, "backups", `${id}.json`), shouldExist = !["source_identity_before", "link_before"].includes(fault);
     const bytes = shouldExist ? await readFile(target) : undefined;
     const second = await actor(dir);
-    second.send({ command: "read", reference: { cardId: created.card.snapshot.cardId, permission: created.card.permission } });
+    second.send({ command: "status", reference: { cardId: created.card.snapshot.cardId, permission: created.card.permission } });
     const recovered = await second.next("read"), current = view(recovered);
-    expect(current.result).toEqual(originalResult); expect(current.allowedActions).toEqual([]); expect(current.download?.allowedFileActions).toEqual([]);
+    expect(current.result).toMatchObject({ outcome: shouldExist ? "completed" : "interrupted" }); expect(current.allowedActions).toEqual([]); expect(current.download?.allowedFileActions).toEqual([]);
     expect(recovered.creations).toBe(0); expect(recovered.publications).toBe(0);
     expect(recovered.control).toMatchObject({ active_operation_id: null, file_io_id: null });
     expect(current.temporaryFileCleanup).toBe("complete");
@@ -198,10 +226,32 @@ it.each(["different_inode", "missing_source", "changed_bytes"])("refuses to adop
   else if (change === "missing_source") await unlink(join(dir, ".settings-staging", `${record.file_id}.download`));
   else await writeFile(target, Buffer.alloc(original.length, 1));
   const expected = await readFile(target), second = await actor(dir);
-  second.send({ command: "read", reference: { cardId: created.card.snapshot.cardId, permission: created.card.permission } });
+  second.send({ command: "status", reference: { cardId: created.card.snapshot.cardId, permission: created.card.permission } });
   const recovered = await second.next("read");
   expect(view(recovered).download?.localSave).toMatchObject({ status: "failed", failure: change === "different_inode" ? "target_conflict" : "source_unavailable" });
   expect(view(recovered).backupLocation).toBeUndefined(); expect(view(recovered).download?.allowedFileActions).toEqual([]);
   expect(recovered.creations).toBe(0); expect(recovered.publications).toBe(0); expect(await readFile(target)).toEqual(expected);
   await second.kill();
 }, 25000);
+
+
+it("ends an unadmitted delivery card on actual owner exit without replaying a transfer", async () => {
+  const dir = await directory(), first = await actor(dir);
+  first.send({ command: "prepare", draft: { kind: "download_backup" } });
+  await first.next("prepared"); first.send({ command: "confirm" }); await first.next("admitted");
+  await vi.waitFor(async () => {
+    first.send({ command: "read" }); const ready = await first.next("read");
+    expect(view(ready).download?.availability).toBe("available");
+  });
+  first.send({ command: "delivery" }); const ready = await first.next("delivery");
+  expect(ready.card.snapshot.state).toBe("ready");
+  const ref = { cardId: ready.card.snapshot.cardId, permission: ready.card.permission };
+  await first.kill(); const second = await actor(dir);
+  second.send({ command: "read", reference: ref }); const closed = await second.next("read");
+  expect(closed.card.snapshot).toMatchObject({ state: "closed", reason: "server_restarted",
+    data: { observe: false, allowedActions: [], result: { outcome: "interrupted" } } });
+  expect(view(closed).download?.allowedFileActions ?? []).toEqual([]);
+  expect(closed.creations).toBe(0); expect(closed.publications).toBe(0);
+  second.send({ command: "read", reference: ref });
+  expect((await second.next("read")).card.snapshot).toEqual(closed.card.snapshot);
+});

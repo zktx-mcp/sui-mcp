@@ -14,7 +14,6 @@ type OperationRow = {
   fingerprint: string | null; prepared_user_data_revision: number | null; preparation_json: string | null;
   file_id: string | null; accepted_digest: string | null; admitted_at: string | null; result_json: string | null;
   prior_run_id: string | null; next_run_id: string | null; supersedes_operation_id: string | null; superseded_by_operation_id: string | null;
-  checkpoint: NonNullable<SettingsOperation["checkpoint"]> | null;
 };
 type FileRow = { file_id: string; operation_id: string; cleanup_operation_id: string; role: SettingsFile["role"]; relative_path: string; display_name: string;
   total_size: number; received_size: number; sha256: string; sealed: number; invalidated: number;
@@ -31,10 +30,25 @@ export class SqliteSettingsWorkflowStore {
   }
   transaction<T>(work: () => T): T { return this.db.transaction(work).immediate(); }
   control(): SettingsControl { return this.db.prepare("SELECT * FROM settings_control WHERE id=1").get() as SettingsControl; }
+  clearReadAddress(connectionId: string, account: string): void {
+    const changed = this.db.prepare(`UPDATE live_wallet_connections SET read_address_cleared=1
+      WHERE id=? AND current_slot=1 AND read_address_cleared=0 AND data_epoch=(SELECT data_epoch FROM settings_control WHERE id=1)
+      AND EXISTS(SELECT 1 FROM json_each(connection_json,'$.chainResults') r WHERE json_extract(r.value,'$.chainId')='sui:mainnet'
+        AND json_extract(r.value,'$.status')='bound' AND json_extract(r.value,'$.address')=?)`).run(connectionId, account);
+    if (!changed.changes) throw new SettingsConflict("The saved read address changed. Check the current address before clearing it.");
+  }
   create(record: CardRecord): void {
     this.transaction(() => {
       if (record.scope !== "settings" || record.state.kind !== "settings" || !record.operationId || record.ownerId !== this.ownerId) {
         throw new SettingsConflict("This Settings card could not be identified.");
+      }
+      if (record.state.input.backupDelivery) {
+        const ref = record.state.input.backupDelivery as { operationId: string; fileId: string };
+        const op = this.get(ref.operationId), file = this.file(ref.fileId), download = op && settingsDownload(op);
+        if (!op || op.ownerId !== this.ownerId || op.dataEpoch !== this.control().data_epoch || !file || op.fileId !== file.fileId ||
+            !download?.readyAt || download.endReason || !download.expiresAt || Date.parse(download.expiresAt) <= this.now().getTime() || file.invalidated ||
+            download.localSave?.status === "saving") throw new SettingsConflict("This backup is no longer available for another delivery. Request a new backup.");
+        this.cards.create(record); return;
       }
       this.cards.create(record);
       this.db.prepare(`INSERT INTO settings_operations (operation_id,card_id,owner_id,data_epoch,phase)
@@ -57,12 +71,13 @@ export class SqliteSettingsWorkflowStore {
       ...(row.prior_run_id === null ? {} : { priorRunId: row.prior_run_id }),
       ...(row.next_run_id === null ? {} : { nextRunId: row.next_run_id }),
       ...(row.supersedes_operation_id === null ? {} : { supersedesOperationId: row.supersedes_operation_id }),
-      ...(row.superseded_by_operation_id === null ? {} : { supersededByOperationId: row.superseded_by_operation_id }),
-      ...(row.checkpoint === null ? {} : { checkpoint: row.checkpoint }) };
+      ...(row.superseded_by_operation_id === null ? {} : { supersededByOperationId: row.superseded_by_operation_id }) };
   }
   forCard(record: CardRecord): SettingsOperation {
     const operation = record.operationId && this.get(record.operationId);
-    if (!operation || operation.cardId !== record.state.cardId || record.scope !== "settings") {
+    if (!operation || record.scope !== "settings" || operation.cardId !== record.state.cardId &&
+        !(record.state.input.backupDelivery && (record.state.input.backupDelivery as { operationId: string; fileId: string }).operationId === operation.operationId &&
+          (record.state.input.backupDelivery as { fileId: string }).fileId === operation.fileId)) {
       throw new SettingsConflict("This Settings request does not match the open card.");
     }
     return operation;
@@ -70,7 +85,7 @@ export class SqliteSettingsWorkflowStore {
   requireInput(expected: CardRecord, operationId?: string, now = this.now()): { card: CardRecord; operation: SettingsOperation } {
     const card = this.cards.get(expected.state.cardId);
     if (!card || card.ownerId !== this.ownerId || card.tokenHash !== expected.tokenHash || card.scope !== "settings" ||
-        card.state.kind !== "settings" || card.state.revision !== expected.state.revision ||
+        card.state.kind !== "settings" || card.state.input.backupDelivery !== undefined || card.state.input.operationStatus !== undefined || card.state.revision !== expected.state.revision ||
         card.state.state !== "ready" || card.acceptedInput !== undefined || Date.parse(card.state.expiresAt) <= now.getTime()) {
       throw new SettingsConflict("This Settings selection changed or its time limit ended.");
     }
@@ -81,25 +96,40 @@ export class SqliteSettingsWorkflowStore {
     }
     return { card, operation };
   }
-  write(expected: SettingsOperation, next: SettingsOperation, card: CardRecord, nextCard?: CardRecord): void {
+  write(expected: SettingsOperation, next: SettingsOperation, card: CardRecord, nextCard?: CardRecord, display?: Record<string, unknown>): void {
     this.transaction(() => {
       if (!isDeepStrictEqual(this.get(expected.operationId), expected) || next.operationId !== expected.operationId ||
           next.cardId !== expected.cardId || next.ownerId !== expected.ownerId) throw new SettingsConflict("Settings state changed before it could be saved.");
+      // The operation owns the lifetime of its upload. A new effect or terminal
+      // result cannot discard the file reference without retaining cleanup work.
+      if (next.fileId !== expected.fileId || next.draft?.kind !== "import_local_data" || next.phase === "terminal") {
+        this.invalidateUpload(expected);
+      }
       this.db.prepare(`UPDATE settings_operations SET data_epoch=@epoch,kind=@kind,phase=@phase,draft_json=@draft,
         preparation_id=@preparationId,fingerprint=@fingerprint,prepared_user_data_revision=@userRevision,preparation_json=@preparation,
         file_id=@fileId,accepted_digest=@accepted,admitted_at=@admitted,result_json=@result,
-        prior_run_id=@prior,next_run_id=@next,supersedes_operation_id=@supersedes,superseded_by_operation_id=@supersededBy,checkpoint=@checkpoint
+        prior_run_id=@prior,next_run_id=@next,supersedes_operation_id=@supersedes,superseded_by_operation_id=@supersededBy
         WHERE operation_id=@id`).run({ id: next.operationId, epoch: next.dataEpoch, kind: next.draft?.kind ?? null,
         phase: next.phase, draft: next.draft ? JSON.stringify(next.draft) : null, preparationId: next.preparationId ?? null,
         fingerprint: next.fingerprint ?? null, userRevision: next.preparedUserDataRevision ?? null,
         preparation: next.preparation ? JSON.stringify(next.preparation) : null, fileId: next.fileId ?? null,
         accepted: next.acceptedDigest ?? null, admitted: next.admittedAt ?? null, result: next.result ? JSON.stringify(next.result) : null,
         prior: next.priorRunId ?? null, next: next.nextRunId ?? null,
-        supersedes: next.supersedesOperationId ?? null, supersededBy: next.supersededByOperationId ?? null, checkpoint: next.checkpoint ?? null });
-      if (!this.cards.replace(card, nextCard ?? { ...card, state: { ...card.state, revision: card.state.revision + 1 } })) {
+        supersedes: next.supersedesOperationId ?? null, supersededBy: next.supersededByOperationId ?? null });
+      let projected = nextCard ?? { ...card, state: { ...card.state, revision: card.state.revision + 1 } };
+      if (projected.state.state === "closed" && projected.state.data === undefined && next.result) {
+        projected = { ...projected, state: { ...projected.state, data: this.resultView(next, next.result, display) } };
+      }
+      if (card.state.state !== "closed" && !this.cards.replace(card, projected, this.now())) {
         throw new SettingsConflict("The Settings card changed before it could be saved.");
       }
     });
+  }
+  invalidateUpload(operation: SettingsOperation): void {
+    if (!operation.fileId) return;
+    this.db.prepare(`UPDATE settings_files SET invalidated=1,cleanup='pending'
+      WHERE file_id=? AND operation_id=? AND role='upload' AND invalidated=0`)
+      .run(operation.fileId, operation.operationId);
   }
   hasReusableUpload(operationId: string): boolean {
     return !!this.db.prepare(`SELECT 1 FROM settings_operations WHERE operation_id=? AND (${SETTINGS_REUSABLE_UPLOAD_SQL})`).get(operationId);
@@ -173,13 +203,9 @@ export class SqliteSettingsWorkflowStore {
       this.requireFinalSlot();
       const file = snapshot(operation);
       if (!isSettingsDownloadFile(file) || file.operationId !== operation.operationId) throw new SettingsConflict("The download snapshot does not match this request.");
-      if (operation.fileId) {
-        const previous = this.file(operation.fileId);
-        if (previous?.role === "upload") this.writeFile({ ...previous, invalidated: true, cleanup: "pending" });
-      }
       this.createFile(file); this.claimFinal(operation.operationId); this.reserveFileIO(file.fileId, operation.operationId);
       const admittedAt = this.now().toISOString();
-      const download: SettingsDownload = { currentAttemptId: input.attemptId, attempts: [{ attemptId: input.attemptId, admittedAt }] };
+      const download: SettingsDownload = { currentAttemptId: input.attemptId, attempts: [{ attemptId: input.attemptId, admittedAt, cardId: card.state.cardId }] };
       const next: SettingsOperation = { operationId: operation.operationId, cardId: operation.cardId, ownerId: operation.ownerId,
         dataEpoch: operation.dataEpoch, phase: "executing", draft: { kind: "download_backup" }, fileId: file.fileId,
         preparation: { download }, acceptedDigest: settingsIdentity(input), admittedAt };
@@ -194,7 +220,9 @@ export class SqliteSettingsWorkflowStore {
       throw new SettingsConflict("This download no longer belongs to the current Settings request.");
     }
     const operation = this.get(operationId), file = this.file(fileId);
-    if (!operation || operation.cardId !== card.state.cardId || operation.ownerId !== this.ownerId ||
+    if (!operation || operation.cardId !== card.state.cardId && !(card.state.input.backupDelivery &&
+        (card.state.input.backupDelivery as { operationId: string; fileId: string }).operationId === operationId &&
+        (card.state.input.backupDelivery as { operationId: string; fileId: string }).fileId === fileId) || operation.ownerId !== this.ownerId ||
         operation.dataEpoch !== this.control().data_epoch || operation.fileId !== fileId || !file ||
         file.operationId !== operationId || !isSettingsDownloadFile(file)) throw new SettingsConflict("This download no longer belongs to the current Settings request.");
     const download = settingsDownload(operation);
@@ -202,13 +230,13 @@ export class SqliteSettingsWorkflowStore {
     return { card, operation, file, download };
   }
   requireDownloadRead(expected: CardRecord, fileId: string, attemptId: string | undefined) {
-    const context = this.downloadContext(expected, expected.operationId!, fileId), { operation, download, file } = context;
-    if (!attemptId || attemptId !== download.currentAttemptId || download.endReason || download.localSave || !download.expiresAt ||
+    const context = this.downloadContext(expected, expected.operationId!, fileId), { download, file } = context;
+    if (context.card.state.state === "closed" || !attemptId || download.attempts.find((a) => a.attemptId === attemptId)?.cardId !== context.card.state.cardId || attemptId !== download.currentAttemptId || download.endReason || download.localSave || !download.expiresAt ||
         this.now().getTime() >= Date.parse(download.expiresAt) || !file.sealed || file.invalidated ||
-        operation.result?.outcome !== "completed") throw new SettingsConflict("This backup's download period has ended or its attempt changed.");
+        !download.readyAt) throw new SettingsConflict("This backup's download period has ended or its attempt changed.");
     return context;
   }
-  private writeDownloadState(expected: SettingsOperation, download: SettingsDownload, card: CardRecord): void {
+  private writeDownloadState(expected: SettingsOperation, download: SettingsDownload, card: CardRecord, nextCard?: CardRecord): void {
     storedSettingsDownloadSchema.parse(download);
     this.transaction(() => {
       if (!isDeepStrictEqual(this.get(expected.operationId), expected) || expected.draft?.kind !== "download_backup") {
@@ -218,12 +246,13 @@ export class SqliteSettingsWorkflowStore {
       // state must not reserialize it, even with semantically identical keys.
       this.db.prepare("UPDATE settings_operations SET preparation_json=? WHERE operation_id=?")
         .run(JSON.stringify({ download }), expected.operationId);
-      if (!this.cards.replace(card, { ...card, state: { ...card.state, revision: card.state.revision + 1 } })) {
+      const current = this.cards.get(card.state.cardId);
+      if (current && current.state.state !== "closed" && !this.cards.replace(current, nextCard ?? { ...current, state: { ...current.state, revision: current.state.revision + 1 } })) {
         throw new SettingsConflict("The download card changed before its state could be saved.");
       }
     });
   }
-  endDownload(id: string, reason: NonNullable<SettingsDownload["endReason"]>): void {
+  endDownload(id: string, reason: NonNullable<SettingsDownload["endReason"]>, finalResult?: SettingsResult): void {
     const operation = this.get(id);
     if (!operation) return;
     const download = settingsDownload(operation), card = this.cards.get(operation.cardId);
@@ -232,6 +261,7 @@ export class SqliteSettingsWorkflowStore {
     const file = operation.fileId ? this.file(operation.fileId) : undefined;
     if (file && isSettingsDownloadFile(file)) this.writeFile({ ...file, invalidated: true, cleanup: "pending" });
     this.writeDownloadState(operation, { ...download, endReason: reason }, card);
+    this.finishDownloadCard(id, undefined, finalResult);
   }
   expireDownloads(operationId?: string): void {
     const now = this.now().getTime();
@@ -260,33 +290,37 @@ export class SqliteSettingsWorkflowStore {
         const save = download.localSave;
         const duplicate = save?.attempts.find((a) => a.saveAttemptId === input.saveAttemptId);
         if (duplicate) {
-          if (save!.attemptId !== input.attemptId || duplicate.previousSaveAttemptId !== input.previousSaveAttemptId ||
+          if (duplicate.cardId !== card.state.cardId || save!.attemptId !== input.attemptId || duplicate.previousSaveAttemptId !== input.previousSaveAttemptId ||
               duplicate.allowPossibleCopy !== input.allowPossibleCopy) throw new SettingsConflict("This save does not match the recorded request.");
           return;
         }
-        if (!save || save.attemptId !== input.attemptId || download.endReason || !download.expiresAt ||
+        if (card.state.state !== "ready" || !card.state.input.backupDelivery || !save || save.attemptId !== input.attemptId || download.endReason || !download.expiresAt ||
             Date.parse(download.expiresAt) <= this.now().getTime() || file.invalidated || !file.sealed ||
             (save.status === "needs_consent" ? input.previousSaveAttemptId !== undefined :
               save.status !== "failed" || save.failure !== "not_published" || input.previousSaveAttemptId !== save.currentSaveAttemptId) ||
             input.allowPossibleCopy !== this.previousDeliveryPossible(download)) throw new SettingsConflict("This backup cannot be saved by that request. Check its current status.");
-        const next = this.admitLocalSave(operation, file, save, input.saveAttemptId, input.allowPossibleCopy, input.previousSaveAttemptId);
-        this.writeDownloadState(operation, { ...download, localSave: next }, card);
+        const next = this.admitLocalSave(operation, file, save, input.saveAttemptId, input.allowPossibleCopy, card.state.cardId, input.previousSaveAttemptId);
+        this.writeDownloadState(operation, { ...download, localSave: next }, card, { ...card, acceptedInput: input, state: { ...card.state, state: "running", revision: card.state.revision + 1 } });
         return file;
       }
       if (input.action === "settings_retry_download") {
         const duplicate = download.attempts.find((attempt) => attempt.attemptId === input.attemptId);
         if (duplicate) {
-          if (duplicate.previousAttemptId !== input.previousAttemptId) throw new SettingsConflict("This retry does not match the recorded download attempt.");
+          if (duplicate.cardId !== card.state.cardId || duplicate.previousAttemptId !== input.previousAttemptId) throw new SettingsConflict("This retry does not match the recorded download attempt.");
           return;
         }
-        if (download.currentAttemptId !== input.previousAttemptId || download.endReason || download.localSave || !download.expiresAt || !file.sealed ||
-            file.invalidated || operation.result?.outcome !== "completed") throw new SettingsConflict("This backup is no longer available for that retry.");
+        if (card.state.state !== "ready" || !card.state.input.backupDelivery || download.currentAttemptId !== input.previousAttemptId || download.endReason || download.localSave || !download.expiresAt || !file.sealed ||
+            file.invalidated || !download.readyAt) throw new SettingsConflict("This backup is no longer available for that retry.");
+        const previousCardId = download.attempts.find((a) => a.attemptId === download.currentAttemptId)!.cardId;
+        // A new explicit delivery attempt does not establish the earlier Host outcome.
+        // Record the old card's uncertainty before the new attempt becomes current.
+        this.finishDownloadCard(operation.operationId, previousCardId);
         const next: SettingsDownload = { ...download, currentAttemptId: input.attemptId,
-          attempts: [...download.attempts, { attemptId: input.attemptId, previousAttemptId: input.previousAttemptId, admittedAt: this.now().toISOString() }] };
-        this.writeDownloadState(operation, next, card); return;
+          attempts: [...download.attempts, { attemptId: input.attemptId, cardId: card.state.cardId, previousAttemptId: input.previousAttemptId, admittedAt: this.now().toISOString() }] };
+        this.writeDownloadState(this.get(operation.operationId)!, next, card, { ...card, acceptedInput: input, state: { ...card.state, state: "running", revision: card.state.revision + 1 } }); return;
       }
       const entry = download.attempts.find((attempt) => attempt.attemptId === input.attemptId);
-      if (!entry) throw new SettingsConflict("This download attempt was not admitted.");
+      if (!entry || entry.cardId !== card.state.cardId) throw new SettingsConflict("This download attempt was not admitted.");
       if (input.action === "settings_report_download") {
         if (!download.readyAt) throw new SettingsConflict("The download snapshot is not ready.");
         if (entry.hostReport) {
@@ -296,37 +330,39 @@ export class SqliteSettingsWorkflowStore {
         const next: SettingsDownload = { ...download, attempts: download.attempts.map((attempt) => attempt === entry
           ? { ...attempt, hostReport: input.status, ...(input.failure ? { failure: input.failure } : {}) } : attempt) };
         let admitted = false;
-        if (input.status === "unsupported" && input.attemptId === download.currentAttemptId && !download.endReason &&
+        if (input.status === "unsupported" && input.attemptId === download.currentAttemptId && card.state.state === "running" && !download.endReason &&
             download.expiresAt && this.now().getTime() < Date.parse(download.expiresAt) && file.sealed && !file.invalidated) {
           const save: SettingsLocalSave = { status: "needs_consent", attemptId: input.attemptId, fileId: file.fileId,
             sha256: file.sha256, totalSize: file.totalSize, destination: settingsBackupPath(operation.operationId), ownerId: this.ownerId, attempts: [] };
           if (this.previousDeliveryPossible(download)) next.localSave = save;
-          else { next.localSave = this.admitLocalSave(operation, file, save, randomUUID(), false); admitted = true; }
+          else { next.localSave = this.admitLocalSave(operation, file, save, randomUUID(), false, card.state.cardId); admitted = true; }
         }
         this.writeDownloadState(operation, next, card);
         if (input.attemptId === download.currentAttemptId && input.status === "acknowledged" && !download.endReason) this.endDownload(operation.operationId, "acknowledged");
+        else if (!admitted) this.finishDownloadCard(operation.operationId, card.state.cardId);
         return admitted ? file : undefined;
       } else {
-        if (input.attemptId !== download.currentAttemptId) throw new SettingsConflict("A different download attempt is current.");
+        if (card.state.state === "closed" || input.attemptId !== download.currentAttemptId) throw new SettingsConflict("A different download attempt is current.");
         if (download.localSave?.status === "saving") throw new SettingsConflict("Saving has already started. Check its result before continuing.");
         this.endDownload(operation.operationId, "cancelled");
       }
     });
   }
   previousDeliveryPossible(download: SettingsDownload): boolean {
-    return download.attempts.some((a) => a.attemptId !== download.currentAttemptId && a.hostReport !== "unsupported");
+    return download.attempts.some((a) => a.attemptId !== download.currentAttemptId && a.hostReport !== "unsupported" && a.hostReport !== "not_sent");
   }
   private admitLocalSave(operation: SettingsOperation, file: SettingsFile, saved: SettingsLocalSave,
-    saveAttemptId: string, allowPossibleCopy: boolean, previousSaveAttemptId?: string): SettingsLocalSave {
+    saveAttemptId: string, allowPossibleCopy: boolean, cardId: string, previousSaveAttemptId?: string): SettingsLocalSave {
     this.claimFinal(operation.operationId); this.reserveFileIO(file.fileId, operation.operationId);
     const { failure: _failure, sourceIdentity: _identity, savedAt: _savedAt, ...base } = saved;
     return { ...base, status: "saving", currentSaveAttemptId: saveAttemptId, attempts: [...saved.attempts,
-      { saveAttemptId, allowPossibleCopy, admittedAt: this.now().toISOString(), ...(previousSaveAttemptId ? { previousSaveAttemptId } : {}) }] };
+      { saveAttemptId, cardId, allowPossibleCopy, admittedAt: this.now().toISOString(), ...(previousSaveAttemptId ? { previousSaveAttemptId } : {}) }] };
   }
   localSaveContext(id: string, saveAttemptId: string) {
     const operation = this.get(id), download = operation && settingsDownload(operation), save = download?.localSave;
     const file = operation?.fileId ? this.file(operation.fileId) : undefined;
-    const card = operation && this.cards.get(operation.cardId);
+    const ownerCardId = save?.attempts.find((a) => a.saveAttemptId === save.currentSaveAttemptId)?.cardId;
+    const card = ownerCardId && this.cards.get(ownerCardId);
     if (!operation || operation.ownerId !== this.ownerId || operation.dataEpoch !== this.control().data_epoch ||
         !download || !save || !file || !card || save.status !== "saving" || save.currentSaveAttemptId !== saveAttemptId ||
         save.fileId !== file.fileId || save.sha256 !== file.sha256 || save.totalSize !== file.totalSize ||
@@ -342,7 +378,7 @@ export class SqliteSettingsWorkflowStore {
       this.writeDownloadState(operation, { ...download, localSave: { ...save, sourceIdentity } }, card);
     });
   }
-  settleLocalSave(id: string, saveAttemptId: string, outcome: SettingsLocalSaveOutcome): void {
+  settleLocalSave(id: string, saveAttemptId: string, outcome: SettingsLocalSaveOutcome, backupLocation?: { directory: string; filename: string }): void {
     this.transaction(() => {
       const { operation, download, save, file, card } = this.localSaveContext(id, saveAttemptId);
       const expired = !download.expiresAt || this.now().getTime() >= Date.parse(download.expiresAt);
@@ -353,6 +389,7 @@ export class SqliteSettingsWorkflowStore {
         : { ...save, status: "failed", failure: save.ownerId !== this.ownerId && outcome.reason === "not_published" ? "interrupted" : outcome.reason };
       this.writeDownloadState(operation, { ...download, localSave, ...(ended ? { endReason: ended } : {}) }, card);
       if (ended) this.writeFile({ ...file, invalidated: true, cleanup: "pending" });
+      this.finishDownloadCard(id, card.state.cardId, undefined, backupLocation);
       this.releaseFileIO(file.fileId);
       this.db.prepare("UPDATE settings_control SET active_operation_id=NULL WHERE id=1 AND active_operation_id=?").run(id);
     });
@@ -366,12 +403,63 @@ export class SqliteSettingsWorkflowStore {
     this.writeDownloadState(operation, { ...download, readyAt,
       expiresAt: new Date(Date.parse(readyAt) + retryWindowMs).toISOString() }, card);
   }
+  releaseFinal(id: string): void {
+    this.db.prepare("UPDATE settings_control SET active_operation_id=NULL WHERE id=1 AND active_operation_id=?").run(id);
+  }
+  resultView(operation: SettingsOperation, result: SettingsResult, display?: Record<string, unknown>) {
+    const file = operation.fileId ? this.file(operation.fileId) : undefined;
+    const { file: _file, ...extra } = display ?? {};
+    return { kind: "settings", operationId: operation.operationId, phase: "terminal", result,
+      ...(operation.draft ? { draft: operation.draft } : {}), temporaryFileCleanup: this.temporaryFileCleanup(operation.operationId),
+      allowedActions: [], observe: false,
+      ...(operation.priorRunId ? { priorRunId: operation.priorRunId } : {}), ...(operation.nextRunId ? { nextRunId: operation.nextRunId } : {}),
+      ...(operation.supersedesOperationId ? { supersedesOperationId: operation.supersedesOperationId } : {}),
+      ...(operation.supersededByOperationId ? { supersededByOperationId: operation.supersededByOperationId } : {}),
+      ...(file ? { file: { fileId: file.fileId, displayName: file.displayName, totalSize: file.totalSize, receivedSize: file.receivedSize,
+        sha256: file.sha256, sealed: file.sealed, cleanup: file.cleanup } } : {}), ...extra };
+  }
+  downloadResult(operation: SettingsOperation): SettingsResult {
+    const download = settingsDownload(operation);
+    if (!download) throw new SettingsConflict("This Settings request does not provide a download.");
+    const local = download.localSave, report = download.attempts.find((a) => a.attemptId === download.currentAttemptId)?.hostReport;
+    const succeeded = download.endReason === "stored_locally" || report === "acknowledged";
+    return { completionScope: "backup_delivery", outcome: succeeded ? "completed" : download.endReason === "cancelled" || download.endReason === "server_restarted" ? "interrupted" : "failed", recordedAt: this.now().toISOString(),
+      message: download.endReason === "stored_locally" ? "Backup saved." : report === "acknowledged" ? "The app accepted the download request. This does not confirm that the file was saved or where it was saved."
+        : download.endReason === "cancelled" ? "Backup delivery was cancelled."
+        : download.endReason ? "This backup is no longer available for delivery. Ask in chat for a new Settings card to create a backup."
+        : report === "not_sent" ? "The backup could not be read or checked. Nothing was sent to the app for download." : local?.status === "needs_consent" ? "A local copy needs a new explicit request because another copy may exist."
+        : local?.status === "failed" && local.failure === "not_published" ? "The backup was not saved. Ask in chat for a new delivery card to retry saving the same backup."
+        : "Backup delivery was not confirmed. Ask in chat for a new delivery card." };
+  }
+  finishDownloadCard(id: string, cardId?: string, finalResult?: SettingsResult, backupLocation?: { directory: string; filename: string }): void {
+    const operation = this.get(id), download = operation && settingsDownload(operation);
+    if (!operation || !download) return;
+    const local = download.localSave;
+    const target = cardId ?? local?.attempts.find((a) => a.saveAttemptId === local.currentSaveAttemptId)?.cardId ?? download.attempts.find((a) => a.attemptId === download.currentAttemptId)?.cardId;
+    const card = target && this.cards.get(target);
+    if (!card) return;
+    const report = download.attempts.find((a) => a.attemptId === download.currentAttemptId)?.hostReport;
+    const succeeded = download.endReason === "stored_locally" || report === "acknowledged";
+    const result = finalResult ?? this.downloadResult(operation);
+    const file = operation.fileId ? this.file(operation.fileId) : undefined;
+    const display = { ...(file ? { file: { fileId: file.fileId, displayName: file.displayName, totalSize: file.totalSize, receivedSize: file.receivedSize,
+      sha256: file.sha256, sealed: file.sealed, cleanup: file.cleanup } } : {}),
+      download: { availability: download.endReason ? "ended" : download.readyAt ? "available" : "preparing", currentAttemptId: download.currentAttemptId,
+        ...(report ? { hostReport: report } : {}), previousUnconfirmed: this.previousDeliveryPossible(download),
+        ...(download.endReason ? { endReason: download.endReason } : {}), ...(download.expiresAt ? { expiresAt: download.expiresAt, remainingMs: Math.max(0, Date.parse(download.expiresAt) - this.now().getTime()) } : {}),
+        ...(local ? { localSave: { status: local.status, currentSaveAttemptId: local.currentSaveAttemptId, failure: local.failure, savedAt: local.savedAt } } : {}), allowedFileActions: [] },
+      ...(backupLocation ? { backupLocation } : {}) };
+    const reason = download.endReason === "cancelled" ? "cancelled" : download.endReason === "expired" ? "expired" : download.endReason === "server_restarted" ? "server_restarted" : succeeded ? "completed" : "failed";
+    if (!operation.result && operation.cardId === card.state.cardId) this.finish(id, result, display, reason);
+    else if (card.state.state !== "closed" && !this.cards.replace(card, { ...card, state: { ...card.state, state: "closed", reason,
+        revision: card.state.revision + 1, data: this.resultView(operation, result, display) } }, this.now())) throw new SettingsConflict("The delivery result could not be saved.");
+  }
   filesForCleanup(operationId?: string): SettingsFile[] {
     const rows = this.db.prepare(`SELECT file_id FROM settings_files WHERE cleanup!='complete' AND ${SETTINGS_FILE_CLEANUP_SQL}
       ${operationId === undefined ? "" : "AND cleanup_operation_id=?"}`).all(...(operationId === undefined ? [] : [operationId])) as { file_id: string }[];
     return rows.map((row) => this.file(row.file_id)!);
   }
-  finish(id: string, result: SettingsResult): boolean {
+  finish(id: string, result: SettingsResult, display?: Record<string, unknown>, reason?: CardRecord["state"]["reason"]): boolean {
     return this.transaction(() => {
       const old = this.get(id);
       if (!old || old.ownerId !== this.ownerId) return false;
@@ -383,7 +471,7 @@ export class SqliteSettingsWorkflowStore {
       if (!card || card.ownerId !== this.ownerId || card.operationId !== id) return false;
       const next: SettingsOperation = { ...old, phase: "terminal", result };
       this.write(old, next, card, { ...card, state: { ...card.state, revision: card.state.revision + 1,
-        state: "closed", reason: card.state.reason ?? (result.outcome === "completed" ? "completed" : result.outcome === "superseded" || !old.admittedAt ? "cancelled" : "failed") } });
+        state: "closed", data: undefined, reason: card.state.reason ?? reason ?? (result.outcome === "completed" ? "completed" : result.outcome === "superseded" || !old.admittedAt ? "cancelled" : "failed") } }, display);
       this.db.prepare(`UPDATE settings_control SET active_operation_id=NULL WHERE id=1 AND active_operation_id=?`).run(id);
       this.db.prepare(`UPDATE settings_control SET wallet_input_blocked=0,wallet_block_operation_id=NULL
         WHERE id=1 AND wallet_block_operation_id=?`).run(id);

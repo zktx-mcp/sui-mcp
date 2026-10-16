@@ -125,7 +125,7 @@ Clarify the source amount. Give examples such as `1 SUI` or `10 SUI`.
 Do not map vague words to a fixed amount or percent.
 
 `What is in my wallet?`
-Use `session_get_interaction_status.assetReadAccount` if available; otherwise ask for a Sui address for an address-capable read. Open Connect only when the user requests connection. A stored selection does not prove a usable connection or signing authority.
+Use `session_get_interaction_status.assetReadAccount` if available; otherwise ask for a Sui address for an address-capable read. Open Connect only when the user requests connection. A saved Sui read address does not prove a usable connection or signing authority.
 
 `Show balances for this address: 0x...`
 Use `read_summarize_wallet_assets` or `read_classify_wallet_assets` with `account`.
@@ -222,8 +222,8 @@ Report current status and checks returned by the review layer.
 Do not give a safety guarantee or signing-readiness claim when status is blocked.
 
 `Connect my wallet.`
-Use `session_open_wallet_connection_card` with `intent: connect`, then read or wait on its cardId.
-Its authenticated View starts pairing only after confirming permission and current eligibility. A manage card instead waits for the user to choose Connect wallet. Confirm the usable default through `assetReadAccount`; an ordinary tool call or wait does not pair.
+Use `session_open_wallet_connection_card` with empty input, then read or wait on its cardId.
+Its authenticated View starts pairing only after confirming permission and current eligibility. Connect and Disconnect are separate one-operation cards; every ended result is fixed and address-free. Confirm the usable default through `assetReadAccount`; an ordinary tool call or wait does not pair.
 Do not call it login, permanent authorization, or transaction permission.
 
 `Can I sign now?`

@@ -1,3 +1,5 @@
+import { settingsCardInputSchema } from "../../../core/session/settingsOperation.js";
+import { walletChainsSchema } from "../../../core/session/chainAccounts.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { SETTINGS_APPLIES_AFTER_RESTART } from "../../../core/preferences/preferencesStore.js";
@@ -21,11 +23,11 @@ const endpointSettingSchema = z.object({
 
 export function registerSettingsTools(server: McpServer, deps: Pick<McpServerDeps, "cards" | "localSettings" | "logger">): void {
   registerAppTool(server, TOOL_NAMES.settingsCreateLocalSettingsSession,
-    { title: "Settings", description: "Open a local settings card.", inputSchema: noParamsInputSchema,
+    { title: "Settings", description: "Open local settings, read a recorded operation, or request delivery of an existing backup.", inputSchema: settingsCardInputSchema,
       outputSchema: successOutputSchema(cardSnapshotSchema.shape), _meta: cardMetadata("settings"),
       annotations: { readOnlyHint: false, openWorldHint: false } },
-    async () => {
-      try { return await createWorkflowCard(server, deps, "settings", {}); }
+    async (input) => {
+      try { return await createWorkflowCard(server, deps, "settings", input); }
       catch (error) { return sessionStoreToolError(error, deps.logger); }
     });
 
@@ -38,7 +40,8 @@ export function registerSettingsTools(server: McpServer, deps: Pick<McpServerDep
       inputSchema: noParamsInputSchema,
       outputSchema: successOutputSchema({
         suiGrpcUrl: endpointSettingSchema,
-        suiGraphqlUrl: endpointSettingSchema
+        suiGraphqlUrl: endpointSettingSchema,
+        walletConnectionChains: walletChainsSchema
       }),
       annotations: { readOnlyHint: true, openWorldHint: false }
     },

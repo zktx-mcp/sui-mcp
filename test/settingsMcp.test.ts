@@ -1,9 +1,10 @@
+import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { Client } from "@modelcontextprotocol/client";
 import { McpServer } from "@modelcontextprotocol/server";
 import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { afterEach, expect, it, vi } from "vitest";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -234,10 +235,10 @@ it("preserves the 16 MiB raw upload limit at the new app-only entry without crea
 it("transfers backup bytes only in UI metadata and keeps every actual serialized response within 64 KiB", async () => {
   const f = await fixture();
   // Enough real account history to require more than one encoded response.
-  for (let id = 1; id <= 350; id++) await f.wallet.run(() => f.wallet.activity.setActiveAccount(`0x${id.toString(16).padStart(64, "0")}`, "wallet_connection", f.wallet.now()));
+  for (let id = 1; id <= 350; id++) await f.wallet.run(() => seedCurrentReadAccount(f.wallet.activity, `0x${id.toString(16).padStart(64, "0")}`, f.wallet.now()));
   const prepared = await f.create(); await f.download(prepared);
   let completed = await f.read(prepared);
-  await vi.waitFor(async () => { completed = await f.read(prepared); expect((completed.snapshot.data as SettingsView).result?.outcome).toBe("completed"); });
+  await vi.waitFor(async () => { completed = await f.read(prepared); expect((completed.snapshot.data as SettingsView).download?.availability).toBe("available"); });
   const file = (completed.snapshot.data as SettingsView).file!, target = { cardId: completed.snapshot.cardId, permission: completed.permission,
     operationId: (completed.snapshot.data as SettingsView).operationId, fileId: file.fileId,
     attemptId: (completed.snapshot.data as SettingsView).download!.currentAttemptId };
@@ -285,3 +286,56 @@ it.each(["codex-mcp-client", "claude-ai", "Arbitrary standard client"])(
     }
   }
 );
+
+it("separates Settings status and backup delivery purposes without reopening the original card", async () => {
+  const f = await fixture(), source = await f.create(), written = vi.spyOn(f.files, "createDownload");
+  await f.download(source);
+  let ready = await f.read(source);
+  await vi.waitFor(async () => { ready = await f.read(source); expect((ready.snapshot.data as SettingsView).download?.availability).toBe("available"); });
+  const data = ready.snapshot.data as SettingsView;
+  await f.act(ready, { action: "settings_report_download", operationId: data.operationId, fileId: data.file!.fileId,
+    attemptId: data.download!.currentAttemptId, status: "unconfirmed" });
+  const original = (await f.read(source)).snapshot;
+  const rowCount = () => f.wallet.run(() => f.records.db.prepare("SELECT count(*) AS n FROM settings_operations").get());
+  const originalCount = rowCount();
+  const statusResult = await f.call(TOOL_NAMES.settingsCreateLocalSettingsSession, { operationStatus: { operationId: data.operationId } });
+  const status = card(statusResult), statusRef = statusResult._meta![CARD_METADATA_KEY] as { cardId: string; permission: string };
+  expect(status).toMatchObject({ state: "closed", data: { allowedActions: [], observe: false, download: { allowedFileActions: [] } } });
+  expect(status.cardId).not.toBe(source.snapshot.cardId); expect(rowCount()).toEqual(originalCount);
+  const blocked = await f.call(CARD_TOOLS.act, { ...statusRef, revision: status.revision,
+    input: { action: "settings_save_wallet_networks", operationId: data.operationId, chains: [], expectedChains: ["sui:mainnet"] } });
+  expect(blocked.isError).toBe(true); expect(f.wallet.run(() => f.preferences.getWalletConnectionChainsSync())).toEqual(["sui:mainnet"]);
+  for (const input of [{ operationStatus: { operationId: data.operationId }, backupDelivery: { operationId: data.operationId, fileId: data.file!.fileId } },
+    { operationStatus: { operationId: data.operationId }, action: "settings_confirm" }]) {
+    const before = f.wallet.run(() => f.records.db.prepare("SELECT count(*) AS n FROM live_read_cards").get());
+    expect((await f.call(TOOL_NAMES.settingsCreateLocalSettingsSession, input)).isError).toBe(true);
+    expect(f.wallet.run(() => f.records.db.prepare("SELECT count(*) AS n FROM live_read_cards").get())).toEqual(before);
+  }
+  const delivery = card(await f.call(TOOL_NAMES.settingsCreateLocalSettingsSession,
+    { backupDelivery: { operationId: data.operationId, fileId: data.file!.fileId } }));
+  expect(delivery).toMatchObject({ state: "ready", data: { allowedActions: [], download: { allowedFileActions: ["settings_retry_download"] } } });
+  expect(delivery.cardId).not.toBe(source.snapshot.cardId); expect(delivery.cardId).not.toBe(status.cardId);
+  expect((delivery.data as SettingsView).download?.expiresAt).toBe(data.download?.expiresAt);
+  expect(written).toHaveBeenCalledOnce(); expect(rowCount()).toEqual(originalCount);
+  expect((await f.read(source)).snapshot).toEqual(original);
+  expect(f.wallet.connect).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled(); expect(f.wallet.submit).not.toHaveBeenCalled();
+});
+
+
+it("maps missing Settings references and ended backups to expected public refusals", async () => {
+  const f = await fixture(), count = () => f.wallet.run(() => f.records.db.prepare("SELECT count(*) AS n FROM live_read_cards").get());
+  const before = count();
+  expect(packet(await f.call(TOOL_NAMES.settingsCreateLocalSettingsSession, { operationStatus: { operationId: randomUUID() } })))
+    .toMatchObject({ ok: false, error: { kind: "input_invalid" } });
+  expect(count()).toEqual(before);
+  const source = await f.create(); await f.download(source);
+  let ready = await f.read(source);
+  await vi.waitFor(async () => { ready = await f.read(source); expect((ready.snapshot.data as SettingsView).download?.availability).toBe("available"); });
+  const data = ready.snapshot.data as SettingsView;
+  await f.act(ready, { action: "settings_report_download", operationId: data.operationId, fileId: data.file!.fileId,
+    attemptId: data.download!.currentAttemptId, status: "acknowledged" });
+  const after = count();
+  expect(packet(await f.call(TOOL_NAMES.settingsCreateLocalSettingsSession, { backupDelivery: { operationId: data.operationId, fileId: data.file!.fileId } })))
+    .toMatchObject({ ok: false, error: { kind: "input_invalid" } });
+  expect(count()).toEqual(after); expect(f.wallet.connect).not.toHaveBeenCalled(); expect(f.wallet.sign).not.toHaveBeenCalled();
+});

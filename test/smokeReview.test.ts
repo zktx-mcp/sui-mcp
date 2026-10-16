@@ -6,7 +6,7 @@ import { findForbiddenMcpFields } from "../src/core/action/forbiddenFields.js";
 it("runs optional review with actual core/storage while using an explicit temporary read context", async () => {
   const f = await walletWorkflowFixture();
   try {
-    await f.run(() => f.activity.setActiveAccount(f.account, "wallet_connection", f.now()));
+    await f.run(() => f.activity.upsertAccount(f.account, "review_execution", f.now()));
     const result = await f.run(() => computeSmokeReview({ env: { SUI_MCP_SMOKE_SWAP_PROTOCOL: "deep", SUI_MCP_SMOKE_SWAP_FROM_SYMBOL: "SUI", SUI_MCP_SMOKE_SWAP_TO_SYMBOL: "USDC", SUI_MCP_SMOKE_SWAP_AMOUNT_DISPLAY: "1" },
       account: f.account, sessions: f.sessions, computation: f.computation, now: f.now() }));
     expect(result).toMatchObject({ status: "ok", reviewStatus: "ready_for_wallet_review", reviewDataEmitted: true, missingStages: [], failedCheckIds: [] });

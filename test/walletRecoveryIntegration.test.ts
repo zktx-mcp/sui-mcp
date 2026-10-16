@@ -31,18 +31,19 @@ it("ends a held real SDK disconnect on service loss without replay or a card res
     // prerequisite. The seeded SDK session alone cannot create one.
     const observed = f.runtime.snapshot()!.sessions.find((item) => item.topic === sdkFixtureTopic)!;
     if (observed.status !== "present") throw new Error("Seeded SDK session is not usable");
-    const connection = f.run(() => f.records.restoreConnection(observed.session, f.now())).connection;
-    const disconnect = await f.run(() => f.cards.create("connect", { intent: "manage" }));
+    const connection = f.run(() => f.seedConnection(observed.session)).connection;
+    const disconnect = await f.createDisconnection();
     expect((await f.act(disconnect, { action: "disconnect", connectionId: connection.connectionId })).error).toBeUndefined();
     await vi.waitFor(() => expect(relay.calls.filter((call) => call.method === "irn_unsubscribe")).toHaveLength(1));
     expect(f.run(() => f.records.connection(connection.connectionId)?.sdkPending)).toBe(true);
-    const controls = await f.run(() => f.cards.create("connect", { intent: "manage" }));
-    expect((await f.act(controls, { action: "restart_wallet_service" })).error?.code).toBe("invalid_card_input");
+    const controls = await f.run(() => f.cards.create("connect", {}));
+    expect((await f.act(controls, { action: "restart_wallet_service" })).error?.code).toBe("card_conflict");
     expect(children).toHaveLength(1);
     f.runtime.fail("wallet_state_unavailable");
     await vi.waitFor(() => expect(children[0]!.signalCode).toBe("SIGKILL"));
     await vi.waitFor(() => expect(f.run(() => f.records.connection(connection.connectionId)?.sdkPending)).toBe(false));
-    expect((await f.read(disconnect)).snapshot.data).toMatchObject({ connection: { status: "failed", reason: expect.stringContaining("could not be confirmed") } });
+    expect((await f.read(disconnect)).snapshot).toMatchObject({ state: "closed", data: { result: { message: "The wallet service ended before this operation was confirmed." } } });
+    expect(f.run(() => f.records.currentConnection()?.connection.status)).toBe("failed");
     const lease = acquireDataDirectoryOwner(join(f.directory, "walletconnect/sessions.sqlite")); lease.close();
     expect(f.runtime.availability().status).toBe("unavailable");
     await f.read(controls); await f.read(controls);
@@ -80,8 +81,7 @@ it.each([false, true])("validates real SDK signing across IPC (wrong signer=%s)"
   try {
     const observed = f.runtime.snapshot()!.sessions.find((item) => item.topic === sdkFixtureTopic)!;
     if (observed.status !== "present") throw new Error("Seeded session unavailable");
-    const connection = f.run(() => f.records.restoreConnection(observed.session, f.now())).connection;
-    await f.run(() => f.activity.setActiveAccount(f.account, "wallet_connection", f.now(), { id: connection.connectionId }));
+    const connection = f.run(() => f.seedConnection(observed.session)).connection;
     const review = await f.prepare(connection.connectionId);
     const requests: { method: string; transaction: string; address: string }[] = [];
     const signatures: string[] = [];

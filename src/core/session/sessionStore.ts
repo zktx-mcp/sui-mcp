@@ -122,7 +122,7 @@ export interface SessionStore {
     state: ReviewState,
     privateArtifacts: PrivateReviewArtifacts | undefined,
     now?: Date,
-    preparation?: { id: string; connectionId: string; connectionRevision: number }
+    preparation?: { id: string; connectionId: string; grantRevision: number }
   ): Promise<ReviewSession>;
   prepareReviewedTransaction(
     id: string,
@@ -330,19 +330,6 @@ export class LocalSessionStore implements SessionStore {
     if (!normalizedAccount) {
       throw new SessionStoreError("input_invalid", "Invalid wallet account address");
     }
-    const activeAccount = await this.activityStore.getActiveAccount();
-    if (!activeAccount) {
-      throw new SessionStoreError(
-        "active_account_not_set",
-        "Review account binding requires an active read account"
-      );
-    }
-    if (activeAccount.address !== normalizedAccount) {
-      throw new SessionStoreError(
-        "invalid_session_transition",
-        `Review account does not match active read account: ${id}`
-      );
-    }
     const nextSession = cloneLocalSession(session);
     if (session.account && session.account !== normalizedAccount) {
       throw new SessionStoreError(
@@ -350,9 +337,11 @@ export class LocalSessionStore implements SessionStore {
         `Review session already bound to a different account: ${id}`
       );
     }
+    const knownAccount = await this.activityStore.getKnownAccount(normalizedAccount);
+    if (!knownAccount) throw new SessionStoreError("active_account_not_set", "Review account binding requires a known Sui account");
     if (nextSession.status === "proposed") {
       // Explicit backend account binding follows the preparation lifecycle.
-      // Active read context alone is not wallet approval; the workflow checks
+      // Stored account history is not wallet approval; the workflow checks
       // the live wallet connection before invoking this operation.
       transition(nextSession, "awaiting_wallet");
       transition(nextSession, "wallet_connected");
@@ -392,7 +381,7 @@ export class LocalSessionStore implements SessionStore {
     state: ReviewState,
     privateArtifacts: PrivateReviewArtifacts | undefined,
     now = this.clock(),
-    preparation?: { id: string; connectionId: string; connectionRevision: number }
+    preparation?: { id: string; connectionId: string; grantRevision: number }
   ): Promise<ReviewSession> {
     if (this.sessions.hasUnsettledRequest(id, now)) {
       throw new SessionStoreError("invalid_session_transition", "The previous wallet request is still being settled.");
@@ -405,11 +394,11 @@ export class LocalSessionStore implements SessionStore {
     state: ReviewState,
     privateArtifacts: PrivateReviewArtifacts | undefined,
     now: Date,
-    preparation?: { id: string; connectionId: string; connectionRevision: number }
+    preparation?: { id: string; connectionId: string; grantRevision: number }
   ): Promise<ReviewSession> {
     const session = await this.requireMutableSession(id, now);
     if (preparation && (session.preparationId !== preparation.id || session.walletConnectionId !== preparation.connectionId ||
-        session.walletConnectionRevision !== preparation.connectionRevision)) this.throwStaleReviewSession(id);
+        session.walletGrantRevision !== preparation.grantRevision)) this.throwStaleReviewSession(id);
     assertSameSessionId(id, state.reviewSessionId, "Review state");
     assertPlanInSession(session, state.planId);
     const parsedState = parseReviewState(state, this.validateAdapterLifecycle);

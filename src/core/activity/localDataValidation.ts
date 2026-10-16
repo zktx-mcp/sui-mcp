@@ -1,3 +1,5 @@
+import { walletChainSchema, walletChainsSchema, normalizeChainAddress, SUI_MAINNET_WALLET_CHAIN } from "../session/chainAccounts.js";
+import { LOCAL_SETTING_KEYS } from "../preferences/preferencesStore.js";
 import { transactionRequestStatusSchema, transactionRequestSchema } from "../session/transactionRequest.js";
 import { REVIEW_TRANSITION_EVENTS } from "./sqliteActivityStoreRows.js";
 import { z, type ZodType } from "zod";
@@ -6,7 +8,6 @@ import { assertNoForbiddenMcpFields } from "../action/forbiddenFields.js";
 import { parseLifecycleValidatedReviewState } from "../action/reviewStateValidation.js";
 import { actionPlanSchema, transactionExecutionSummarySchema, internalSessionStatusSchema } from "../action/schemas.js";
 import type { ReviewState } from "../action/types.js";
-import { parseSuiAddress } from "../suiAddress.js";
 import { parseGraphqlUrl, parseGrpcUrl } from "../suiEndpoint.js";
 import {
   EXTERNAL_ACTIVITY_TRANSACTION_DETAIL_JSON_MAX_BYTES,
@@ -19,7 +20,6 @@ import {
   LOCAL_DATA_NETWORK,
   LocalDataError,
   type AccountExportRow,
-  type ActiveAccountContextExportRow,
   type ExternalActivityScanExportRow,
   type ExternalActivityTransactionExportRow,
   type LocalDataCounts,
@@ -42,21 +42,15 @@ const nullableString = z.string().nullable();
 
 const accountRowSchema: z.ZodType<AccountExportRow> = z.object({
   id: z.number().int().positive(),
-  sui_address: z.string().refine((value) => parseSuiAddress(value) === value, "must be a normalized Sui address"),
+  chain_id: walletChainSchema,
+  address: z.string(),
   first_seen_at: isoTimestamp,
   last_used_at: isoTimestamp,
   first_source: z.enum(["wallet_connection", "review_execution"]),
   last_source: z.enum(["wallet_connection", "review_execution"])
-}).strict();
-
-const activeAccountContextRowSchema: z.ZodType<ActiveAccountContextExportRow> = z.object({
-  id: z.literal(1),
-  account_id: z.number().int().positive().nullable(),
-  source: z.enum(["wallet_connection", "cleared"]),
-  set_at: isoTimestamp,
-  wallet_name: z.string().min(1).max(200).nullish(),
-  wallet_id: z.string().min(1).max(200).nullish()
-}).strict();
+}).strict().refine((row) => normalizeChainAddress(row.chain_id, row.address) === row.address &&
+  (row.chain_id === SUI_MAINNET_WALLET_CHAIN || row.first_source !== "review_execution" && row.last_source !== "review_execution"),
+  "Account identity and source must match the supported chain");
 
 const reviewSessionRowSchema: z.ZodType<ReviewSessionExportRow> = z.object({
   id: z.string().min(1),
@@ -162,14 +156,13 @@ const externalActivityTransactionRowSchema: z.ZodType<ExternalActivityTransactio
 }).strict();
 
 const localSettingRowSchema: z.ZodType<LocalSettingExportRow> = z.object({
-  key: z.enum(["suiGrpcUrl", "suiGraphqlUrl"]),
+  key: z.enum(LOCAL_SETTING_KEYS),
   value_json: z.string(),
   updated_at: isoTimestamp
 }).strict();
 
 const payloadSchema: z.ZodType<LocalDataPayload> = z.object({
   accounts: z.array(accountRowSchema),
-  activeAccountContext: z.array(activeAccountContextRowSchema).max(1),
   reviewSessions: z.array(reviewSessionRowSchema),
   reviewStateSnapshots: z.array(reviewStateSnapshotRowSchema),
   reviewStatusTransitions: z.array(reviewStatusTransitionRowSchema),
@@ -177,7 +170,7 @@ const payloadSchema: z.ZodType<LocalDataPayload> = z.object({
   reviewRequests: z.array(reviewRequestRowSchema),
   externalActivityScans: z.array(externalActivityScanRowSchema),
   externalActivityTransactions: z.array(externalActivityTransactionRowSchema),
-  localSettings: z.array(localSettingRowSchema).length(2)
+  localSettings: z.array(localSettingRowSchema).length(LOCAL_SETTING_KEYS.length)
 }).strict();
 
 const envelopeSchema: z.ZodType<LocalDataEnvelope> = z.object({
@@ -206,7 +199,7 @@ function validatePayloadSemantics(
   validateAdapterLifecycle: AdapterLifecycleValidator
 ): void {
   ensureUnique(data.accounts.map((row) => row.id), "duplicate_account_id");
-  ensureUnique(data.accounts.map((row) => row.sui_address), "duplicate_account_address");
+  ensureUnique(data.accounts.map((row) => `${row.chain_id}:${row.address}`), "duplicate_account_address");
   ensureUnique(data.reviewSessions.map((row) => row.id), "duplicate_review_session_id");
   ensureUnique(data.reviewStateSnapshots.map((row) => row.id), "duplicate_review_state_snapshot_id");
   ensureUnique(data.reviewStatusTransitions.map((row) => row.id), "duplicate_review_transition_id");
@@ -219,26 +212,18 @@ function validatePayloadSemantics(
   ensureUnique(data.localSettings.map((row) => row.key), "duplicate_local_setting_key");
   ensureUnique(data.reviewRequests.map((row) => row.attempt_id), "duplicate_review_request_id");
   ensureUnique(data.reviewRequests.map((row) => `${row.review_session_id}:${row.review_revision}`), "duplicate_review_request_revision");
-  const accountIds = new Set(data.accounts.map((row) => row.id));
-  const accountAddressesById = new Map(data.accounts.map((row) => [row.id, row.sui_address]));
-  for (const row of data.activeAccountContext) {
-    if (row.source === "cleared" && row.account_id !== null) {
-      throw invalidBackup("invalid_active_account_context");
-    }
-    if (row.source === "wallet_connection" && (row.account_id === null || !accountIds.has(row.account_id))) {
-      throw invalidBackup("invalid_active_account_context");
-    }
-  }
+  const suiAccountIds = new Set(data.accounts.filter((row) => row.chain_id === SUI_MAINNET_WALLET_CHAIN).map((row) => row.id));
+  const accountAddressesById = new Map(data.accounts.map((row) => [row.id, row.address]));
   for (const row of data.reviewSessions) {
     validateJsonColumn(row.plan_json, "plan_json", actionPlanSchema);
     validateOptionalJsonColumn(row.intent_json, "intent_json");
-    if (row.account_id !== null && !accountIds.has(row.account_id)) {
+    if (row.account_id !== null && !suiAccountIds.has(row.account_id)) {
       throw invalidBackup("invalid_review_session_account");
     }
   }
   const reviewSessionIds = new Set(data.reviewSessions.map((row) => row.id));
   for (const row of data.reviewStateSnapshots) {
-    if (!reviewSessionIds.has(row.review_session_id) || !accountIds.has(row.account_id)) {
+    if (!reviewSessionIds.has(row.review_session_id) || !suiAccountIds.has(row.account_id)) {
       throw invalidBackup("invalid_review_state_snapshot_reference");
     }
     if (row.status === "blocked" && (row.blocked_reason === null || row.refresh_reason !== null)) {
@@ -285,7 +270,7 @@ function validatePayloadSemantics(
     if (row.opened_at !== null && row.opened_at < row.created_at) throw invalidBackup("invalid_review_open_time");
   }
   for (const row of data.reviewStatusTransitions) {
-    if (!reviewSessionIds.has(row.review_session_id) || (row.account_id !== null && !accountIds.has(row.account_id))) throw invalidBackup("invalid_review_transition_reference");
+    if (!reviewSessionIds.has(row.review_session_id) || (row.account_id !== null && !suiAccountIds.has(row.account_id))) throw invalidBackup("invalid_review_transition_reference");
     const requestEvent = ["request_admitted", "request_status_changed", "signature_verified", "chain_result_recorded"].includes(row.event);
     if ((row.domain === "request") !== requestEvent) throw invalidBackup("invalid_review_transition_domain");
     const statusSchema = row.domain === "request" ? transactionRequestStatusSchema : internalSessionStatusSchema;
@@ -305,7 +290,7 @@ function validatePayloadSemantics(
   }
   const scanIds = new Set(data.externalActivityScans.map((row) => row.scan_id));
   for (const row of data.externalActivityScans) {
-    if (!accountIds.has(row.account_id)) {
+    if (!suiAccountIds.has(row.account_id)) {
       throw invalidBackup("invalid_external_activity_scan_account");
     }
     if (row.from_timestamp !== null && row.to_timestamp !== null && row.from_timestamp > row.to_timestamp) {
@@ -316,10 +301,10 @@ function validatePayloadSemantics(
     }
   }
   for (const row of data.externalActivityTransactions) {
-    if (!accountIds.has(row.account_id) || !scanIds.has(row.first_scan_id) || !scanIds.has(row.last_scan_id)) {
+    if (!suiAccountIds.has(row.account_id) || !scanIds.has(row.first_scan_id) || !scanIds.has(row.last_scan_id)) {
       throw invalidBackup("invalid_external_activity_transaction_reference");
     }
-    if (row.known_sender_account_id !== null && !accountIds.has(row.known_sender_account_id)) {
+    if (row.known_sender_account_id !== null && !suiAccountIds.has(row.known_sender_account_id)) {
       throw invalidBackup("invalid_external_activity_sender_reference");
     }
     if (row.detail_json !== null) {
@@ -345,6 +330,10 @@ function validatePayloadSemantics(
   }
   for (const row of data.localSettings) {
     const value = validateJsonColumn(row.value_json, "local_settings.value_json");
+    if (row.key === "walletConnectionChains") {
+      if (!walletChainsSchema.safeParse(value).success) throw invalidBackup("invalid_wallet_connection_chains");
+      continue;
+    }
     if (typeof value !== "string") {
       throw invalidBackup(row.key === "suiGrpcUrl" ? "invalid_sui_grpc_url" : "invalid_sui_graphql_url");
     }
@@ -458,31 +447,6 @@ export function countsForPayload(data: LocalDataPayload): LocalDataCounts {
     externalActivityTransactions: data.externalActivityTransactions.length,
     localSettings: data.localSettings.length
   };
-}
-
-export function activeAccountChange(
-  currentAccounts: AccountExportRow[],
-  current: ActiveAccountContextExportRow[],
-  incomingAccounts: AccountExportRow[],
-  incoming: ActiveAccountContextExportRow[]
-): "unchanged" | "set" | "cleared" {
-  const currentAccount = activeAccountAddress(currentAccounts, current);
-  const incomingAccount = activeAccountAddress(incomingAccounts, incoming);
-  if (currentAccount === incomingAccount) {
-    return "unchanged";
-  }
-  return incomingAccount === null ? "cleared" : "set";
-}
-
-export function activeAccountAddress(
-  accounts: AccountExportRow[],
-  context: ActiveAccountContextExportRow[]
-): string | null {
-  const accountId = context[0]?.account_id ?? null;
-  if (accountId === null) {
-    return null;
-  }
-  return accounts.find((account) => account.id === accountId)?.sui_address ?? null;
 }
 
 export function maxNumber(values: number[]): number {
