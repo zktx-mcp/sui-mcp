@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { expect, it, vi } from "vitest";
 import { RuntimeTermination, runtimeFailureReason, type RuntimeExitCause } from "../src/runtime/runtimeTermination.js";
 import { SuiEndpointError } from "../src/core/suiEndpoint.js";
+import { ActivityDatabaseFormatError } from "../src/core/activity/sqliteActivityStoreTypes.js";
 import { deferred } from "./fixtures/walletWorkflow.js";
 
 it.each([
@@ -38,6 +39,12 @@ it.each(["client", "signal", "failure"] as const)("reports cleanup failure witho
 });
 
 it("classifies endpoint and storage failures without logging their untrusted payloads", () => {
+  const mismatch = new ActivityDatabaseFormatError();
+  mismatch.message = "PRIVATE-DATABASE-CONTENTS";
+  const reason = runtimeFailureReason(mismatch, "shared_server_start");
+  expect(reason).toContain("Local database format does not match this runtime");
+  expect(reason).toContain("explicitly choose to delete");
+  expect(reason).not.toContain("PRIVATE");
   expect(runtimeFailureReason(new SuiEndpointError("chain_identifier_mismatch", "PRIVATE", { url: "PRIVATE" }), "start")).toContain("chain_identifier_mismatch");
   expect(runtimeFailureReason(Object.assign(new Error("PRIVATE"), { code: "SQLITE_FULL" }), "start")).toContain("SQLITE_FULL");
   expect(runtimeFailureReason(Object.assign(new Error("PRIVATE"), { code: "PRIVATE" }), "start")).not.toContain("PRIVATE");

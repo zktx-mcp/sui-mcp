@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 import { expect, it, vi } from "vitest";
+import Database from "better-sqlite3";
 import { acquireDataDirectoryOwner } from "../src/runtime/shared/ownerLease.js";
+import { ACTIVITY_DATABASE_FILENAME } from "../src/core/activity/sqliteActivityStore.js";
 
 async function listen(server: Server): Promise<number> {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
@@ -14,9 +16,17 @@ async function listen(server: Server): Promise<number> {
 async function close(server: Server) { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 async function freePort() { const server = createServer(); const port = await listen(server); await close(server); return port; }
 
-it.each(["foreign_port", "endpoint", "endpoint_timeout", "configuration", "EOF", "SIGINT", "SIGTERM"] as const)(
+it.each(["foreign_port", "endpoint", "endpoint_timeout", "configuration", "database_format", "EOF", "SIGINT", "SIGTERM"] as const)(
   "preserves the real bootstrap exit and diagnostics for %s", async (condition) => {
     const directory = mkdtempSync(join(tmpdir(), "say-runtime-exit-"));
+    const databasePath = join(directory, ACTIVITY_DATABASE_FILENAME);
+    let originalDatabase: Buffer | undefined;
+    if (condition === "database_format") {
+      const database = new Database(databasePath);
+      database.exec("CREATE TABLE retained_data (value TEXT NOT NULL); INSERT INTO retained_data VALUES ('synthetic retained value')");
+      database.close();
+      originalDatabase = readFileSync(databasePath);
+    }
     let endpointCalls = 0;
     const endpoint = createServer((_request, response) => {
       endpointCalls++;
@@ -46,11 +56,18 @@ it.each(["foreign_port", "endpoint", "endpoint_timeout", "configuration", "EOF",
       const [code, signal] = await ended;
       expect(code).toBe(condition === "EOF" ? 0 : condition === "SIGINT" ? 130 : condition === "SIGTERM" ? 143 : 1);
       expect(signal).toBeNull();
-      if (["foreign_port", "endpoint", "endpoint_timeout", "configuration"].includes(condition)) {
+      if (["foreign_port", "endpoint", "endpoint_timeout", "configuration", "database_format"].includes(condition)) {
         expect(stderr).toContain("fatal runtime error");
-        expect(stderr).toContain(condition === "foreign_port" ? "foreign or incompatible" : condition === "endpoint" ? "endpoint_unreachable" : condition === "endpoint_timeout" ? "endpoint_timeout" : "configuration");
+        expect(stderr).toContain(condition === "foreign_port" ? "foreign or incompatible" : condition === "endpoint" ? "endpoint_unreachable" : condition === "endpoint_timeout" ? "endpoint_timeout" : condition === "database_format" ? "Local database format does not match this runtime" : "configuration");
       } else expect(stderr).not.toContain("fatal runtime error");
-      if (condition !== "configuration") expect(stdout).toContain('"id":1');
+      if (condition === "database_format") {
+        expect(stderr).toContain("Data migration is not supported");
+        expect(stderr).toContain("explicitly choose to delete");
+        expect(stderr).not.toContain("synthetic retained value");
+        expect(readFileSync(databasePath)).toEqual(originalDatabase);
+        expect(endpointCalls).toBe(0);
+      }
+      if (condition !== "configuration" && condition !== "database_format") expect(stdout).toContain('"id":1');
       for (const line of stdout.trim().split("\n").filter(Boolean)) expect(JSON.parse(line)).toHaveProperty("jsonrpc", "2.0");
       expect(holder.listening).toBe(true);
       const lease = acquireDataDirectoryOwner(join(directory, "activity.sqlite")); lease.close();

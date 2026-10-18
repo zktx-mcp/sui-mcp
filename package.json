@@ -1,6 +1,6 @@
 {
   "name": "@zktx.io/sui-mcp",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "mcpName": "io.github.zktx-mcp/sui-mcp",
   "description": "Sui MCP is a local-first toolkit for helping AI applications and users inspect Sui DeFi actions before execution.",
   "license": "MIT",

@@ -31,14 +31,16 @@ Users can ask ordinary questions:
 
 Install once with npm, then register the command in each AI app. You need [Node.js 22 or newer](https://nodejs.org/en/download), including npm. No Git checkout, build, custom installation folder, database server, Sui API key or endpoint setup is required for the normal path.
 
-This guide describes **0.8.0**. First confirm it is published, then install that exact version:
+Already used an earlier release? Follow [Updating an Existing Sui MCP Installation](docs/MCP_SETUP.md#updating-an-existing-sui-mcp-installation) first. New installations can continue below.
+
+This guide describes **0.8.1**. First confirm it is published, then install that exact version:
 
 ```sh
-npm view @zktx.io/sui-mcp@0.8.0 version
-npm install -g @zktx.io/sui-mcp@0.8.0
+npm view @zktx.io/sui-mcp@0.8.1 version
+npm install -g @zktx.io/sui-mcp@0.8.1
 ```
 
-The first command must return `0.8.0`. If it is unavailable, follow the [version availability guidance](docs/MCP_SETUP.md#npm-command-returns-404); do not drop the version and assume an older release matches this guide. Contributors can use the optional [developer checkout](docs/MCP_SETUP.md#developer-checkout-setup).
+The first command must return `0.8.1`. If it is unavailable, follow the [version availability guidance](docs/MCP_SETUP.md#npm-command-returns-404); do not drop the version and assume an older release matches this guide. Contributors can use the optional [developer checkout](docs/MCP_SETUP.md#developer-checkout-setup).
 
 Register the installed command in your app. This is the complete default configuration for Claude Desktop; Cursor's example is in the setup guide:
 
@@ -66,7 +68,7 @@ Keep existing settings and other servers when adding these entries. Choose your 
 - [Claude Code](docs/MCP_SETUP.md#claude-code)
 - [Cursor](docs/MCP_SETUP.md#cursor)
 
-After the app loads the registration, ask: **"Use Sui MCP to show its package name, server name, version and network."** Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.8.0` and `mainnet`. Then ask: **"Use Sui MCP to list the available DeepBook pools on Sui mainnet."** This first read needs no wallet or transaction. The [first-use tutorial](docs/MCP_SETUP.md#first-use-flow) explains expected results, optional cards and wallet connection. If the app cannot find `sui-mcp`, use [Command not found](docs/MCP_SETUP.md#command-not-found).
+After the app loads the registration, ask: **"Use Sui MCP to show its package name, server name, version and network."** Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.8.1` and `mainnet`. Then ask: **"Use Sui MCP to list the available DeepBook pools on Sui mainnet."** This first read needs no wallet or transaction. The [first-use tutorial](docs/MCP_SETUP.md#first-use-flow) explains expected results, optional cards and wallet connection. If the app cannot find `sui-mcp`, use [Command not found](docs/MCP_SETUP.md#command-not-found).
 
 ### Using several apps at once
 
@@ -82,10 +84,14 @@ your client registration.
 
 Use the full scoped package name: the unscoped `sui-mcp` package is a different
 project. Use `sui-mcp` as the default MCP registration name. A client-defined registration
-alias is a local label, not server identity or authorization. Compatible
-updates preserve the current data directory. Incompatible databases and backups
-are rejected without conversion, and files are left in place. Data from a
-different package is not discovered or imported. See the
+alias is a local label, not server identity or authorization. This is a
+pre-release: local data formats can change, and migration is not provided.
+Compatible updates preserve the current data directory. Incompatible databases
+and backups are rejected without conversion or automatic deletion. If startup
+reports a database format mismatch, follow the [recovery instructions](docs/MCP_SETUP.md#database-format-mismatch).
+You can retain the old files and use a new empty data directory, or explicitly
+choose to discard the old local data and settings and start fresh with defaults.
+Data from a different package is not discovered or imported. See the
 [setup guide](docs/MCP_SETUP.md#switching-the-installed-package) for installation
 and shared-server restart instructions.
 

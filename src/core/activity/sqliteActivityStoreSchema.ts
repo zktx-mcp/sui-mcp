@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { EXTERNAL_ACTIVITY_SCAN_MAX_LIMIT } from "./activityStore.js";
-import { ActivityStoreError, type SqliteDatabase } from "./sqliteActivityStoreTypes.js";
+import { ActivityDatabaseFormatError, type SqliteDatabase } from "./sqliteActivityStoreTypes.js";
 import { SETTINGS_RESET_PREPARATION_SQL } from "../session/settingsPreparationSql.js";
 import { WALLET_CHAINS } from "../session/chainAccounts.js";
 import {
@@ -402,9 +402,7 @@ export function assertCurrentDatabaseFormat(db: SqliteDatabase): "empty" | "curr
   const signature = schemaSignature(db);
   if (signature === "[]" && !db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()) return "empty";
   if (signature === expectedSchemaSignature()) return "current";
-  throw new ActivityStoreError(
-    "Local database format does not match this runtime. Use a new empty SUI_MCP_DATA_DIR; existing data is not converted or deleted."
-  );
+  throw new ActivityDatabaseFormatError();
 }
 
 export function initializeDatabase(db: SqliteDatabase): void {

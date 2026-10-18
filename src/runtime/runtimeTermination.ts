@@ -1,4 +1,5 @@
 import { SuiEndpointError } from "../core/suiEndpoint.js";
+import { ActivityDatabaseFormatError } from "../core/activity/sqliteActivityStoreTypes.js";
 import type { Logger } from "./logger.js";
 
 export type RuntimeExitCause = { kind: "client" } | { kind: "signal"; code: 130 | 143 } |
@@ -6,6 +7,7 @@ export type RuntimeExitCause = { kind: "client" } | { kind: "signal"; code: 130 
 
 // Keep arbitrary SDK/server exception text, endpoint values and stacks private.
 export function runtimeFailureReason(error: unknown, stage: string): string {
+  if (error instanceof ActivityDatabaseFormatError) return ActivityDatabaseFormatError.recoveryMessage;
   if (error instanceof SuiEndpointError) return `Sui mainnet endpoint verification failed (${error.kind}). Check the configured endpoint.`;
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
   if (code === "DATA_DIRECTORY_OWNED") return "The private data directory is already owned by another wallet runtime.";
