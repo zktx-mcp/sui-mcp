@@ -4,36 +4,209 @@ This is the setup guide for Sui MCP clients. It owns installation, MCP client co
 
 It does not define tool field contracts or response wording. Use `docs/MCP_TOOLS.md` for the MCP API reference and `docs/AGENT_BEHAVIOR.md` for the answer playbook.
 
-The README keeps only the short entry path; client-specific setup, restart behavior, and troubleshooting live here.
+The normal path is **install once with npm → register the command in each app → ask your first question**. No source checkout or special installation folder is required.
 
-These instructions target `@zktx.io/sui-mcp@0.8.0`. Package installation requires
-that exact version to be published; use the developer checkout instructions when
-it is not available. A repository rename or local build does not publish the
-package. Changing client settings or rebuilding files does not replace an
-already running shared server. Restart all clients using the service and verify
-the package identity when switching installations.
+These instructions describe `@zktx.io/sui-mcp@0.8.0`. The npm commands work only after that exact version is published. A repository commit, local build or successful package check does not publish it. Do not substitute an older release and assume it has the behavior described here.
 
-## Key terms
+Already using Sui MCP? Follow [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation) before replacing a running installation.
 
-- Sui: the mainnet blockchain whose DeFi state this project reads.
-- MCP: Model Context Protocol, the tool-calling interface used by AI clients.
-- DeepBook: Sui's onchain order book protocol.
-- SDK: Software Development Kit, a version-pinned library dependency used by this repository.
-- gRPC and GraphQL: Sui SDK transports used by this runtime for mainnet reads.
-- WalletConnect: the backend's transport for wallet-approved connections and individual transaction requests.
-- stdio: standard input/output, the local transport used by MCP clients to talk to this server.
-- `@zktx.io`: the npm package scope. `zktx-mcp` is the GitHub organization. Sui MCP is the product; `sui-mcp` is the MCP server name and executable command.
-
-Each MCP request, including its envelope and metadata, must fit within the
-internal transport's 4 MiB request-body limit. Card messages have a separate
-64 KiB budget; Restore uploads keep their 16 MiB file limit by sending smaller
-messages. See [MCP Tools](MCP_TOOLS.md) for request and error semantics.
+- [Install with npm](#published-package-setup)
+- Register: [Codex](#codex), [Claude Desktop](#claude-desktop), [Claude Code](#claude-code), or [Cursor](#cursor)
+- [Try it without a wallet](#first-use-flow)
+- [Use several apps together](#using-multiple-apps)
+- [Troubleshooting](#troubleshooting)
 
 ## Requirements
 
-- Node.js 22+. Node 22 or 24 LTS is recommended.
-- An MCP client that can run a local stdio server.
-- Network access to Sui mainnet gRPC for runtime startup validation and to Sui mainnet GraphQL for user-requested activity reads.
+- Install Node.js 22 or newer; Node 24 LTS is a suitable choice. The [Node.js download page](https://nodejs.org/en/download) provides installers that include npm.
+- Install the AI app you want to use. It must support running a local MCP server. MCP (Model Context Protocol) lets the app call Sui MCP's tools.
+- Allow network access to npm for installation and Sui mainnet services for reads. Default Sui endpoints are built in; no API key or endpoint configuration is needed for the default path.
+
+Open Terminal on macOS/Linux, or PowerShell on Windows, and check:
+
+```sh
+node --version
+npm --version
+```
+
+Node must report `v22` or newer, and npm must print a version. If either command is missing, install Node.js and reopen the terminal before continuing. You can run the installation commands from any folder.
+
+Interactive cards require the app's MCP Apps support. A local stdio connection alone does not establish card support. Clients without it can use ordinary read tools, including public-address reads, but cannot run Connect, Disconnect, Review or Settings workflows. The wallet-free text example below works without cards.
+
+## Published Package Setup
+
+### Install once with npm
+
+Check that the version described by this guide is available:
+
+```sh
+npm view @zktx.io/sui-mcp@0.8.0 version
+```
+
+The result must be `0.8.0`. If the version is unavailable, stop here; see [NPM command returns 404](#npm-command-returns-404). Wait for publication, use the documentation for an available release, or deliberately choose the optional [developer checkout](#developer-checkout-setup). Dropping the version from the install command can install a different release.
+
+Install the published package:
+
+```sh
+npm install -g @zktx.io/sui-mcp@0.8.0
+```
+
+Install once in the Node/npm environment your apps use, then register each app separately. `-g` makes the executable available across projects; it does not automatically configure every app or grant access to other operating-system users. The installed version stays in place until you explicitly update it.
+
+Use the full scoped name `@zktx.io/sui-mcp`: the unscoped npm package `sui-mcp` is a different project that can expose the same executable name. The package supplies a command named `sui-mcp`; use that command in the app configurations below. No runtime arguments, environment variables, repository path, database installation or WalletConnect project ID are needed for default setup.
+
+If installation reports a permission error, see [Global installation permission error](#global-installation-permission-error). If the app cannot find the installed command, see [Command not found](#command-not-found).
+
+## Codex
+
+Codex Desktop, CLI and IDE integrations on the same Codex host share MCP configuration. You can configure the desktop app without installing the CLI separately.
+
+1. Open `~/.codex/config.toml` in a plain-text editor; create the folder/file if it does not exist. On macOS, Finder → Go → Go to Folder accepts `~/.codex`. On Windows, the default file is `%USERPROFILE%\.codex\config.toml`.
+2. Add the following table. If it already exists, update it instead of adding another one. Keep unrelated configuration in the file.
+
+```toml
+[mcp_servers.sui-mcp]
+command = "sui-mcp"
+```
+
+3. If the server was previously disabled, enable its entry in MCP settings. Save the configuration and fully restart Codex once to load it; an additional Refresh is not needed after that restart. Do this between tasks because restarting or refreshing can interrupt an active session.
+4. In a new chat, use the [first question](#first-use-flow) below to confirm the running package and version. Seeing a configuration entry alone does not confirm that the server started.
+
+If you already use Codex CLI, this command is an alternative to editing TOML, not an additional step:
+
+```sh
+codex mcp add sui-mcp -- sui-mcp
+```
+
+Run `codex mcp list` or use `/mcp` inside the terminal UI to inspect configured servers. No custom timeout values are required for the normal global-install configuration. See the [official Codex MCP guide](https://developers.openai.com/codex/mcp) for configuration options.
+
+## Claude Desktop
+
+1. Open the desktop app's Settings → Developer → Edit Config. This is the desktop app configuration, not the web account settings.
+2. Add `sui-mcp` under `mcpServers` in `claude_desktop_config.json`. For an otherwise empty configuration, use:
+
+```json
+{
+  "mcpServers": {
+    "sui-mcp": {
+      "command": "sui-mcp"
+    }
+  }
+}
+```
+
+If `mcpServers` already contains other entries, add only the `sui-mcp` member and a comma between members. Keep other servers and settings; do not replace the entire file. JSON does not allow comments or trailing commas.
+
+The configuration file is normally at:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+3. Save the file, fully quit Claude Desktop and reopen it.
+4. Start a new chat and use the [first question](#first-use-flow) below. The app may ask you to allow tool use. A successful server-status response confirms the connection.
+
+If the server does not appear, the MCP logs are normally at `~/Library/Logs/Claude` on macOS or `%APPDATA%\Claude\logs` on Windows. General connection logs use `mcp.log`; the server's stderr is in `mcp-server-sui-mcp.log`. The [official local-server walkthrough](https://modelcontextprotocol.io/docs/develop/connect-local-servers) illustrates the Developer configuration screen.
+
+## Claude Code
+
+With Claude Code installed, run this in a terminal:
+
+```sh
+claude mcp add --transport stdio --scope user sui-mcp -- sui-mcp
+```
+
+The user scope makes this registration available across your projects. Use `--scope local` for only the current project, or `--scope project` to share a `.mcp.json` registration with a project. Choose one scope; do not register duplicate copies for normal setup. CLI options precede the server name; `--` separates them from the server command.
+
+Start a new Claude Code session. Use `/mcp` to inspect the connection, then ask the [first question](#first-use-flow). You can also inspect the registration with:
+
+```sh
+claude mcp get sui-mcp
+```
+
+After a configuration change, restart the session so it starts the new command. See the [official Claude Code MCP guide](https://code.claude.com/docs/en/mcp) for scope and connection details.
+
+## Cursor
+
+1. Open or create `~/.cursor/mcp.json` for a user-wide registration. On Windows, this is normally `%USERPROFILE%\.cursor\mcp.json`. For only one project, use that project's `.cursor/mcp.json` instead; you do not need both.
+2. Add this configuration, preserving any other members already in `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "sui-mcp": {
+      "type": "stdio",
+      "command": "sui-mcp"
+    }
+  }
+}
+```
+
+3. Save and restart Cursor. Open its MCP management view (Customize → MCP in current versions), check that `sui-mcp` is enabled, and allow the connection if prompted.
+4. Start an Agent chat and ask the [first question](#first-use-flow). A returned server status confirms startup. If it fails, inspect the server's error in the MCP management view or the MCP Logs channel in Output.
+
+See the [official Cursor MCP guide](https://cursor.com/docs/mcp) if your version presents these settings differently.
+
+## First Use Flow
+
+### 1. Confirm the running server
+
+After registering your app, paste this into a new chat, not a terminal:
+
+```text
+Use Sui MCP to show its package name, server name, version and network.
+```
+
+The app should call `read_get_server_status`. Confirm `packageName` is `@zktx.io/sui-mcp`, `serverName` is `sui-mcp`, `version` is `0.8.0` and `network` is `mainnet`. These are the expected identifiers, not a sample observation. If the version differs, use [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation) rather than assuming the new installation replaced a running server.
+
+### 2. Try a read without connecting a wallet
+
+```text
+Use Sui MCP to list the available DeepBook pools on Sui mainnet.
+```
+
+The app should call `read_list_deepbook_pools` and return pool names and trading assets. Results can change; no fixed pool count or price is required. This request needs no wallet, funds, card, signature or transaction. A successful status response followed by this read confirms that the app can reach Sui MCP and use a mainnet read tool. If a network read fails, use the returned reason and [Troubleshooting](#troubleshooting); do not connect a wallet to fix it.
+
+If you want to try an interactive read card in an MCP Apps-capable app, ask:
+
+```text
+Show a DeepBook SUI/USDC price chart in Sui MCP.
+```
+
+Expect a read-only Chart card with candle data, or an explicit source/availability result. A chart-data failure is separate from installation failure. No wallet connection or signing is involved. An app without the required card support can still use the text read above.
+
+### 3. Optionally connect your wallet for asset reads
+
+This is separate from installation. Use an app that can display MCP Apps cards and a wallet that supports WalletConnect for the requested networks.
+
+The initial network selection is Sui. To request Ethereum and/or Solana addresses as well, first ask "Open my Sui MCP Settings card", choose Wallet networks, select the networks and choose Save networks. These choices apply only to the next connection. Other-chain addresses do not enable other-chain financial actions.
+
+Then ask:
+
+```text
+Connect my wallet using Sui MCP.
+```
+
+The Connect card checks current state and displays a QR for its one request. Scan it with your wallet and approve the connection. This is connection approval, not transaction approval. A completed card shows its fixed result without addresses, QR or further controls.
+
+Ask "Show my current Sui MCP connection and wallet balances". The agent reads `session_get_interaction_status` and, when its Sui read context is usable, `read_summarize_wallet_assets`. A wallet can approve only a subset of requested networks; only valid returned addresses are usable. Change wallet, address or approved networks by asking to disconnect, confirming the separate Disconnect card, and requesting a new connection.
+
+You can instead supply a Sui public address for a tool that accepts `account`; connecting a wallet is not required for that explicit-address read. DeepBook account inventory requires the current connected Sui read address and does not accept an explicit address input.
+
+### For agents
+
+Use the user's request to select subsequent read tools; do not run a tool checklist as installation work. `read_classify_wallet_assets` classifies coin balances, `read_preview_intent_evidence` handles supported USD-denominated questions, `read_summarize_deepbook_account_inventory` reads connected-account inventory, and the Sui activity tools provide bounded activity reads. For saved review evidence, use `read_list_review_activity`, `read_summarize_review_funnel` or `read_get_review_session_detail`.
+
+Before evidence-policy checks, record `packageName`, `version`, `evidencePolicy.version`, `network` and the returned numeric `implementedToolsCount` from `read_get_server_status`; do not hand-count the tool array. Use `session_get_interaction_status.assetReadAccount` to determine whether implicit asset reads are usable; `account_get_active_account` alone reports stored read context, not a usable connection. Read/wait on a connection card only by its returned `cardId`. Settings and wallet changes require the user's scoped card actions. Follow [MCP Tools](MCP_TOOLS.md) and [Agent Behavior](AGENT_BEHAVIOR.md) for exact contracts and question flows.
+
+## Using Multiple Apps
+
+You can use Sui MCP from several local apps at the same time, for example Codex and Claude Desktop on the same computer under the same operating-system user. Install the npm package once and register `sui-mcp` in each app; you do not need a separate server installation or wallet pairing per app.
+
+With default settings, the apps automatically use the same local backend, data folder, saved settings and one current wallet connection. A connection made or disconnected in one app affects the current connection seen by the others. There is still only one connection with one fixed address per approved chain, not one wallet connection per app. Completed cards keep their original results; another app's actions do not reopen or rewrite them. Transaction approval is required for every transaction.
+
+All participating apps must use the same package release and configuration. If you deliberately override `SUI_MCP_DATA_DIR` or `SUI_MCP_REVIEW_PORT`, use the same values in every app; these overrides are not needed for normal setup. An incompatible running backend is refused rather than replaced. This sharing is local to the computer/user, not a remote or cloud connection.
+
+When updating the package or applying stored endpoint changes, stop Sui MCP in all participating apps and let the shared backend exit before reopening them. Closing one chat or one app may leave the backend running for the others. Follow [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation); an ordinary second-app registration does not require reinstalling the package or repeating a completed connection test.
 
 ## Default Setup
 
@@ -54,13 +227,29 @@ This placeholder is only the sender value required by DeepBook SDK simulation re
 
 Reads that require a current fixed wallet address use `session_open_wallet_connection_card`. Tools with an `account` input also accept an explicit Sui address without a wallet connection.
 
+## Key terms
+
+- Sui: the mainnet blockchain whose DeFi state this project reads.
+- MCP: Model Context Protocol, the tool-calling interface used by AI clients.
+- DeepBook: Sui's onchain order book protocol.
+- SDK: Software Development Kit, a version-pinned library dependency used by this repository.
+- gRPC and GraphQL: Sui SDK transports used by this runtime for mainnet reads.
+- WalletConnect: the backend's transport for wallet-approved connections and individual transaction requests.
+- stdio: standard input/output, the local transport used by MCP clients to talk to this server.
+- `@zktx.io`: the npm package scope. `zktx-mcp` is the GitHub organization. Sui MCP is the product; `sui-mcp` is the MCP server name and executable command.
+
+Each MCP request, including its envelope and metadata, must fit within the
+internal transport's 4 MiB request-body limit. Card messages have a separate
+64 KiB budget; Restore uploads keep their 16 MiB file limit by sending smaller
+messages. See [MCP Tools](MCP_TOOLS.md) for request and error semantics.
+
 ## Developer Checkout Setup
 
 Use Node.js 22.12 or newer within 22.x, or Node.js 24 or newer, for source builds
 and tests. These ranges satisfy Vite, Rolldown and Vitest together. The installed
 package's runtime requirement remains Node.js 22 or newer.
 
-Use this path when you download the repository from GitHub and want to test the local build:
+This is optional for contributors and unpublished source builds. Normal npm installation does not require Git, a repository checkout, build commands or a custom runtime path. Install Git as well as Node.js before using this path:
 
 ```bash
 git clone https://github.com/zktx-mcp/sui-mcp.git
@@ -68,6 +257,8 @@ cd sui-mcp
 npm install
 npm run build
 ```
+
+After building, use the app-specific registration instructions above, but replace the global command with `node` and the absolute path to the built file. Replace the example path with your checkout location; no particular checkout folder is required:
 
 Generic stdio MCP configuration:
 
@@ -114,79 +305,28 @@ npm run smoke:mainnet
 
 ## Install from the MCP Registry
 
-If your MCP client can install servers from the
-[MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=sui-mcp),
-find the `io.github.zktx-mcp/sui-mcp` entry and install it through your
-client. The resulting stdio server command is equivalent to:
+This is an alternative to the global-install path. If your client supports the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=sui-mcp), choose `io.github.zktx-mcp/sui-mcp` and check that the offered package is `@zktx.io/sui-mcp` at version `0.8.0`. Do not assume the registry entry already offers an unpublished release. Check the running identity through the first-use flow after registration.
 
-```sh
-npx -y @zktx.io/sui-mcp
-```
+## Download on demand (npx)
 
-Clients that do not install from the registry use the published-package and
-per-client configuration below, which give the exact `command` and `args`.
-
-## Published Package Setup
-
-The npm package for this release is `@zktx.io/sui-mcp`. The commands below
-require the requested version to be published; confirm it with
-`npm view @zktx.io/sui-mcp@0.8.0 version` before switching. Both installation
-methods start the same `sui-mcp` stdio MCP server. Use a local checkout when
-working on a version that has not been published.
-
-### Download on demand (npx, tracks the latest release)
+Use this alternative if you do not want a global install. Replace the global command in your app registration with this exact-version launch configuration:
 
 ```json
 {
   "command": "npx",
-  "args": ["-y", "@zktx.io/sui-mcp"]
+  "args": ["-y", "@zktx.io/sui-mcp@0.8.0"]
 }
 ```
 
-No install step, and each launch resolves the latest published version. The
-trade-off: the first launch (or the first after the npx cache is cleared)
-downloads the package and its native dependencies. On a cold cache this can take
-long enough to exceed a client's MCP startup timeout, so the client may stop the
-server before it connects. If that happens, warm the cache once in a terminal and
-then restart the client:
+For Codex, the equivalent is:
 
-```bash
-npx -y @zktx.io/sui-mcp
-# after the server binds or a healthy peer is confirmed, stop it with Ctrl-C
+```toml
+[mcp_servers.sui-mcp]
+command = "npx"
+args = ["-y", "@zktx.io/sui-mcp@0.8.0"]
 ```
 
-The startup log reports either an owned shared server or an authenticated healthy
-peer. A bootstrap failure instead reports its stage and reason on stderr.
-
-### Install once (global, fastest startup, pinned version)
-
-```bash
-npm install -g @zktx.io/sui-mcp
-```
-
-```json
-{
-  "command": "sui-mcp"
-}
-```
-
-The global `sui-mcp` command starts with no per-launch download, so it
-avoids the cold-start timeout, and it stays on the installed version until you
-update it explicitly:
-
-```bash
-npm install -g @zktx.io/sui-mcp@latest
-```
-
-The unscoped npm package `sui-mcp` is unrelated and can provide the same global
-command name. Always install the full `@zktx.io/sui-mcp` package and verify
-`read_get_server_status.packageName` after starting it. If another installation
-owns the global command, use the scoped `npx` configuration instead.
-
-The per-client sections below use the `npx` form. To use a global install
-instead, replace the published-package command with `"command": "sui-mcp"`
-and drop the `args`. On native Windows clients that need `cmd`, wrap either
-command, for example `"command": "cmd", "args": ["/c", "npx", "-y", "@zktx.io/sui-mcp"]`.
+This downloads the requested published package as needed. A cold cache can exceed the app's startup timeout; the global install avoids per-launch package resolution. Keep the exact version in every app's configuration. Neither an unversioned package name nor `@latest` guarantees the version described by this guide.
 
 ## Switching the Installed Package
 
@@ -229,8 +369,9 @@ restart first. A previous wallet pairing can remain in the wallet app; remove
 an unwanted pairing there rather than assuming new local storage disconnected it.
 
 Replace the old registration instead of adding a second one. Use
-`sui-mcp` as the default registration name and select `@zktx.io/sui-mcp@0.8.0`
-in its command arguments. A client-defined alias does not change the package,
+`sui-mcp` as the default registration name. Install `@zktx.io/sui-mcp@0.8.0`
+globally and register the `sui-mcp` command, or use the exact-version
+[npx alternative](#download-on-demand-npx). A client-defined alias does not change the package,
 server identity or permissions. Remove obsolete runtime environment overrides. If you set
 `SUI_MCP_DATA_DIR`, choose a new empty directory; never point it at another
 package's database or private WalletConnect store. Keep the same new directory
@@ -250,225 +391,6 @@ and the private WalletConnect store is in that same data directory. These values
 select the current installation; no previous-package aliases are supported.
 Card addresses use `suimcp://` and `ui://sui-mcp/`; see
 [MCP Tools](MCP_TOOLS.md#resources).
-
-## Claude Code
-
-Claude Code supports local stdio MCP servers through `claude mcp add`. Put Claude CLI options such as `--transport` and `--scope` before the server name; the `--` separator starts the command that runs Sui MCP.
-
-Developer checkout:
-
-```bash
-claude mcp add --transport stdio \
-  sui-mcp \
-  -- node /absolute/path/to/sui-mcp/dist/runtime/start.js
-```
-
-Published npm package:
-
-```bash
-claude mcp add --transport stdio \
-  sui-mcp \
-  -- npx -y @zktx.io/sui-mcp
-```
-
-Claude Code scopes:
-
-- `local`: default; private to the current project.
-- `project`: shared through a checked-in `.mcp.json`.
-- `user`: private to your user account and available across projects.
-
-Project-scope `.mcp.json` example:
-
-```json
-{
-  "mcpServers": {
-    "sui-mcp": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/absolute/path/to/sui-mcp/dist/runtime/start.js"]
-    }
-  }
-}
-```
-
-Verify the server and tool list:
-
-```bash
-claude mcp list
-claude mcp get sui-mcp
-```
-
-Inside Claude Code, use `/mcp` to inspect connected servers. After changing MCP configuration or rebuilding the local runtime, restart the Claude Code session so the stdio process is started from the new command. If startup is slow, launch Claude Code with a larger startup timeout such as `MCP_TIMEOUT=10000 claude`.
-
-## Claude Desktop
-
-Claude Desktop can run local stdio MCP servers through its Developer settings. It does not require a `.dxt` extension for this package.
-
-Open Claude Desktop settings, go to Developer, choose Edit Config, and add a server to `claude_desktop_config.json`.
-
-Common config paths:
-
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-Developer checkout:
-
-```json
-{
-  "mcpServers": {
-    "sui-mcp": {
-      "command": "node",
-      "args": ["/absolute/path/to/sui-mcp/dist/runtime/start.js"]
-    }
-  }
-}
-```
-
-Published npm package:
-
-```json
-{
-  "mcpServers": {
-    "sui-mcp": {
-      "command": "npx",
-      "args": ["-y", "@zktx.io/sui-mcp"]
-    }
-  }
-}
-```
-
-On native Windows, use `cmd /c` if direct `npx` or `node` resolution fails:
-
-```json
-{
-  "mcpServers": {
-    "sui-mcp": {
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "@zktx.io/sui-mcp"]
-    }
-  }
-}
-```
-
-Save the file and fully restart Claude Desktop. If the server does not appear, check MCP logs:
-
-- macOS: `~/Library/Logs/Claude`
-- Windows: `%APPDATA%\Claude\logs`
-
-Claude Desktop writes general MCP connection logs to `mcp.log` and named server stderr logs to files such as `mcp-server-sui-mcp.log`.
-
-## Codex
-
-Codex CLI supports stdio MCP servers and stores MCP settings in `config.toml`; by default this is `~/.codex/config.toml`, and trusted projects can use `.codex/config.toml`.
-
-Developer checkout:
-
-```bash
-codex mcp add sui-mcp \
-  -- node /absolute/path/to/sui-mcp/dist/runtime/start.js
-```
-
-Published npm package:
-
-```bash
-codex mcp add sui-mcp \
-  -- npx -y @zktx.io/sui-mcp
-```
-
-Verify with:
-
-```bash
-codex mcp list
-```
-
-Inside the Codex TUI, use `/mcp` to see active MCP servers.
-
-Equivalent `~/.codex/config.toml` entry for a developer checkout:
-
-```toml
-[mcp_servers.sui-mcp]
-command = "node"
-args = ["/absolute/path/to/sui-mcp/dist/runtime/start.js"]
-startup_timeout_sec = 10
-tool_timeout_sec = 60
-```
-
-Equivalent `~/.codex/config.toml` entry after npm publication:
-
-```toml
-[mcp_servers.sui-mcp]
-command = "npx"
-args = ["-y", "@zktx.io/sui-mcp"]
-startup_timeout_sec = 10
-tool_timeout_sec = 60
-```
-
-After changing `config.toml`, restart the Codex session so the stdio process is relaunched from the new config.
-
-## Cursor
-
-Cursor supports MCP servers through `mcp.json`.
-
-Configuration locations:
-
-- Project-specific: `.cursor/mcp.json`
-- Global: `~/.cursor/mcp.json`
-
-Developer checkout:
-
-```json
-{
-  "mcpServers": {
-    "sui-mcp": {
-      "command": "node",
-      "args": ["/absolute/path/to/sui-mcp/dist/runtime/start.js"]
-    }
-  }
-}
-```
-
-Published npm package:
-
-```json
-{
-  "mcpServers": {
-    "sui-mcp": {
-      "command": "npx",
-      "args": ["-y", "@zktx.io/sui-mcp"]
-    }
-  }
-}
-```
-
-Restart Cursor after changing `mcp.json`. Cursor MCP logs are available from the Output panel; choose the MCP Logs output channel.
-
-## First Use Flow
-
-After the MCP server is connected:
-
-1. Call `read_get_server_status` and record `packageName`, `version`, `evidencePolicy.version`, `network`, and `implementedToolsCount` before running evidence-policy checks. Use the returned numeric `implementedToolsCount` field instead of hand-counting the tool array.
-2. Use wallet-free read tools directly when you need market context:
-   - `read_list_deepbook_pools`
-   - `read_list_deepbook_tokens`
-   - `read_get_deepbook_mid_price`
-   - `read_inspect_deepbook_orderbook`
-   - `read_quote_deepbook_action`
-   - `read_quote_deepbook_display_amount`
-3. If a read tool accepts `account` and the user supplied a Sui address, pass it directly. When the user wants to connect a wallet for implicit reads, call `session_open_wallet_connection_card`.
-4. Open the internal Connect card in an MCP Apps-capable client. Its authenticated view starts its one permitted connection request; there is no operation selector.
-5. Scan the card’s pairing QR in a Sui mainnet wallet and approve the connection. This is not approval of a transaction.
-6. Read or wait using the returned `cardId`. See [Session Tools](MCP_TOOLS.md#session-tools) for card outcomes and exact-operation reads. The completed connection card contains no addresses or further controls.
-7. Call `session_get_interaction_status` to check the connection and `assetReadAccount`. `account_get_active_account` separately reports the saved read address, which is not proof of a usable connection.
-   Then call the read tool that matches the user's request:
-   - `read_summarize_wallet_assets` for balances.
-   - `read_classify_wallet_assets` for coin-balance roles.
-   - `read_preview_intent_evidence` for natural-language USD-denominated coverage or settlement-asset balance-total evidence.
-   - `read_summarize_deepbook_account_inventory` for DeepBook manager or pool-account inventory.
-   - `read_summarize_sui_activity_scan` for a live bounded activity summary.
-   - `read_summarize_sui_function_activity_scan` for sent transactions that called one full function target.
-   If the selected tool accepts `account` and the user supplied a Sui address, pass it instead of starting wallet connection. DeepBook account inventory has no explicit address input.
-8. For local review evidence, use `read_list_review_activity`, `read_summarize_review_funnel`, or `read_get_review_session_detail`.
-9. For requested wallet networks, the saved read address, local endpoints or local data controls, ask your AI client to call `settings_create_local_settings_session`, then use the internal card controls. Saved network choices apply to the next wallet connection; endpoint changes apply after the shared parent restarts.
 
 ## Wallet Connection Boundary
 
@@ -747,12 +669,60 @@ It is not part of CI or `release:check`.
 
 ## Troubleshooting
 
+### Global installation permission error
+
+An `EACCES` or administrator-permission error means npm cannot write to its global installation directory. On macOS/Linux, if that directory is administrator-owned and you intend to install there, run the installer with administrator authorization:
+
+```sh
+sudo npm install -g @zktx.io/sui-mcp@0.8.0
+```
+
+Enter the administrator password only in your terminal, never in chat. Launch the AI apps normally afterward; running Sui MCP does not require administrator privileges. If you cannot authorize that installation, follow npm's [global installation permission guidance](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally). This step is only for a permission failure, not an extra installation step for everyone.
+
+### Command not found
+
+If the app reports that `sui-mcp` cannot be found, fully reopen it after installing Node.js and the package. Apps must be able to find Node.js and npm's global executables in their `PATH` (the list of folders used to locate commands).
+
+Find the installed executable in a terminal:
+
+```sh
+# macOS / Linux
+command -v sui-mcp
+```
+
+```powershell
+# Windows PowerShell
+where.exe sui-mcp
+```
+
+If no path is returned, check `npm list -g @zktx.io/sui-mcp --depth=0` in the Node/npm environment used for installation. If the terminal finds it but the app does not, use the returned absolute executable path as the registration's `command` and ensure the app can also find Node.js. This is an environment repair, not a required custom installation location. See [npm's executable location rules](https://docs.npmjs.com/cli/v11/configuring-npm/folders#executables).
+
+On native Windows, if the app cannot launch the npm command shim directly, use `cmd /c`. Inside a JSON server entry, use:
+
+```json
+{
+  "command": "cmd",
+  "args": ["/c", "sui-mcp"]
+}
+```
+
+The corresponding Codex table is:
+
+```toml
+[mcp_servers.sui-mcp]
+command = "cmd"
+args = ["/c", "sui-mcp"]
+```
+
+If another package owns the global `sui-mcp` command, use the scoped, exact-version [npx alternative](#download-on-demand-npx) instead. Confirm the package identity through `read_get_server_status`; the executable name alone is not proof of which package is running.
+
 ### Server does not appear in the client
 
-- Confirm the command uses absolute paths for local checkout setup.
-- Confirm `npm run build` has completed after source changes.
+- Confirm the registration uses the configuration format and file location for your app, and that its server entry is enabled.
+- For the global npm install, follow [Command not found](#command-not-found) if the app cannot launch the executable. No source build is needed.
+- Only for a developer checkout, confirm the command uses the absolute built file path and that `npm run build` completed after source changes.
 - Restart the MCP client so it relaunches the stdio process.
-- Run the configured command directly in a terminal and check stderr.
+- Read the app's MCP error or server stderr to distinguish a missing executable from a runtime startup failure.
 - For Claude Desktop, check the MCP logs under `~/Library/Logs/Claude` or `%APPDATA%\Claude\logs`.
 
 ### Runtime exits on startup
@@ -798,7 +768,7 @@ neither substitutes for public publication.
 
 ## Client Snippets
 
-The Claude Code, Claude Desktop, Codex, and Cursor snippets above were checked against official client documentation current to this repository update. If a client changes its MCP config format, prefer that client's official documentation over this file and update this file in the same change.
+The registration formats follow the official [Codex MCP guide](https://developers.openai.com/codex/mcp), [Claude Desktop walkthrough](https://modelcontextprotocol.io/docs/develop/connect-local-servers), [Claude Code MCP guide](https://code.claude.com/docs/en/mcp), and [Cursor MCP guide](https://cursor.com/docs/mcp). App menu labels can vary by version; use the official guide for your installed version. These configuration examples do not claim that every app supports the same card or file functions. Sui MCP uses the actual connection's capabilities and function responses.
 
 ### Optional account-bound review smoke
 

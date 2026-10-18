@@ -27,9 +27,67 @@ Users can ask ordinary questions:
 - "How much are my USD-denominated assets together?"
 - "What is the shortfall?"
 
-This document describes `@zktx.io/sui-mcp@0.8.0`. Confirm that version is
-published before using npm installation commands. For a local build, follow
-[Developer Checkout Setup](docs/MCP_SETUP.md#developer-checkout-setup).
+## Install
+
+Install once with npm, then register the command in each AI app. You need [Node.js 22 or newer](https://nodejs.org/en/download), including npm. No Git checkout, build, custom installation folder, database server, Sui API key or endpoint setup is required for the normal path.
+
+This guide describes **0.8.0**. First confirm it is published, then install that exact version:
+
+```sh
+npm view @zktx.io/sui-mcp@0.8.0 version
+npm install -g @zktx.io/sui-mcp@0.8.0
+```
+
+The first command must return `0.8.0`. If it is unavailable, follow the [version availability guidance](docs/MCP_SETUP.md#npm-command-returns-404); do not drop the version and assume an older release matches this guide. Contributors can use the optional [developer checkout](docs/MCP_SETUP.md#developer-checkout-setup).
+
+Register the installed command in your app. This is the complete default configuration for Claude Desktop; Cursor's example is in the setup guide:
+
+```json
+{
+  "mcpServers": {
+    "sui-mcp": {
+      "command": "sui-mcp"
+    }
+  }
+}
+```
+
+Codex uses TOML in `~/.codex/config.toml` instead:
+
+```toml
+[mcp_servers.sui-mcp]
+command = "sui-mcp"
+```
+
+Keep existing settings and other servers when adding these entries. Choose your app's walkthrough for the file location, registration and startup confirmation:
+
+- [Codex Desktop / CLI](docs/MCP_SETUP.md#codex)
+- [Claude Desktop](docs/MCP_SETUP.md#claude-desktop)
+- [Claude Code](docs/MCP_SETUP.md#claude-code)
+- [Cursor](docs/MCP_SETUP.md#cursor)
+
+After the app loads the registration, ask: **"Use Sui MCP to show its package name, server name, version and network."** Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.8.0` and `mainnet`. Then ask: **"Use Sui MCP to list the available DeepBook pools on Sui mainnet."** This first read needs no wallet or transaction. The [first-use tutorial](docs/MCP_SETUP.md#first-use-flow) explains expected results, optional cards and wallet connection. If the app cannot find `sui-mcp`, use [Command not found](docs/MCP_SETUP.md#command-not-found).
+
+### Using several apps at once
+
+Codex, Claude Desktop and other local MCP apps can use the same installation at the same time on one computer under the same OS user. Register `sui-mcp` in each app. With defaults, they share the local backend, settings, records and **one current wallet connection**; no separate wallet pairing per app is needed. Changing that connection in one app affects the others, while completed cards keep their original results.
+
+All apps must use the same package release and configuration. Updates require stopping all participating Sui MCP connections before restarting the shared backend. See [Using Multiple Apps](docs/MCP_SETUP.md#using-multiple-apps) for sharing and update conditions. Interactive wallet, Review and Settings workflows require MCP Apps card support; ordinary reads can be used without it.
+
+### Package identity and local data
+
+The npm package is `@zktx.io/sui-mcp`, and its repository is
+`zktx-mcp/sui-mcp`. Confirm the requested version is available before changing
+your client registration.
+
+Use the full scoped package name: the unscoped `sui-mcp` package is a different
+project. Use `sui-mcp` as the default MCP registration name. A client-defined registration
+alias is a local label, not server identity or authorization. Compatible
+updates preserve the current data directory. Incompatible databases and backups
+are rejected without conversion, and files are left in place. Data from a
+different package is not discovered or imported. See the
+[setup guide](docs/MCP_SETUP.md#switching-the-installed-package) for installation
+and shared-server restart instructions.
 
 ## Product Scope in Two Layers
 
@@ -190,34 +248,6 @@ For quote responses alone, these conclusions are unsupported:
 - P&L is not available;
 - cost basis is not available;
 - actionable signing data is not available.
-
-## Install
-
-Use the checkout setup above for unpublished changes. A local commit or successful
-package check does not publish a release.
-
-This release uses npm package `@zktx.io/sui-mcp` and MCP Registry name
-`io.github.zktx-mcp/sui-mcp`. Once the requested version is published,
-install through your client's registry support or run `npx -y @zktx.io/sui-mcp`.
-For per-client configuration (Claude Code, Claude Desktop, Codex, Cursor) and
-running from a local checkout, see [docs/MCP_SETUP.md](docs/MCP_SETUP.md).
-
-### Package identity and local data
-
-The npm package is `@zktx.io/sui-mcp`, and its repository is
-`zktx-mcp/sui-mcp`. Confirm the requested version is available before changing
-your client registration.
-
-Use the full scoped package name: the unscoped `sui-mcp` package is a different
-project. Use `sui-mcp` as the default MCP registration name. A client-defined registration
-alias is a local label, not server identity or authorization. Compatible
-updates preserve the current data directory. Incompatible databases and backups
-are rejected without conversion, and files are left in place. Data from a
-different package is not discovered or imported. See the
-[setup guide](docs/MCP_SETUP.md#switching-the-installed-package) for installation
-and shared-server restart instructions.
-
-After the MCP server is connected, use [docs/MCP_SETUP.md](docs/MCP_SETUP.md#first-use-flow) for first-use setup, [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md) for API fields and statuses, and [docs/AGENT_BEHAVIOR.md](docs/AGENT_BEHAVIOR.md) for user-question flow and response wording.
 
 ## Mainnet-Only Product Surface
 
