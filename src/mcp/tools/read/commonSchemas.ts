@@ -6,6 +6,14 @@ export const fetchedAtSchema = z.string().refine((value) => {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
 }, "Expected ISO 8601 UTC timestamp");
 
+// Normalize only caller-supplied read filters. Evidence and output stay strict.
+export const utcTimestampInputSchema = z.string()
+  .overwrite((value) => value.replace(/(?:\.(\d{1,3}))?Z$/, (_match, fraction: string | undefined) =>
+    `.${(fraction ?? "").padEnd(3, "0")}Z`))
+  .refine((value) => fetchedAtSchema.safeParse(value).success,
+    "Expected a valid ISO 8601 UTC timestamp ending in Z, with seconds and at most 3 fractional digits")
+  .describe("UTC timestamp ending in Z, with seconds and optional 1-3 fractional digits; normalized to milliseconds.");
+
 export const readSourceSchema = z.object({
   sdk: z.string(),
   transport: z.literal("grpc"),
@@ -27,8 +35,8 @@ export const reviewActivityDataScopeSchema = z.object({
 
 export const reviewActivityInputSchema = {
   account: z.string().min(1).optional(),
-  from: fetchedAtSchema.optional(),
-  to: fetchedAtSchema.optional()
+  from: utcTimestampInputSchema.optional(),
+  to: utcTimestampInputSchema.optional()
 };
 
 export const userAnswerUseSchema = z.object({

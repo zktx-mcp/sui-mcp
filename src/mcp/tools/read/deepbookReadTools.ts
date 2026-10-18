@@ -37,7 +37,7 @@ import { noParamsInputSchema, successOutputSchema } from "../../schemas.js";
 import { okToolResult } from "../../result.js";
 import type { McpServerDeps } from "../../server.js";
 import { TOOL_NAMES } from "../../toolNames.js";
-import { fetchedAtSchema, readSourceSchema, userAnswerUseSchema } from "./commonSchemas.js";
+import { fetchedAtSchema, readSourceSchema, utcTimestampInputSchema, userAnswerUseSchema } from "./commonSchemas.js";
 import { readServiceError, resolveExplicitOrActiveAccount } from "./readToolHelpers.js";
 
 const deepbookMidPriceSourceSchema = z.object({
@@ -598,8 +598,8 @@ export function registerDeepbookReadTools(server: McpServer, deps: McpServerDeps
         assetSymbol: z.string().min(1).optional(),
         coinType: z.string().min(1).optional(),
         interval: deepbookOfficialIndexerIntervalSchema.optional(),
-        start: fetchedAtSchema,
-        end: fetchedAtSchema
+        start: utcTimestampInputSchema,
+        end: utcTimestampInputSchema
       }),
       outputSchema: deepbookUsdcPriceHistoryOutputSchema,
       annotations: { readOnlyHint: true, openWorldHint: false }
@@ -632,7 +632,7 @@ export function registerDeepbookReadTools(server: McpServer, deps: McpServerDeps
         assetSymbol: z.string().min(1).optional(),
         coinType: z.string().min(1).optional(),
         interval: deepbookOfficialIndexerIntervalSchema.optional(),
-        targetTime: fetchedAtSchema,
+        targetTime: utcTimestampInputSchema,
         maxDistanceMinutes: z.number().int().positive().optional()
       }),
       outputSchema: deepbookUsdcPriceAtTimeOutputSchema,

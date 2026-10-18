@@ -6,7 +6,7 @@ It does not define tool field contracts or response wording. Use `docs/MCP_TOOLS
 
 The normal path is **install once with npm → register the command in each app → ask your first question**. No source checkout or special installation folder is required.
 
-These instructions describe `@zktx.io/sui-mcp@0.8.1`. The npm commands work only after that exact version is published. A repository commit, local build or successful package check does not publish it. Do not substitute an older release and assume it has the behavior described here.
+These instructions describe `@zktx.io/sui-mcp@0.8.2`. The npm commands work only after that exact version is published. A repository commit, local build or successful package check does not publish it. Do not substitute an older release and assume it has the behavior described here.
 
 Already using Sui MCP? Follow [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation) before replacing a running installation.
 
@@ -40,15 +40,15 @@ Interactive cards require the app's MCP Apps support. A local stdio connection a
 Check that the version described by this guide is available:
 
 ```sh
-npm view @zktx.io/sui-mcp@0.8.1 version
+npm view @zktx.io/sui-mcp@0.8.2 version
 ```
 
-The result must be `0.8.1`. If the version is unavailable, stop here; see [NPM command returns 404](#npm-command-returns-404). Wait for publication, use the documentation for an available release, or deliberately choose the optional [developer checkout](#developer-checkout-setup). Dropping the version from the install command can install a different release.
+The result must be `0.8.2`. If the version is unavailable, stop here; see [NPM command returns 404](#npm-command-returns-404). Wait for publication, use the documentation for an available release, or deliberately choose the optional [developer checkout](#developer-checkout-setup). Dropping the version from the install command can install a different release.
 
 Install the published package:
 
 ```sh
-npm install -g @zktx.io/sui-mcp@0.8.1
+npm install -g @zktx.io/sui-mcp@0.8.2
 ```
 
 Install once in the Node/npm environment your apps use, then register each app separately. `-g` makes the executable available across projects; it does not automatically configure every app or grant access to other operating-system users. The installed version stays in place until you explicitly update it.
@@ -156,7 +156,7 @@ After registering your app, paste this into a new chat, not a terminal:
 Use Sui MCP to show its package name, server name, version and network.
 ```
 
-The app should call `read_get_server_status`. Confirm `packageName` is `@zktx.io/sui-mcp`, `serverName` is `sui-mcp`, `version` is `0.8.1` and `network` is `mainnet`. These are the expected identifiers, not a sample observation. If the version differs, use [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation) rather than assuming the new installation replaced a running server.
+The app should call `read_get_server_status`. Confirm `packageName` is `@zktx.io/sui-mcp`, `serverName` is `sui-mcp`, `version` is `0.8.2` and `network` is `mainnet`. These are the expected identifiers, not a sample observation. If the version differs, use [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation) rather than assuming the new installation replaced a running server.
 
 ### 2. Try a read without connecting a wallet
 
@@ -305,7 +305,7 @@ npm run smoke:mainnet
 
 ## Install from the MCP Registry
 
-This is an alternative to the global-install path. If your client supports the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=sui-mcp), choose `io.github.zktx-mcp/sui-mcp` and check that the offered package is `@zktx.io/sui-mcp` at version `0.8.1`. Do not assume the registry entry already offers an unpublished release. Check the running identity through the first-use flow after registration.
+This is an alternative to the global-install path. If your client supports the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=sui-mcp), choose `io.github.zktx-mcp/sui-mcp` and check that the offered package is `@zktx.io/sui-mcp` at version `0.8.2`. Do not assume the registry entry already offers an unpublished release. Check the running identity through the first-use flow after registration.
 
 ## Download on demand (npx)
 
@@ -314,7 +314,7 @@ Use this alternative if you do not want a global install. Replace the global com
 ```json
 {
   "command": "npx",
-  "args": ["-y", "@zktx.io/sui-mcp@0.8.1"]
+  "args": ["-y", "@zktx.io/sui-mcp@0.8.2"]
 }
 ```
 
@@ -323,7 +323,7 @@ For Codex, the equivalent is:
 ```toml
 [mcp_servers.sui-mcp]
 command = "npx"
-args = ["-y", "@zktx.io/sui-mcp@0.8.1"]
+args = ["-y", "@zktx.io/sui-mcp@0.8.2"]
 ```
 
 This downloads the requested published package as needed. A cold cache can exceed the app's startup timeout; the global install avoids per-launch package resolution. Keep the exact version in every app's configuration. Neither an unversioned package name nor `@latest` guarantees the version described by this guide.
@@ -381,7 +381,7 @@ restart first. A previous wallet pairing can remain in the wallet app; remove
 an unwanted pairing there rather than assuming new local storage disconnected it.
 
 Replace the old registration instead of adding a second one. Use
-`sui-mcp` as the default registration name. Install `@zktx.io/sui-mcp@0.8.1`
+`sui-mcp` as the default registration name. Install `@zktx.io/sui-mcp@0.8.2`
 globally and register the `sui-mcp` command, or use the exact-version
 [npx alternative](#download-on-demand-npx). A client-defined alias does not change the package,
 server identity or permissions. Remove obsolete runtime environment overrides. If you set
@@ -693,7 +693,7 @@ It is not part of CI or `release:check`.
 An `EACCES` or administrator-permission error means npm cannot write to its global installation directory. On macOS/Linux, if that directory is administrator-owned and you intend to install there, run the installer with administrator authorization:
 
 ```sh
-sudo npm install -g @zktx.io/sui-mcp@0.8.1
+sudo npm install -g @zktx.io/sui-mcp@0.8.2
 ```
 
 Enter the administrator password only in your terminal, never in chat. Launch the AI apps normally afterward; running Sui MCP does not require administrator privileges. If you cannot authorize that installation, follow npm's [global installation permission guidance](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally). This step is only for a permission failure, not an extra installation step for everyone.
@@ -832,7 +832,7 @@ If the user supplied a specific Sui address for `read_summarize_wallet_assets` o
 
 A 404 means the requested package or version could not be retrieved from the
 selected registry. Confirm the exact name and version, for example with
-`npm view @zktx.io/sui-mcp@0.8.1 version --registry=https://registry.npmjs.org`.
+`npm view @zktx.io/sui-mcp@0.8.2 version --registry=https://registry.npmjs.org`.
 A new version may not have been published or become visible yet; a mistyped name
 or an alternate/private registry can also explain the response. Check the
 publication result and registry configuration before retrying. Do not assume

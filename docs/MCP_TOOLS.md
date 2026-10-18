@@ -74,6 +74,17 @@ An explicit public-address read does not prove ownership, create active account 
 
 Live read results include `fetchedAt` as an ISO 8601 UTC string. `fetchedAt` is a timestamp, not a freshness verdict.
 
+Read-tool time filters (`start`, `end`, `targetTime`, `from`, `to`,
+`fromTimestamp`, `toTimestamp`) accept ISO 8601 UTC timestamps ending in `Z`,
+with seconds and optional 1-3 fractional digits. For example,
+`2026-10-11T00:00:00Z` and `2026-10-11T00:00:00.000Z` identify the same instant.
+The MCP input boundary normalizes them to millisecond strings before calling
+services or comparing ranges. Invalid calendar dates, missing timezones,
+numeric offsets and sub-millisecond precision are rejected. Service, stored
+evidence, backup and output timestamps retain their strict canonical format;
+input normalization does not apply to them. Chart inputs use integer
+`startTimeMs` and `endTimeMs` instead.
+
 ## API Response Guidance
 
 High-risk read, review, wallet connection, and execution-status responses include `userAnswerUse` when the response needs answer guidance.
@@ -122,7 +133,7 @@ If the SDK returns a non-positive or non-finite mid price, both `read_get_deepbo
 
 `read_get_deepbook_usdc_price_history` returns DeepBookV3 official Indexer USDC candle evidence for a requested official interval.
 
-Inputs require `start` and `end` as canonical ISO 8601 UTC timestamps and exactly one selector: `poolName`, `assetSymbol`, or `coinType`. Optional `interval` accepts only official Indexer interval values and defaults to `15m`.
+Inputs require `start` and `end` in the read-tool UTC input format described above and exactly one selector: `poolName`, `assetSymbol`, or `coinType`. Optional `interval` accepts only official Indexer interval values and defaults to `15m`.
 
 The requested range is capped at `requested.range.maxBars: 1008` candle slots for the selected interval. Larger requests return `status: "unsupported_range"` with `reason: "requested_range_exceeds_max_bars"`.
 

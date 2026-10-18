@@ -3440,6 +3440,60 @@ it("asks for an explicit address across activity reads after Clear without chang
   }); } finally { f.close(); }
 });
 
+it("normalizes UTC inputs across all ten read tools before strict domain validation", async () => {
+  const store = new InMemoryActivityStore();
+  await store.seedReadAccount(walletAccount, new Date("2026-06-26T00:00:00.000Z"));
+  const { client, server } = await connectTestClient({ activityStore: store });
+  const start = "2026-06-26T19:40:00", end = "2026-06-26T20:10:00";
+  const scope = { from: `${start}.000Z`, to: `${end}.000Z` };
+  const calls = [
+    { name: TOOL_NAMES.readGetDeepbookUsdcPriceHistory,
+      input: { poolName: "SUI_USDC", start: `${start}Z`, end: `${end}Z`, interval: "15m" },
+      expected: { requested: { range: { start: `${start}.000Z`, end: `${end}.000Z`, interval: "15m" } } } },
+    { name: TOOL_NAMES.readGetDeepbookUsdcPriceAtTime,
+      input: { poolName: "SUI_USDC", targetTime: `${start}Z` },
+      expected: { target: { targetTime: `${start}.000Z` } } },
+    ...[TOOL_NAMES.readListReviewActivity, TOOL_NAMES.readSummarizeReviewFunnel, TOOL_NAMES.readSummarizeSuiAccountActivity]
+      .map((name) => ({ name, input: { account: walletAccount, from: `${start}Z`, to: `${end}Z` }, expected: { dataScope: scope } })),
+    ...[TOOL_NAMES.readScanSuiAccountActivity, TOOL_NAMES.readScanSuiFunctionActivity,
+      TOOL_NAMES.readSummarizeSuiActivityScan, TOOL_NAMES.readSummarizeSuiFunctionActivityScan]
+      .map((name) => ({ name, input: { account: walletAccount, fromTimestamp: `${start}Z`, toTimestamp: `${end}Z`,
+        ...(name === TOOL_NAMES.readScanSuiFunctionActivity || name === TOOL_NAMES.readSummarizeSuiFunctionActivityScan
+          ? { function: "0x2::coin::transfer" } : {}) },
+        expected: { persistence: { stored: true, scan: { fromTimestamp: scope.from, toTimestamp: scope.to } } } })),
+    { name: TOOL_NAMES.readGetAccountAssetTimeline,
+      input: { account: walletAccount, start: `${start}Z`, end: `${end}Z` },
+      expected: { requestedRange: scope } }
+  ];
+  try {
+    // Tool discovery also exercises the pinned SDK's JSON Schema conversion.
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    for (const call of calls) {
+      expect(names).toContain(call.name);
+      expect(textPayload(await client.callTool({ name: call.name, arguments: call.input })), call.name)
+        .toMatchObject({ ok: true, data: call.expected });
+    }
+  } finally { await client.close(); await server.close(); }
+});
+
+it("keeps reversed read ranges rejected after fractional seconds are normalized", async () => {
+  const store = new InMemoryActivityStore();
+  await store.seedReadAccount(walletAccount);
+  const { client, server } = await connectTestClient({ activityStore: store });
+  const from = "2026-06-26T19:40:00.9Z", to = "2026-06-26T19:40:00.1Z";
+  try {
+    for (const call of [
+      { name: TOOL_NAMES.readGetDeepbookUsdcPriceHistory, input: { poolName: "SUI_USDC", start: from, end: to } },
+      { name: TOOL_NAMES.readListReviewActivity, input: { account: walletAccount, from, to } },
+      { name: TOOL_NAMES.readScanSuiAccountActivity, input: { account: walletAccount, fromTimestamp: from, toTimestamp: to } },
+      { name: TOOL_NAMES.readGetAccountAssetTimeline, input: { account: walletAccount, start: from, end: to } }
+    ]) {
+      expect(textPayload(await client.callTool({ name: call.name, arguments: call.input })), call.name)
+        .toMatchObject({ ok: false, error: { kind: "input_invalid" } });
+    }
+  } finally { await client.close(); await server.close(); }
+});
+
 it("reports an unrecorded wallet session through the review gateway without creating another review or financial effect", async () => {
   const f = await walletWorkflowFixture();
   try { await f.run(async () => {

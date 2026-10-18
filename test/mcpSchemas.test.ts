@@ -17,6 +17,7 @@ import {
 import { okToolResult } from "../src/mcp/result.js";
 import { successOutputSchema } from "../src/mcp/schemas.js";
 import { SUPPORTED_PROTOCOLS } from "../src/mcp/tools/read/index.js";
+import { fetchedAtSchema, utcTimestampInputSchema } from "../src/mcp/tools/read/commonSchemas.js";
 
 const plan: ActionPlan = {
   id: "plan_1",
@@ -171,6 +172,29 @@ function humanReadableReviewSummary() {
 }
 
 describe("MCP schemas", () => {
+  it.each([
+    ["2026-10-11T00:00:00Z", "2026-10-11T00:00:00.000Z"],
+    ["2026-10-11T00:00:00.1Z", "2026-10-11T00:00:00.100Z"],
+    ["2026-10-11T00:00:00.12Z", "2026-10-11T00:00:00.120Z"],
+    ["2026-10-11T00:00:00.123Z", "2026-10-11T00:00:00.123Z"],
+    ["2024-02-29T23:59:59Z", "2024-02-29T23:59:59.000Z"],
+    ["+010000-01-01T00:00:00.000Z", "+010000-01-01T00:00:00.000Z"]
+  ])("normalizes only read timestamp input %s to %s", (input, expected) => {
+    expect(utcTimestampInputSchema.parse(input)).toBe(expected);
+    expect(fetchedAtSchema.parse(expected)).toBe(expected);
+    expect(fetchedAtSchema.safeParse(input).success).toBe(input === expected);
+  });
+
+  it.each([
+    "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z", "2026-13-01T00:00:00Z",
+    "2026-10-11T24:00:00Z", "2026-10-11T00:60:00Z", "2026-10-11T00:00:60Z",
+    "2026-10-11T00:00:00", "2026-10-11T00:00:00+00:00", "2026-10-11T09:00:00+09:00",
+    "2026-10-11", "2026-10-11T00:00Z", "2026-10-11T00:00:00.1234Z",
+    " 2026-10-11T00:00:00Z", "2026-10-11T00:00:00Z ", "not-a-date"
+  ])("rejects invalid or unsupported read timestamp input %s", (input) => {
+    expect(utcTimestampInputSchema.safeParse(input).success).toBe(false);
+  });
+
   it("describes the shared okToolResult wrapper, not raw data", () => {
     const schema = successOutputSchema({ value: z.string() });
     const result = okToolResult({ value: "ok" });

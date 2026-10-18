@@ -33,14 +33,14 @@ Install once with npm, then register the command in each AI app. You need [Node.
 
 Already used an earlier release? Follow [Updating an Existing Sui MCP Installation](docs/MCP_SETUP.md#updating-an-existing-sui-mcp-installation) first. New installations can continue below.
 
-This guide describes **0.8.1**. First confirm it is published, then install that exact version:
+This guide describes **0.8.2**. First confirm it is published, then install that exact version:
 
 ```sh
-npm view @zktx.io/sui-mcp@0.8.1 version
-npm install -g @zktx.io/sui-mcp@0.8.1
+npm view @zktx.io/sui-mcp@0.8.2 version
+npm install -g @zktx.io/sui-mcp@0.8.2
 ```
 
-The first command must return `0.8.1`. If it is unavailable, follow the [version availability guidance](docs/MCP_SETUP.md#npm-command-returns-404); do not drop the version and assume an older release matches this guide. Contributors can use the optional [developer checkout](docs/MCP_SETUP.md#developer-checkout-setup).
+The first command must return `0.8.2`. If it is unavailable, follow the [version availability guidance](docs/MCP_SETUP.md#npm-command-returns-404); do not drop the version and assume an older release matches this guide. Contributors can use the optional [developer checkout](docs/MCP_SETUP.md#developer-checkout-setup).
 
 Register the installed command in your app. This is the complete default configuration for Claude Desktop; Cursor's example is in the setup guide:
 
@@ -68,7 +68,7 @@ Keep existing settings and other servers when adding these entries. Choose your 
 - [Claude Code](docs/MCP_SETUP.md#claude-code)
 - [Cursor](docs/MCP_SETUP.md#cursor)
 
-After the app loads the registration, ask: **"Use Sui MCP to show its package name, server name, version and network."** Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.8.1` and `mainnet`. Then ask: **"Use Sui MCP to list the available DeepBook pools on Sui mainnet."** This first read needs no wallet or transaction. The [first-use tutorial](docs/MCP_SETUP.md#first-use-flow) explains expected results, optional cards and wallet connection. If the app cannot find `sui-mcp`, use [Command not found](docs/MCP_SETUP.md#command-not-found).
+After the app loads the registration, ask: **"Use Sui MCP to show its package name, server name, version and network."** Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.8.2` and `mainnet`. Then ask: **"Use Sui MCP to list the available DeepBook pools on Sui mainnet."** This first read needs no wallet or transaction. The [first-use tutorial](docs/MCP_SETUP.md#first-use-flow) explains expected results, optional cards and wallet connection. If the app cannot find `sui-mcp`, use [Command not found](docs/MCP_SETUP.md#command-not-found).
 
 ### Using several apps at once
 

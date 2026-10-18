@@ -44,6 +44,7 @@ import {
   reviewActivityAccountSourceSchema,
   reviewActivityDataScopeSchema,
   reviewActivityInputSchema,
+  utcTimestampInputSchema,
   userAnswerUseSchema
 } from "./commonSchemas.js";
 import {
@@ -76,8 +77,8 @@ const suiActivityScanInputSchema = {
   cursor: z.string().min(1).optional(),
   fromCheckpoint: z.string().regex(/^\d+$/).optional(),
   toCheckpoint: z.string().regex(/^\d+$/).optional(),
-  fromTimestamp: fetchedAtSchema.optional(),
-  toTimestamp: fetchedAtSchema.optional()
+  fromTimestamp: utcTimestampInputSchema.optional(),
+  toTimestamp: utcTimestampInputSchema.optional()
 };
 const suiFunctionActivityScanInputSchema = {
   function: z.string().min(1),
@@ -86,13 +87,13 @@ const suiFunctionActivityScanInputSchema = {
   cursor: z.string().min(1).optional(),
   fromCheckpoint: z.string().regex(/^\d+$/).optional(),
   toCheckpoint: z.string().regex(/^\d+$/).optional(),
-  fromTimestamp: fetchedAtSchema.optional(),
-  toTimestamp: fetchedAtSchema.optional()
+  fromTimestamp: utcTimestampInputSchema.optional(),
+  toTimestamp: utcTimestampInputSchema.optional()
 };
 const accountAssetTimelineInputSchema = {
   account: z.string().min(1).optional(),
-  start: fetchedAtSchema,
-  end: fetchedAtSchema,
+  start: utcTimestampInputSchema,
+  end: utcTimestampInputSchema,
   interval: deepbookOfficialIndexerIntervalSchema.optional()
 };
 
