@@ -25,7 +25,7 @@ const otherAccount = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const packageId = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const objectId = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const digest = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
-const otherDigest = "8yFN1xzFyVHwF4aXJQzLb2Xdh4avWcXWJ4qJGnYSC8kq";
+const otherDigest = "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR";
 const normalizedSuiCoinType = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
 const now = new Date("2026-06-26T00:00:00.000Z");
 

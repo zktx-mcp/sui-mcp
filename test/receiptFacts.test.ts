@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { parseReceipt } from "../review-app/src/receiptFacts.js";
+import { chainReceiptAccount, chainReceiptDigest, chainReceiptObjectId } from "./fixtures/chainReceipt.js";
 
-// A well-formed response WITH real nested entries, mutated per case below. Each
+const gasObjectId = `0x${"d".repeat(64)}`;
+
+// Synthetic account, transaction, object, amount and time values; protocol identifiers
+// retain their real meanings. Gas net cost is 100000 + 200000 - 50000 = 250000.
+// A well-formed response with nested entries, mutated per case below. Each
 // case asserts that a specific shape drift — top-level OR inside a balance
 // change / Move call / object-type entry — fails closed (returns null → the page
 // shows an error) instead of rendering a partial or "undefined ..." receipt.
 function validReceipt(): Record<string, unknown> {
   return {
-    txDigest: "DhZ8kuDhDm32iJ8Rqd5eY4EwrFn8ga9ob4nAMM7bBJLq",
-    sender: "0xea016e020478a34bdb8e2a8400166e5d54a4132e747bf085c37ca71f3d46e3a0",
+    txDigest: chainReceiptDigest,
+    sender: chainReceiptAccount,
     effectsStatus: { success: true },
     packageCalls: [
       {
@@ -22,29 +27,29 @@ function validReceipt(): Record<string, unknown> {
     balanceChanges: [
       {
         index: 0,
-        address: "0xea016e020478a34bdb8e2a8400166e5d54a4132e747bf085c37ca71f3d46e3a0",
+        address: chainReceiptAccount,
         coinType: "0x2::sui::SUI",
-        amountRaw: "1193043120",
+        amountRaw: "1000000000",
         direction: "increase"
       }
     ],
     objectTypes: {
-      "0x00c958f578c4544acba1b894246855b91678dc4a25c0f67d508d8da3e51d9022":
+      [chainReceiptObjectId]:
         "0x2::coin::Coin<0x2::sui::SUI>"
     },
     gas: {
-      totalMist: "275256",
+      totalMist: "250000",
       computationMist: "100000",
-      storageMist: "17525600",
-      storageRebateMist: "17350344",
+      storageMist: "200000",
+      storageRebateMist: "50000",
       nonRefundableStorageMist: "0",
-      budgetMist: "1353376",
+      budgetMist: "1000000",
       priceMist: "1000",
-      paymentObjectId: "0x4ea9f70b72c77973309a90674cf25f87669939511dbf3d161d30c9ef867439dd"
+      paymentObjectId: gasObjectId
     },
     inputs: [
       { index: 0, kind: "pure", objectId: undefined },
-      { index: 1, kind: "object", objectId: "0x00c958f578c4544acba1b894246855b91678dc4a25c0f67d508d8da3e51d9022" }
+      { index: 1, kind: "object", objectId: chainReceiptObjectId }
     ],
     events: [
       {
@@ -52,24 +57,24 @@ function validReceipt(): Record<string, unknown> {
         packageId: "0x0000000000000000000000000000000000000000000000000000000000000002",
         module: "coin",
         eventType: "0x0000000000000000000000000000000000000000000000000000000000000002::coin::CoinEvent",
-        sender: "0xea016e020478a34bdb8e2a8400166e5d54a4132e747bf085c37ca71f3d46e3a0"
+        sender: chainReceiptAccount
       }
     ],
     chainIdentifier: "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S",
-    fetchedAt: "2026-06-28T03:49:37.181Z"
+    fetchedAt: "2026-01-01T00:00:00.000Z"
   };
 }
 
 describe("parseReceipt", () => {
-  it("accepts a well-formed receipt with real entries and returns the validated shape", () => {
+  it("accepts a well-formed receipt with nested entries and returns the validated shape", () => {
     const parsed = parseReceipt(validReceipt());
     expect(parsed).not.toBeNull();
     // It returns the validated, typed facts the page renders.
     expect(parsed?.balanceChanges[0]).toEqual({
       index: 0,
-      address: "0xea016e020478a34bdb8e2a8400166e5d54a4132e747bf085c37ca71f3d46e3a0",
+      address: chainReceiptAccount,
       coinType: "0x2::sui::SUI",
-      amountRaw: "1193043120",
+      amountRaw: "1000000000",
       direction: "increase"
     });
     expect(parsed?.packageCalls[0]?.target).toBe(
@@ -165,7 +170,7 @@ describe("parseReceipt", () => {
 
   it("validates gas, inputs, events, and the optional PTB graph", () => {
     // Gas: a required mist field must be a string, not a number.
-    expect(parseReceipt({ ...validReceipt(), gas: { totalMist: 275256 } })).toBeNull();
+    expect(parseReceipt({ ...validReceipt(), gas: { totalMist: 250000 } })).toBeNull();
     // Inputs: an unrecognized kind is drift.
     expect(parseReceipt({ ...validReceipt(), inputs: [{ index: 0, kind: "weird", objectId: undefined }] })).toBeNull();
     // Inputs: a non-string bytes is drift; a string bytes is surfaced.
@@ -174,9 +179,9 @@ describe("parseReceipt", () => {
     ).toBeNull();
     const withBytes = parseReceipt({
       ...validReceipt(),
-      inputs: [{ index: 0, kind: "pure", objectId: undefined, bytes: "0x98c276f632000000" }]
+      inputs: [{ index: 0, kind: "pure", objectId: undefined, bytes: "0x0100000000000000" }]
     });
-    expect(withBytes?.inputs[0]).toMatchObject({ kind: "pure", bytes: "0x98c276f632000000" });
+    expect(withBytes?.inputs[0]).toMatchObject({ kind: "pure", bytes: "0x0100000000000000" });
     // Events: a non-string eventType is drift.
     expect(
       parseReceipt({ ...validReceipt(), events: [{ index: 0, packageId: "0x2", module: "m", eventType: 1, sender: "0x1" }] })
@@ -197,7 +202,7 @@ describe("parseReceipt", () => {
     const enriched = parseReceipt({
       ...validReceipt(),
       balanceChanges: [
-        { index: 0, address: base, coinType: "0x2::sui::SUI", amountRaw: "1193043120", direction: "increase", decimals: 9, symbol: "SUI" }
+        { index: 0, address: base, coinType: "0x2::sui::SUI", amountRaw: "1000000000", direction: "increase", decimals: 9, symbol: "SUI" }
       ]
     });
     expect(enriched?.balanceChanges[0]).toMatchObject({ decimals: 9, symbol: "SUI" });

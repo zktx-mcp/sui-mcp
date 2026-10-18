@@ -186,7 +186,7 @@ Then ask:
 Connect my wallet using Sui MCP.
 ```
 
-The Connect card checks current state and displays a QR for its one request. Scan it with your wallet and approve the connection. This is connection approval, not transaction approval. A completed card shows its fixed result without addresses, QR or further controls.
+The internal Connect card checks current state and displays a QR for its one request. Scan it with your wallet and approve the connection. This is connection approval, not transaction approval. A completed card shows its fixed result without addresses, QR or further controls.
 
 Ask "Show my current Sui MCP connection and wallet balances". The agent reads `session_get_interaction_status` and, when its Sui read context is usable, `read_summarize_wallet_assets`. A wallet can approve only a subset of requested networks; only valid returned addresses are usable. Change wallet, address or approved networks by asking to disconnect, confirming the separate Disconnect card, and requesting a new connection.
 

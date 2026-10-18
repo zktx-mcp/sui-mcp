@@ -114,7 +114,7 @@ describe("Sui GraphQL function filter probe helpers", () => {
   });
 
   it("redacts sampled identifiers and caps error messages", () => {
-    const raw = `${target} touched ${sender} and digest 5SFrTF3U5AYyoj234cVqN2sqJh2EUvUgKz1hgYqxqvXF`;
+    const raw = `${target} touched ${sender} and digest CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8`;
     const redacted = redactProbeSampleText(raw);
 
     expect(redacted).toContain("[REDACTED_SAMPLE_FUNCTION]");

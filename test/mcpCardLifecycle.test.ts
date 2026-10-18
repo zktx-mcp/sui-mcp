@@ -650,7 +650,7 @@ it.each([
       plan: { id: "plan", actionKind: "swap", adapterId: "deepbook-swap", adapterData: {}, protocol: "DeepBookV3", title: "Review swap", summary: "Stored proposal", createdAt: at,
         assetFlowPreview: { outgoing: [{ symbol: "SUI", amount: "1", amountKind: "display_intent" }], expectedIncoming: [] } } },
     request: { attemptId: "attempt", reviewSessionId: "review", planId: "plan", reviewRevision: 1, account,
-      transactionDigest: "DhZ8kuDhDm32iJ8Rqd5eY4EwrFn8ga9ob4nAMM7bBJLq", requestStatus, revision: 0, createdAt: at, updatedAt: at,
+      transactionDigest: chainReceiptDigest, requestStatus, revision: 0, createdAt: at, updatedAt: at,
       reason: "Stored interruption reason" }
   };
   const act = vi.fn(), rendered = reviewRenderer.result(state("review", { data }), undefined, act);

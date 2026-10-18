@@ -6,8 +6,9 @@ import {
 export const chainReceiptAccount = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 export const chainReceiptPackageId = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 export const chainReceiptObjectId = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+// Synthetic digests: Base58 encodings of 32 bytes filled with 1 and 2.
 export const chainReceiptDigest = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
-export const otherChainReceiptDigest = "8yFN1xzFyVHwF4aXJQzLb2Xdh4avWcXWJ4qJGnYSC8kq";
+export const otherChainReceiptDigest = "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR";
 
 export function chainReceiptFixture(
   overrides: Partial<SuiChainReceiptEvidence> = {}

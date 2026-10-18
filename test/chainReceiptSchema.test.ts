@@ -11,7 +11,7 @@ const account = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const packageId = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const objectId = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const digest = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
-const otherDigest = "8yFN1xzFyVHwF4aXJQzLb2Xdh4avWcXWJ4qJGnYSC8kq";
+const otherDigest = "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR";
 
 function chainReceiptFixture() {
   return {

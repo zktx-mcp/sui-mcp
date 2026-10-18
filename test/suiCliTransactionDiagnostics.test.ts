@@ -27,13 +27,14 @@ import {
   redactSensitive
 } from "../scripts/sui-cli-transaction-diagnostics-redaction.js";
 
-const DIGEST = "5SFrTF3U5AYyoj234cVqN2sqJh2EUvUgKz1hgYqxqvXF";
+// Synthetic transaction/object digests encode 32 bytes filled with 3, 4 and 5.
+const DIGEST = "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8";
 const OBJECT_ID = `0x${"1".padStart(64, "0")}`;
 const OTHER_OBJECT_ID = `0x${"3".padStart(64, "0")}`;
 const NOW = new Date("2026-05-14T01:02:03.004Z");
 const MAINNET_CLI_CHAIN_ID = "35834a8a";
-const OBJECT_DIGEST = "33Ny3AZ3q169QD2uvrso6QtfigyFqN8DccZ1cUJR7v2y";
-const PREVIOUS_TX = "4qYbEkvQWWshcgyg93NVtHt4hAMqnU9CMt86HJentZ4B";
+const OBJECT_DIGEST = "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq";
+const PREVIOUS_TX = "LbUiWL3xVV8hTFYBVdbTNrpDo41NKS6o3LHHuDzjfcY";
 const ADDRESS = `0x${"2".padStart(64, "0")}`;
 const TEMP_DIR_PREFIX = "sui-mcp-sui-cli-diagnostics-";
 

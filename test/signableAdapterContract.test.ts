@@ -23,7 +23,7 @@ const gasObjectId = `0x${"d".repeat(64)}`;
 // Two distinct valid Sui transaction digests (isValidTransactionDigest === true),
 // used to test the commitment equality gate without re-confirming an invented format.
 const commitmentDigest = "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S";
-const otherCommitmentDigest = "5SFrTF3U5AYyoj234cVqN2sqJh2EUvUgKz1hgYqxqvXF";
+const otherCommitmentDigest = "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8";
 
 function sourceReferencesById(candidate: any, id: string) {
   return candidate.sourceReferences.find((source: { id: string }) => source.id === id);

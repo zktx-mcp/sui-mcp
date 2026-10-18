@@ -73,7 +73,8 @@ describe("mistToSui", () => {
 
 describe("shortHex", () => {
   it("uses a wider 8…6 window and shortens only above 14 characters", () => {
-    expect(shortHex("0xa0766ff7b0325c18e4c7416ad4ea4d01e92f09147b8c5e7e4a582dc84ca3a874")).toBe("0xa0766f…a3a874");
+    // Deliberately patterned synthetic address for the display-width boundary.
+    expect(shortHex("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")).toBe("0x012345…abcdef");
     expect(shortHex("0x1234567890ab")).toBe("0x1234567890ab"); // 14 chars: untouched
     expect(shortHex("0x1234567890abc")).toBe("0x123456…890abc"); // 15 chars: shortened
   });
