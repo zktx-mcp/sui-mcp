@@ -140,7 +140,7 @@ waits report actual progress, including unavailable service, rather than implyin
 completion or remote cancellation. Known submitted digests remain readable without
 WalletConnect. If Settings or the parent cannot be reached, stop all participating
 MCP connections so the shared parent exits before reopening; a peer/window closing
-alone may leave it alive. See [setup troubleshooting](MCP_SETUP.md#wallet-connection-boundary).
+alone may leave it alive. See [setup troubleshooting](MCP_SETUP.md#runtime-exits-on-startup).
 
 ## Transaction approval
 

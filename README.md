@@ -191,7 +191,7 @@ The saved result shows the selected pair, interval, UTC period and source time. 
 ### Not Implemented
 
 External proposal execution is not implemented. Further local analysis views
-beyond the current inline review receipt and internal Receipt card are
+beyond the internal Account and Chart cards, inline review receipt and internal Receipt card are
 not implemented. Transaction material review, backend WalletConnect requests under user control,
 signature verification, single submission and independent receipt observation
 are implemented for the account-bound DeepBook swap review

@@ -342,6 +342,13 @@ the installed package or configured version, then reopen them and check
 name must match the intended installation. Updating the package does not
 replace a backend that is already running.
 
+Closing a chat or app window can leave its MCP process running in the
+background. Disable Sui MCP in each participating app or fully quit those apps,
+and confirm the shared backend has exited before replacing the package. With
+a global installation, keep the existing `command = "sui-mcp"` or JSON
+`"command": "sui-mcp"` registration; updating the package does not require a
+new executable path.
+
 This is a pre-release. Local data compatibility between releases is not
 guaranteed, and migration is not provided. An incompatible database is rejected
 before writes; an npm update or reinstall does not convert or remove it.
@@ -466,7 +473,9 @@ A card accepts one read selection. Moving between chats or recreating its frame 
 
 ## Local data format
 
-Start this runtime with an empty `SUI_MCP_DATA_DIR` or a database already in its current format. A mismatched existing database is refused before writes; incompatible databases and backups are not migrated or converted. A database with different table, constraint or field definitions requires an empty data folder. Startup leaves existing files in place. Follow [Database format mismatch](#database-format-mismatch) to preserve the old files or explicitly choose a fresh start. Databases and backups do not carry a separate numeric schema version. With a new empty folder, configure the required account context and endpoints. Environment overrides keep their existing precedence. See [Local DB Architecture](LOCAL_DB_ARCHITECTURE.md) for the current format, backup scope and card-result retention. Card results do not expire with the input period and can increase DB size. Reset/import removes them along with the affected local data; it is not a card-only space cleanup operation.
+First-time installations automatically create the default data folder and database with built-in mainnet endpoints and initial Sui connection scope. No data-directory override or custom endpoint is required. Wallet-dependent features require a connection; public-address reads do not.
+
+A mismatched existing database is refused before writes; incompatible databases and backups are not migrated or converted. A database with different table, constraint or field definitions requires an empty data folder. Startup leaves existing files in place. Follow [Database format mismatch](#database-format-mismatch) to preserve the old files or explicitly choose a fresh start. Databases and backups do not carry a separate numeric schema version. Environment overrides keep their existing precedence. See [Local DB Architecture](LOCAL_DB_ARCHITECTURE.md) for the current format, backup scope and card-result retention. Card results do not expire with the input period and can increase DB size. Reset/import removes them along with the affected local data; it is not a card-only space cleanup operation.
 
 ## Local Settings
 
@@ -552,7 +561,12 @@ If the custom provider is only temporarily unavailable, keep using the environme
 SUI_MCP_DATA_DIR="/path/to/local/app-data" node /absolute/path/to/sui-mcp/dist/runtime/start.js
 ```
 
-To reset local product data files, stop the MCP server and delete `sui-mcp.sqlite`, `sui-mcp.sqlite-wal`, and `sui-mcp.sqlite-shm`, or use a new `SUI_MCP_DATA_DIR`.
+For local-data changes during normal operation, use the confirmed Settings
+actions. For incompatible-data startup recovery or an explicitly chosen empty
+profile, follow [Database format mismatch](#database-format-mismatch). Installing
+or updating the package does not authorize deleting local data. Do not remove
+database files while the shared backend is running or a transaction request is
+unresolved.
 
 Resetting, importing or replacing that database does not disconnect approvals
 in your wallet app. Private SDK sessions are stored separately, and the backend
@@ -734,7 +748,9 @@ If another package owns the global `sui-mcp` command, use the scoped, exact-vers
 
 A bootstrap failure exits with code 1 and a `fatal runtime error` diagnostic on
 stderr, including a safe stage and reason. An MCP initialization response alone
-does not mean backend startup succeeded. A foreign or incompatible port owner,
+does not mean backend startup succeeded. An app may show only `Server
+disconnected` or `Transport closed`; read its MCP server log for the diagnostic
+reason. A foreign or incompatible port owner,
 private data ownership/permission failure, and mainnet endpoint failure are
 reported separately. Use the same installed runtime and configuration in all
 clients; the runtime does not replace an incompatible listener automatically.
@@ -743,6 +759,7 @@ codes 130/143. Cleanup failure is reported and makes a normal closure fail; it
 cannot erase an earlier fatal or signal exit. SDK service unavailability is a
 separate condition and does not by itself shut down the parent read service.
 
+- If the reason says the review port is held by a foreign or incompatible runtime, identify the process using that port. If it is an older Sui MCP instance, disable its MCP connection or fully quit the app that owns it, then reopen the participating apps with the same package release, data directory and port. Closing a window alone may not stop that instance. If another application owns the port, use an available shared port in all participating Sui MCP clients. Do not delete local data or assign a different port to each app to bypass the conflict.
 - If a stored custom endpoint fails, temporarily start with `SUI_MCP_GRPC_URL`, open the Settings card, restore the default Sui gRPC URL or save a new endpoint, remove the override, and restart.
 - If an environment override is present, confirm it has scheme, host, and explicit port only.
 - If the startup chain identifier guard fails, use a Sui mainnet gRPC endpoint. If a Sui activity tool fails its GraphQL chain identifier guard, use a Sui mainnet GraphQL endpoint.

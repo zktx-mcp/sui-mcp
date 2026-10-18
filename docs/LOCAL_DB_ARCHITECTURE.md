@@ -68,7 +68,7 @@ Product docs, MCP responses, and tool outputs must not reveal a user's absolute 
 
 ## Open Policy
 
-Every database connection applies:
+The writable product database connection applies:
 
 ```sql
 PRAGMA journal_mode=WAL;
@@ -76,9 +76,9 @@ PRAGMA synchronous=NORMAL;
 PRAGMA foreign_keys=ON;
 ```
 
-Writes use SQLite's normal file-backed engine. An empty file is initialized to the current schema. An existing file is checked read-only before opening for writes: its format identifier and schema metadata must match the current definitions. The runtime does not migrate, repair or silently reset another format.
+Writes use SQLite's normal file-backed engine. An empty file is initialized to the current schema. An existing file is checked read-only before opening for writes: its table, column, constraint, index and trigger definitions must match the current schema. The database has no separate format identifier or numeric schema version; `sui-mcp.local-data` identifies the backup envelope. The runtime does not migrate, repair or silently reset another format.
 
-Use an empty `SUI_MCP_DATA_DIR` for a new installation. Existing files remain untouched. Product reset is a separate confirmed Settings action.
+On a first installation, the runtime creates the default data directory and database automatically; `SUI_MCP_DATA_DIR` is optional. An incompatible existing database remains untouched. Follow [Database format mismatch](MCP_SETUP.md#database-format-mismatch) to preserve it or explicitly choose a fresh start. Product reset during normal operation is a separate confirmed Settings action.
 
 WAL mode can create companion files next to the main database, such as `sui-mcp.sqlite-wal` and `sui-mcp.sqlite-shm`. Backups and manual moves should keep those files together with the main database while the MCP server is stopped. Avoid placing `SUI_MCP_DATA_DIR` in cloud-synchronized folders such as iCloud Drive, Dropbox, or similar sync roots because WAL companion files can be copied out of order.
 
@@ -505,7 +505,7 @@ The runtime accepts one current SQLite structure, checked against its table, col
 
 A current backup carries `format`, `network`, `exportedAt` and its product data. It has no numeric schema version. Import rejects a different format, unknown or missing fields, invalid references or invalid raw quantities. Missing settings or activity arrays are not filled from defaults. Supported `function_scan` provenance remains part of the current format. Validation failure leaves current data intact.
 
-With a new empty data directory, users configure account context and endpoints; environment overrides retain their existing precedence. Empty local history does not imply an absence of on-chain transactions. Existing DB and backup files are not deleted by startup.
+With a new empty data directory, the runtime stores the built-in mainnet endpoints and initial Sui connection scope automatically. Custom endpoint configuration is optional; environment overrides retain their existing precedence. Wallet-dependent features require a new connection, while public-address reads do not. Empty local history does not imply an absence of on-chain transactions. Existing DB and backup files are not deleted by startup.
 
 ## Boundaries
 

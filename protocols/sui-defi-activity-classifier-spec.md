@@ -493,11 +493,14 @@ activity output path. The helper takes normalized detail facts and returns
 versioned matches. It does not call network providers and does not read static
 Markdown files at runtime.
 
-## Function Diagnostics Handoff
+## Function Activity Source Boundary
 
-This section records the source boundary for function activity diagnostics. The
-MCP product slice may use only the accepted sent-address combinations listed
-here. Broader function diagnostics are outside the current boundary.
+This section records the source evidence and limits for the implemented
+`read_scan_sui_function_activity` and `read_summarize_sui_function_activity_scan`
+tools. Their current input and output contracts are in
+[MCP Tools](../docs/MCP_TOOLS.md#read-only-tools).
+They use only the accepted sent-address combinations listed here. Broader
+function diagnostics are outside the current boundary.
 
 The pinned generated GraphQL schema exposes `TransactionFilter.function`,
 `sentAddress`, `affectedAddress`, `affectedObject`, `kind`, `atCheckpoint`,
@@ -515,7 +518,7 @@ identifiers only. Less granular package or module forms are out of scope because
 they broaden matches across unrelated functions and weaken result
 interpretation.
 
-For implementation planning, both `accepted_with_rows` and `accepted_empty`
+For interpreting the recorded source probe, both `accepted_with_rows` and `accepted_empty`
 mean the live GraphQL endpoint accepted the filter combination at the probe
 date. `accepted_empty` does not prove matching activity exists for the sampled
 values, does not prove no matching activity exists globally, and must not be
@@ -531,7 +534,7 @@ rejected `function + affectedAddress`, `function + affectedObject`,
 `function + affectedAddress + afterCheckpoint + beforeCheckpoint`, returning
 `Failed to parse "TransactionFilter": At most one of [affectedAddress,
 affectedObject, function, kind] can be specified`. Treat this as source
-evidence, not a permanent API guarantee; re-probe before implementation when
+evidence, not a permanent API guarantee; re-probe the affected combinations when
 the SDK, schema, endpoint, or provider behavior changes.
 
 Less granular `package` and `package::module` forms remain out of scope until a
