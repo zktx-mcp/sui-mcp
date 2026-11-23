@@ -66,9 +66,7 @@ export function pathInside(path: string, root: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-export function pathInsideDiagnosticsTempDir(path: string): boolean {
-  return diagnosticsTempDirBase(path) !== undefined;
-}
+
 
 function diagnosticsTempDirBase(path: string): string | undefined {
   const tempRoot = resolve(tmpdir());

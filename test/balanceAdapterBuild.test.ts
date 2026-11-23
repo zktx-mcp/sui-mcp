@@ -43,7 +43,7 @@ describe("supported adapter builds use real SDK intents and gRPC resolution", ()
     const quotePolicy = deriveDeepbookSwapQuotePolicy({ rawQuote: quote.rawQuote, fetchedAt: quote.fetchedAt, maxSlippageBps: 50, now });
     if (quotePolicy.status !== "ok") throw new Error("Invalid quote fixture");
     const built = await createDeepbookSwapTransactionMaterialProducer(options)({ reviewSessionId: "balance-review", plan: plan as never, account, requestedIntent,
-      poolResolution: resolveDeepbookPoolForSymbols({ sourceSymbol: "SUI", targetSymbol: "USDC" }), quote, quotePolicy, now });
+      poolResolution: resolveDeepbookPoolForSymbols({ sourceSymbol: "SUI", targetSymbol: "USDC" }), quote, quotePolicy: { ...quotePolicy, feeBudgetRaw: quotePolicy.quotedDeepRequiredRaw }, now });
     expect(client.transactionExecutionService.simulateTransaction).toHaveBeenCalledOnce();
     if (kind !== undefined) {
       expect(built).toMatchObject({ status: "blocked", blockedReason,

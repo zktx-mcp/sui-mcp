@@ -4,9 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEEPBOOK_ANSWER_USE,
-  DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE,
-  DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE,
+  DEEPBOOK_CANDLE_CANDLE_USE,
+  DEEPBOOK_CANDLE_RESPONSE_TEXT,
+  DEEPBOOK_CANDLE_SOURCE_BASE,
   DEEPBOOK_SDK_SIMULATION_SOURCE_BASE,
   DEEPBOOK_PINNED_SDK_METADATA_SOURCE,
   DEEPBOOK_READ_RESPONSE_UNSUPPORTED,
@@ -19,9 +19,7 @@ import {
   deepbookAccountInventoryUserAnswerUse,
   deepbookMidPriceUserAnswerUse,
   deepbookOrderbookUserAnswerUse,
-  deepbookQuoteUserAnswerUse,
-  deepbookUsdcPriceAtTimeUserAnswerUse,
-  deepbookUsdcPriceHistoryUserAnswerUse
+  deepbookQuoteUserAnswerUse
 } from "../src/core/read/readResponseGuidance.js";
 
 describe("DeepBook source owner contract", () => {
@@ -30,11 +28,11 @@ describe("DeepBook source owner contract", () => {
       "directSuiGrpcAndLocalMaterial",
       "guidanceOnly",
       "localTransactionActivity",
-      "officialIndexerRest",
+      "onchainFillHistory",
       "pinnedSdkMetadata",
       "sdkSimulation"
     ]);
-    expect(DEEPBOOK_SOURCE_OWNER_GROUPS.officialIndexerRest.owns).toEqual(
+    expect(DEEPBOOK_SOURCE_OWNER_GROUPS.onchainFillHistory.owns).toEqual(
       expect.arrayContaining(["USDC-quoted candle history", "chart candles"])
     );
     expect(JSON.stringify(DEEPBOOK_SOURCE_OWNER_GROUPS)).not.toMatch(/FlowX/i);
@@ -42,22 +40,22 @@ describe("DeepBook source owner contract", () => {
 
   it("owns runtime source field literals and reusable source fragments", () => {
     expect(DEEPBOOK_SOURCE_FIELD_VALUES).toEqual({
-      officialIndexer: "deepbook_v3_official_indexer",
+      onchainFills: "sui_mainnet_deepbook_order_fills",
       sdkMainnetPackageId: "deepbook_v3_sdk_mainnet_package_id",
       pinnedSdkWhenTargetAssetSelected: "pinned_deepbook_sdk_when_target_asset_selected"
     });
-    expect(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE).toEqual({
-      kind: DEEPBOOK_SOURCE_FIELD_VALUES.officialIndexer,
-      chainRecomputedBySuiMcp: false
+    expect(DEEPBOOK_CANDLE_SOURCE_BASE).toEqual({
+      kind: DEEPBOOK_SOURCE_FIELD_VALUES.onchainFills,
+      chainRecomputedBySuiMcp: true
     });
-    expect(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE).toMatchObject({
-      allowedUse: DEEPBOOK_ANSWER_USE.officialUsdcCandleHistory,
-      source: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind,
+    expect(DEEPBOOK_CANDLE_CANDLE_USE).toMatchObject({
+      allowedUse: DEEPBOOK_ANSWER_USE.poolUsdcCandleHistory,
+      source: DEEPBOOK_CANDLE_SOURCE_BASE.kind,
       quoteAsset: "USDC",
       priceConvention: "USDC_PER_BASE",
       usdcIsFiatUsd: false,
       usdPegGuaranteeAvailable: false,
-      chainRecomputedBySuiMcp: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.chainRecomputedBySuiMcp
+      chainRecomputedBySuiMcp: DEEPBOOK_CANDLE_SOURCE_BASE.chainRecomputedBySuiMcp
     });
     expect(DEEPBOOK_SDK_SIMULATION_SOURCE_BASE).toEqual({
       sdk: "@mysten/deepbook-v3",
@@ -65,27 +63,13 @@ describe("DeepBook source owner contract", () => {
       simulation: "client.core.simulateTransaction"
     });
     expect(DEEPBOOK_PINNED_SDK_METADATA_SOURCE.unitSource).toBe(DEEPBOOK_SCALAR_UNIT_SOURCE);
-    expect(DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.usdcDisclaimer).toContain(
+    expect(DEEPBOOK_CANDLE_RESPONSE_TEXT.usdcDisclaimer).toContain(
       DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.usdcNotFiatUsdAndNotPeg
     );
     const source = readFileSync(join(process.cwd(), "src/core/read/deepbookSourceOwners.ts"), "utf8");
-    expect(source).toContain("deepbook_v3_official_indexer");
+    expect(source).toContain("sui_mainnet_deepbook_order_fills");
     expect(source).toContain("deepbook_v3_sdk_mainnet_package_id");
     expect(source).toContain("pinned_deepbook_sdk_when_target_asset_selected");
-  });
-
-  it("feeds official candle answer-use labels into read-response guidance", () => {
-    expect(deepbookUsdcPriceHistoryUserAnswerUse().canAnswer).toEqual([
-      DEEPBOOK_ANSWER_USE.officialUsdcCandleHistory,
-      DEEPBOOK_ANSWER_USE.officialCandleAvailabilityForRequestedUtcRange
-    ]);
-    expect(deepbookUsdcPriceAtTimeUserAnswerUse(true).canAnswer).toEqual([
-      DEEPBOOK_ANSWER_USE.officialUsdcCandleForRequestedTime,
-      DEEPBOOK_ANSWER_USE.representativeClosePriceForMatchedCandle
-    ]);
-    expect(deepbookUsdcPriceAtTimeUserAnswerUse(false).canAnswer).toEqual([
-      DEEPBOOK_ANSWER_USE.officialUsdcCandleForRequestedTime
-    ]);
   });
 
   it("feeds unsupported-use rules into DeepBook read-response guidance", () => {
@@ -94,12 +78,6 @@ describe("DeepBook source owner contract", () => {
     ]);
     expect(deepbookMidPriceUserAnswerUse().cannotAnswer).toEqual([
       ...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.midPrice
-    ]);
-    expect(deepbookUsdcPriceHistoryUserAnswerUse().cannotAnswer).toEqual([
-      ...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.officialUsdcCandles
-    ]);
-    expect(deepbookUsdcPriceAtTimeUserAnswerUse(true).cannotAnswer).toEqual([
-      ...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.officialUsdcCandles
     ]);
     expect(deepbookQuoteUserAnswerUse("raw").cannotAnswer).toEqual([
       ...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.quote

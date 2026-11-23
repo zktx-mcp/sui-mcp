@@ -10,8 +10,10 @@ import {
   LocalDataError,
   type AccountExportRow,
   type ExternalActivityScanExportRow,
+  type ExternalActivityObservationExportRow,
   type ExternalActivityTransactionExportRow,
   type LocalDataCounts,
+  type StoredSettingsValues,
   type LocalDataEnvelope,
   type LocalDataImportPreview,
   type LocalDataMutationResult,
@@ -29,7 +31,8 @@ import {
   countsForPayload,
   invalidBackup,
   maxNumber,
-  parseLocalDataEnvelope,
+  validateBackupBytes,
+  projectLocalDataExport,
   suiGraphqlUrlFromPayload,
   suiGrpcUrlFromPayload
 } from "./localDataValidation.js";
@@ -38,6 +41,12 @@ export * from "./localDataTypes.js";
 
 type SqliteDatabase = Database.Database;
 type CountRow = { count: number };
+
+function storedSettings(rows: LocalSettingExportRow[]): StoredSettingsValues {
+  const values = new Map(rows.map((row) => [row.key, JSON.parse(row.value_json)]));
+  return { suiGrpcUrl: values.get("suiGrpcUrl") ?? null, suiGraphqlUrl: values.get("suiGraphqlUrl") ?? null,
+    walletConnectionChains: values.get("walletConnectionChains") ?? null };
+}
 
 export class SqliteLocalDataService implements LocalDataService {
   constructor(
@@ -52,18 +61,32 @@ export class SqliteLocalDataService implements LocalDataService {
     return this.currentDataCountsSync();
   }
 
+  advanceRequestDeadlines(now: Date): void { this.options.advanceRequestDeadlines(now); }
+
+  private countsCache: { key: string; counts: LocalDataCounts } | undefined;
   currentDataCountsSync(now = this.now()): LocalDataCounts {
-    return this.db.transaction(() => {
-      this.options.advanceRequestDeadlines(now);
-      return this.getDataCountsSync();
+    return this.readWithCounts(() => { this.options.advanceRequestDeadlines(now); return {}; }).counts;
+  }
+
+  readWithCounts<T extends object>(read: () => T): T & { counts: LocalDataCounts } {
+    const nested = this.db.inTransaction;
+    const { facts, observed } = this.db.transaction(() => {
+      const facts = read();
+      const control = this.db.prepare("SELECT data_epoch, user_data_revision FROM settings_control WHERE id=1").get() as {
+        data_epoch: number; user_data_revision: number };
+      const key = `${control.data_epoch}:${control.user_data_revision}`;
+      const observed = this.countsCache?.key === key ? this.countsCache : { key, counts: this.getDataCountsSync() };
+      return { facts, observed };
     }).immediate();
+    if (!nested) this.countsCache = observed;
+    return { ...facts, counts: { ...observed.counts } };
   }
 
   async exportLocalData(now = new Date()): Promise<LocalDataEnvelope> { return this.exportLocalDataSync(now); }
 
   exportLocalDataSync(now = this.now()): LocalDataEnvelope {
     return this.db.transaction(() => {
-      const envelope = {
+      const envelope: LocalDataEnvelope = {
         format: LOCAL_DATA_EXPORT_FORMAT,
         network: LOCAL_DATA_NETWORK,
         exportedAt: now.toISOString(),
@@ -75,22 +98,20 @@ export class SqliteLocalDataService implements LocalDataService {
           reviewExecutions: this.selectAll<ReviewExecutionExportRow>("review_executions"),
           reviewRequests: this.selectAll<ReviewRequestExportRow>("review_requests"),
           externalActivityScans: this.selectAll<ExternalActivityScanExportRow>("external_activity_scans"),
+          externalActivityObservations: this.selectAll<ExternalActivityObservationExportRow>("external_activity_observations"),
           externalActivityTransactions: this.selectAll<ExternalActivityTransactionExportRow>("external_activity_transactions"),
           localSettings: this.selectAll<LocalSettingExportRow>("local_settings")
         }
       };
-      return parseLocalDataEnvelope(envelope, {
-        validateAdapterLifecycle: this.validateAdapterLifecycle
-      });
+      return projectLocalDataExport(envelope, this.validateAdapterLifecycle);
     })();
   }
 
-  async previewImportLocalData(input: unknown): Promise<LocalDataImportPreview> { return this.previewImportLocalDataSync(input); }
+  validateBackupBytes(bytes: Uint8Array): LocalDataEnvelope {
+    return validateBackupBytes(bytes, this.validateAdapterLifecycle);
+  }
 
-  previewImportLocalDataSync(input: unknown, now = this.now()): LocalDataImportPreview {
-    const envelope = parseLocalDataEnvelope(input, {
-      validateAdapterLifecycle: this.validateAdapterLifecycle
-    });
+  previewValidatedImport(envelope: LocalDataEnvelope, now: Date): LocalDataImportPreview {
     return this.db.transaction((): LocalDataImportPreview => {
       this.options.advanceRequestDeadlines(now);
       return {
@@ -98,6 +119,8 @@ export class SqliteLocalDataService implements LocalDataService {
         format: envelope.format,
         network: envelope.network,
         exportedAt: envelope.exportedAt,
+        currentSettings: storedSettings(this.selectAll<LocalSettingExportRow>("local_settings")),
+        incomingSettings: storedSettings(envelope.data.localSettings),
         currentCounts: this.getDataCountsSync(),
         incomingCounts: countsForPayload(envelope.data),
         willReplace: true,
@@ -106,23 +129,9 @@ export class SqliteLocalDataService implements LocalDataService {
     }).immediate();
   }
 
-  async importLocalDataReplace(input: unknown, _now = new Date()): Promise<LocalDataMutationResult> {
-    const envelope = await this.parseAndVerifyImportEnvelope(input);
-    const result = this.db.transaction(() => this.applyValidatedReplacement(envelope, this.now()))();
-    this.notifyDataReplaced();
-    return result;
-  }
-
-  async resetLocalData(now = this.now()): Promise<LocalDataMutationResult> {
-    const result = this.db.transaction(() => this.applyValidatedReplacement(undefined, now))();
-    this.notifyDataReplaced();
-    return result;
-  }
-
   // The caller commits this primitive with the admitted Settings card/result.
   // It contains no async gap or post-commit reconstruction of its own authority.
   applyValidatedReplacement(envelope: LocalDataEnvelope | undefined, now: Date, preserveCardId?: string): LocalDataMutationResult {
-    this.options.advanceRequestDeadlines(now);
     this.assertReplacementAllowed(now);
     this.resetLocalDataTables(preserveCardId);
     if (envelope) {
@@ -134,6 +143,8 @@ export class SqliteLocalDataService implements LocalDataService {
       this.insertReviewExecutions(envelope.data.reviewExecutions);
       this.insertExternalActivityScans(envelope.data.externalActivityScans);
       this.insertExternalActivityTransactions(envelope.data.externalActivityTransactions);
+      const insertObservation = this.db.prepare("INSERT INTO external_activity_observations(scan_id,account_id,digest,detail_status) VALUES(?,?,?,?)");
+      for (const o of envelope.data.externalActivityObservations) insertObservation.run(o.scan_id, o.account_id, o.digest, o.detail_status);
       this.insertLocalSettings(envelope.data.localSettings);
       this.syncSqliteSequences(envelope.data);
     } else this.insertDefaultSuiGrpcUrl(now);
@@ -165,6 +176,7 @@ export class SqliteLocalDataService implements LocalDataService {
       "live_transaction_materials",
       "live_private_review_artifacts",
       "live_review_sessions",
+      "external_activity_observations",
       "external_activity_transactions",
       "external_activity_scans",
       "review_state_snapshots",
@@ -201,6 +213,7 @@ export class SqliteLocalDataService implements LocalDataService {
       reviewRequests: this.count("review_requests"),
       outcomeUnknownRequests: (this.db.prepare("SELECT COUNT(*) AS count FROM review_requests WHERE request_status='outcome_unknown'").get() as CountRow).count,
       externalActivityScans: this.count("external_activity_scans"),
+      externalActivityObservations: this.count("external_activity_observations"),
       externalActivityTransactions: this.count("external_activity_transactions"),
       localSettings: this.count("local_settings")
     };
@@ -288,9 +301,9 @@ export class SqliteLocalDataService implements LocalDataService {
   private insertReviewRequests(rows: ReviewRequestExportRow[]): void {
     const insert = this.db.prepare(`INSERT INTO review_requests
       (attempt_id,review_session_id,plan_id,review_revision,account_id,transaction_digest,review_state_json,request_status,
-       revision,reason,created_at,updated_at,signature_verified_at,submitted_at)
+       revision,reason,created_at,updated_at,signature_verified_at,submission_admitted_at,observation_json)
       VALUES (@attempt_id,@review_session_id,@plan_id,@review_revision,@account_id,@transaction_digest,@review_state_json,@request_status,
-       @revision,@reason,@created_at,@updated_at,@signature_verified_at,@submitted_at)`);
+       @revision,@reason,@created_at,@updated_at,@signature_verified_at,@submission_admitted_at,@observation_json)`);
     for (const row of rows) insert.run(row);
   }
 
@@ -319,11 +332,11 @@ export class SqliteLocalDataService implements LocalDataService {
   private insertExternalActivityScans(rows: ExternalActivityScanExportRow[]): void {
     const statement = this.db.prepare(
       `INSERT INTO external_activity_scans
-        (scan_id, kind, account_id, relationship, input_digest, from_checkpoint, to_checkpoint,
+        (scan_id, kind, account_id, relationship, input_digest, continuity_json, source_upper_timestamp, source_upper_checkpoint, function_target, from_checkpoint, to_checkpoint,
          from_timestamp, to_timestamp, limit_count, request_cursor, response_cursor, endpoint_host,
-         chain_identifier, fetched_at, stored_count, skipped_count, has_more, window_complete,
+         chain_identifier, fetched_at, stored_count, skipped_count, outside_filter_count, unconfirmed_relation_count, has_more, window_complete,
          incomplete_reason)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const row of rows) {
       statement.run(
@@ -331,7 +344,9 @@ export class SqliteLocalDataService implements LocalDataService {
         row.kind,
         row.account_id,
         row.relationship,
-        row.input_digest,
+        row.input_digest, row.continuity_json,
+        row.source_upper_timestamp, row.source_upper_checkpoint,
+        row.function_target,
         row.from_checkpoint,
         row.to_checkpoint,
         row.from_timestamp,
@@ -343,7 +358,7 @@ export class SqliteLocalDataService implements LocalDataService {
         row.chain_identifier,
         row.fetched_at,
         row.stored_count,
-        row.skipped_count,
+        row.skipped_count, row.outside_filter_count, row.unconfirmed_relation_count,
         row.has_more,
         row.window_complete,
         row.incomplete_reason
@@ -354,9 +369,9 @@ export class SqliteLocalDataService implements LocalDataService {
   private insertExternalActivityTransactions(rows: ExternalActivityTransactionExportRow[]): void {
     const statement = this.db.prepare(
       `INSERT INTO external_activity_transactions
-        (account_id, digest, relationship, checkpoint, timestamp, status, known_sender_account_id,
+        (account_id, digest, relationship, checkpoint, timestamp, status, status_conflict, metadata_conflicts, known_sender_account_id,
          first_scan_id, last_scan_id, first_fetched_at, last_fetched_at, detail_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const row of rows) {
       statement.run(
@@ -365,7 +380,7 @@ export class SqliteLocalDataService implements LocalDataService {
         row.relationship,
         row.checkpoint,
         row.timestamp,
-        row.status,
+        row.status, row.status_conflict, row.metadata_conflicts,
         row.known_sender_account_id,
         row.first_scan_id,
         row.last_scan_id,
@@ -409,10 +424,7 @@ export class SqliteLocalDataService implements LocalDataService {
     if (hasUnsettledWalletWork(this.db, now)) throw new LocalDataError("input_invalid", "A wallet request is still unsettled.", { reason: "wallet_request_unsettled" });
   }
 
-  async parseAndVerifyImportEnvelope(input: unknown): Promise<LocalDataEnvelope> {
-    const envelope = parseLocalDataEnvelope(input, {
-      validateAdapterLifecycle: this.validateAdapterLifecycle
-    });
+  async verifyImportEndpoints(envelope: LocalDataEnvelope): Promise<LocalDataEnvelope> {
     await this.verifyImportedSuiGrpcUrl(suiGrpcUrlFromPayload(envelope.data));
     await this.verifyImportedSuiGraphqlUrl(suiGraphqlUrlFromPayload(envelope.data));
     return envelope;

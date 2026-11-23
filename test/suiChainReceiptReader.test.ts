@@ -181,7 +181,15 @@ describe("public chain receipt reader", () => {
     expect(result.status).toBe("unavailable");
   });
 
-  it("fails closed to unavailable when a balance change address is malformed", async () => {
+  it.each([
+    [Object.assign(new Error("transaction not found"), { code: "UNAVAILABLE" }), "unavailable"],
+    [new Error("upstream host not found"), "unavailable"],
+    [new Error("Transaction not found"), "not_found"]
+  ] as const)("classifies the source of a failed lookup", async (error, status) => {
+    expect((await readWith(createThrowingClient(error))).status).toBe(status);
+  });
+
+  it("preserves verified effects and valid rows when a balance address is malformed", async () => {
     const client = createClient(
       transactionFixture({
         balanceChanges: [
@@ -193,9 +201,8 @@ describe("public chain receipt reader", () => {
 
     const result = await readWith(client);
 
-    // A malformed payload must not yield a partial `found` receipt; it fails
-    // closed so the public page never presents silently dropped facts.
-    expect(result.status).toBe("unavailable");
+    expect(result).toMatchObject({ status: "found", receipt: { txDigest: digest, effectsStatus: { success: true },
+      balanceChanges: [{ address: account, amountRaw: "-1000" }], unavailableFields: expect.arrayContaining(["balanceChanges"]) } });
   });
 
   it("fails closed before lookup when the mainnet chain identifier is not verified", async () => {
@@ -329,4 +336,16 @@ describe("public chain receipt reader", () => {
     }
     expect(throwing.receipt.balanceChanges[0]).not.toHaveProperty("decimals");
   });
+});
+
+it("preserves a verified failed receipt when private review context cannot be read", async () => {
+  const tx = transactionFixture();
+  tx.effects!.status = { success: false, error: { message: "InsufficientCoinBalance in command 3" } } as typeof tx.effects.status;
+  const result = await readPublicChainReceipt({
+    client: createClient(tx), network: "mainnet", expectedChainIdentifier: "mainnet-chain",
+    reviewedOutputGuard() { throw new Error("Private store unavailable."); }
+  }, {digest, now});
+  expect(result).toMatchObject({ status: "found", receipt: { txDigest: digest, effectsStatus: { success: false },
+    gas: { computationMist: "100" }, balanceChanges: [{ amountRaw: "-1000" }, { amountRaw: "999" }, { amountRaw: "0" }] } });
+  expect(JSON.stringify(result)).not.toContain("Private store");
 });

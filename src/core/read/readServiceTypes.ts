@@ -1,3 +1,4 @@
+import type { SwapQuoteInputFlow } from "../action/swapQuoteAmounts.js";
 import type { SuiClientTypes } from "@mysten/sui/client";
 import type {
   AccountBalances,
@@ -14,14 +15,14 @@ import {
   type WalletBalanceWithUnit
 } from "./coinMetadata.js";
 import type {
-  DeepbookOfficialIndexerCandle,
-  DeepbookOfficialIndexerInterval,
-  DeepbookOfficialIndexerSourceClient
-} from "./deepbookOfficialIndexerSource.js";
+  MarketIdentity, DeepbookTradeCandle,
+  DeepbookCandleInterval,
+  DeepbookCandleSourceClient
+} from "./deepbookCandleSource.js";
 import type {
-  DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE,
-  DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE,
+  DEEPBOOK_CANDLE_CANDLE_USE,
+  DEEPBOOK_CANDLE_RESPONSE_TEXT,
+  DEEPBOOK_CANDLE_SOURCE_BASE,
   DEEPBOOK_PINNED_SDK_METADATA_SOURCE,
   DEEPBOOK_SDK_SIMULATION_SOURCE_BASE,
   DEEPBOOK_SOURCE_FIELD_VALUES
@@ -39,7 +40,7 @@ export const WALLET_BALANCE_QUANTITY_KIND = "sui_wallet_balance_snapshot";
 export const DEEPBOOK_ACCOUNT_QUANTITY_KIND = "deepbook_display_number";
 export const DEEPBOOK_QUOTE_QUANTITY_KIND = "deepbook_quote_display_amount";
 export const DEEPBOOK_RAW_QUOTE_QUANTITY_KIND = "deepbook_quote_raw_u64";
-export const DEEPBOOK_USDC_PRICE_HISTORY_QUANTITY_KIND = "deepbook_official_indexer_candles";
+export const DEEPBOOK_USDC_PRICE_HISTORY_QUANTITY_KIND = "deepbook_pool_fill_candles";
 export const INTENT_EVIDENCE_QUANTITY_KIND = "sui_intent_evidence_report";
 export const SETTLEMENT_ASSET_GROUP_PARITY_QUANTITY_KIND = "settlement_asset_group_parity_snapshot";
 export const SUI_USD_SETTLEMENT_ASSET_GROUP_ID = "SUI_USD_SETTLEMENT_ASSETS";
@@ -57,21 +58,23 @@ export const DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS = [
   "signing_readiness",
   "profit_or_pnl",
   "cost_basis",
-  "independent_chain_recomputation"
 ] as const;
 export const DEEPBOOK_USDC_CANDLE_AVAILABILITY = [
   "available",
-  "no_candles_in_range"
+  "no_candles_in_range",
+  "partial_coverage"
 ] as const;
 export const DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_PAIR_REASONS = [
-  "selector_not_in_official_indexer",
+  "market_not_in_mainnet_pool_catalog",
   "selector_resolves_to_multiple_usdc_pools"
 ] as const;
 export const DEEPBOOK_USDC_PRICE_HISTORY_SOURCE_UNAVAILABLE_REASONS = [
-  "official_indexer_not_configured",
+  "chain_candle_source_unavailable",
   "pool_list_unavailable",
+  "pool_list_incomplete",
+  "candle_coverage_incomplete",
   "candle_fetch_failed",
-  "official_indexer_invalid_payload"
+  "invalid_chain_candle_evidence"
 ] as const;
 // Internal placeholder for sender-independent DeepBook market reads. The pinned Sui gRPC
 // resolver uses the same dummy sender when no transaction sender is provided.
@@ -402,6 +405,8 @@ export const INTENT_EVIDENCE_TARGET_ASSET_SELECTION_SOURCES = [
 export type IntentEvidenceTargetAssetSelectionSource =
   (typeof INTENT_EVIDENCE_TARGET_ASSET_SELECTION_SOURCES)[number];
 export type IntentEvidenceBlockedReason =
+  | "wallet_balance_conflict"
+  | "wallet_balance_source_unavailable"
   | "wallet_balance_page_limit_exceeded"
   | "wallet_balance_pagination_did_not_advance";
 export type IntentEvidenceUnsupportedClaims =
@@ -780,6 +785,8 @@ export type DeepbookQuoteSummary = {
   };
   quote: DeepbookDisplayQuote;
   rawQuote: DeepbookRawQuoteEvidence;
+  inputFlow: SwapQuoteInputFlow;
+  quoteOutcome: DeepbookQuoteOutcome;
 };
 
 export type DeepbookQuoteQuantitySemantics = {
@@ -836,9 +843,35 @@ export type DeepbookQuoteQuantitySemantics = {
   ];
 };
 
+export const DEEPBOOK_QUOTE_OUTCOMES = ["no_output", "empty_opposite_book", "insufficient_depth_for_minimum", "below_minimum_input", "input_returned", "full_input_spend"] as const;
+export type DeepbookQuoteOutcome = typeof DEEPBOOK_QUOTE_OUTCOMES[number];
+export type DeepbookRawQuoteInput = {
+  poolKey: string;
+  direction: QuoteDirection;
+  amountRaw: string;
+  simulationSender: string;
+  feeMode?: DeepbookQuoteFeeMode | undefined;
+};
+
 export type DeepbookQuoteFeeMode = "deep" | "input_coin";
 
+export type DeepbookGasFeeObservation = { status: "unavailable" } |
+  { status: "enabled" | "disabled"; additionalTakerFeeRaw: string };
+
+export type DeepbookPoolTerms = {
+  gasFeePolicy?: DeepbookGasFeeObservation;
+  bestOppositePriceRaw?: string | null;
+  minimumBuyQuoteRaw?: string | null;
+  lotSizeRaw: string;
+  minBaseRaw: string;
+  takerFeeRaw: string;
+  assetIsBase: boolean;
+  deepPerAssetRaw: string;
+  whitelisted: boolean;
+};
+
 export type DeepbookRawQuoteReturnValues = {
+  poolTerms?: DeepbookPoolTerms;
   baseOutRaw: string;
   quoteOutRaw: string;
   deepRequiredRaw: string;
@@ -860,6 +893,7 @@ export type DeepbookRawQuoteSourceMoveFunction =
 
 export type DeepbookRawQuoteEvidence = {
   kind: typeof DEEPBOOK_RAW_QUOTE_QUANTITY_KIND;
+  poolTerms?: DeepbookPoolTerms;
   sourceMoveFunction: DeepbookRawQuoteSourceMoveFunction;
   returnValueSourceMoveFunction: "pool::get_quantity_out" | "pool::get_quantity_out_input_fee";
   returnValueOrder: ["base_quantity_out", "quote_quantity_out", "deep_quantity_required"];
@@ -868,6 +902,7 @@ export type DeepbookRawQuoteEvidence = {
   quoteOut: DeepbookRawQuoteAmount;
   deepRequired: DeepbookRawQuoteAmount;
   directionalOutput: DeepbookRawQuoteAmount;
+  minimumInputRaw?: string;
   boundary: {
     outputBeforeSlippagePolicy: true;
     notFor: [
@@ -925,6 +960,8 @@ export type DeepbookDisplayQuoteSummary = {
   source: DeepbookQuoteSummary["source"];
   quote: DeepbookDisplayQuote;
   rawQuote: DeepbookRawQuoteEvidence;
+  inputFlow: SwapQuoteInputFlow;
+  quoteOutcome: DeepbookQuoteOutcome;
 };
 
 export type DeepbookAccountInventoryDetailStatus =
@@ -988,6 +1025,7 @@ export type DeepbookAccountInventorySummary = {
 };
 
 export type DeepbookUsdcPriceHistorySelector =
+  | { kind: "pool_id"; value: string }
   | {
       kind: "pool_name";
       value: string;
@@ -1002,19 +1040,21 @@ export type DeepbookUsdcPriceHistorySelector =
     };
 
 export type DeepbookUsdcPriceHistoryInput = {
+  poolId?: string | undefined;
   poolName?: string | undefined;
   assetSymbol?: string | undefined;
   coinType?: string | undefined;
-  interval?: DeepbookOfficialIndexerInterval | undefined;
+  interval?: DeepbookCandleInterval | undefined;
   start: string;
   end: string;
 };
 
 export type DeepbookUsdcPriceAtTimeInput = {
+  poolId?: string | undefined;
   poolName?: string | undefined;
   assetSymbol?: string | undefined;
   coinType?: string | undefined;
-  interval?: DeepbookOfficialIndexerInterval | undefined;
+  interval?: DeepbookCandleInterval | undefined;
   targetTime: string;
   maxDistanceMinutes?: number | undefined;
 };
@@ -1023,7 +1063,7 @@ export type DeepbookUsdcPriceHistoryRange = {
   start: string;
   end: string;
   timeZone: "UTC";
-  interval: DeepbookOfficialIndexerInterval;
+  interval: DeepbookCandleInterval;
   intervalDurationMs: number;
   maxBars: typeof MAX_DEEPBOOK_USDC_PRICE_HISTORY_BARS;
   requestedCandleSlots: number;
@@ -1031,13 +1071,13 @@ export type DeepbookUsdcPriceHistoryRange = {
 
 export type DeepbookUsdcPriceHistoryQuantitySemantics = {
   kind: typeof DEEPBOOK_USDC_PRICE_HISTORY_QUANTITY_KIND;
-  allowedUse: typeof DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.allowedUse;
-  source: typeof DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.source;
-  quoteAsset: typeof DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.quoteAsset;
-  priceConvention: typeof DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.priceConvention;
-  usdcIsFiatUsd: typeof DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.usdcIsFiatUsd;
-  usdPegGuaranteeAvailable: typeof DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.usdPegGuaranteeAvailable;
-  chainRecomputedBySuiMcp: typeof DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.chainRecomputedBySuiMcp;
+  allowedUse: typeof DEEPBOOK_CANDLE_CANDLE_USE.allowedUse;
+  source: typeof DEEPBOOK_CANDLE_CANDLE_USE.source;
+  quoteAsset: typeof DEEPBOOK_CANDLE_CANDLE_USE.quoteAsset;
+  priceConvention: typeof DEEPBOOK_CANDLE_CANDLE_USE.priceConvention;
+  usdcIsFiatUsd: typeof DEEPBOOK_CANDLE_CANDLE_USE.usdcIsFiatUsd;
+  usdPegGuaranteeAvailable: typeof DEEPBOOK_CANDLE_CANDLE_USE.usdPegGuaranteeAvailable;
+  chainRecomputedBySuiMcp: typeof DEEPBOOK_CANDLE_CANDLE_USE.chainRecomputedBySuiMcp;
   liveQuoteAvailable: false;
   historicalMidPriceAvailable: false;
   globalMarketPriceAvailable: false;
@@ -1082,7 +1122,7 @@ export type DeepbookUsdcPriceHistoryPair = {
 };
 
 export type DeepbookUsdcPriceHistorySource = {
-  kind: typeof DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind;
+  kind: typeof DEEPBOOK_CANDLE_SOURCE_BASE.kind;
   baseUrl: string;
   sourceStatement: string;
   poolList: {
@@ -1090,25 +1130,26 @@ export type DeepbookUsdcPriceHistorySource = {
     fetchedAt: string;
   };
   candles: {
+    poolId: string; coverage?: "complete" | "partial_tail"; readEndpoints?: string[]; coveredFrom?: string; coveredUntil?: string; indexedCheckpoint?: number; indexedAt?: string;
     url: string;
     fetchedAt: string;
     poolName: string;
-    interval: DeepbookOfficialIndexerInterval;
+    interval: DeepbookCandleInterval;
     startTimeMs: number;
     endTimeMs: number;
     limit: number;
   };
-  chainRecomputedBySuiMcp: typeof DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.chainRecomputedBySuiMcp;
+  chainRecomputedBySuiMcp: typeof DEEPBOOK_CANDLE_SOURCE_BASE.chainRecomputedBySuiMcp;
 };
 
-export type DeepbookUsdcPriceHistoryBar = DeepbookOfficialIndexerCandle;
+export type DeepbookUsdcPriceHistoryBar = DeepbookTradeCandle;
 
 export type DeepbookUsdcPriceHistoryResponseSummary = {
   questionKind: "deepbook_usdc_price_history";
-  evidenceKind: "official_deepbook_indexer_candles";
-  sourceStatement: typeof DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.sourceStatement;
-  usdcDisclaimer: typeof DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.usdcDisclaimer;
-  candleMeaning: "Each candle is returned by the DeepBookV3 official Indexer for the requested interval.";
+  evidenceKind: "deepbook_pool_fill_candles";
+  sourceStatement: typeof DEEPBOOK_CANDLE_RESPONSE_TEXT.sourceStatement;
+  usdcDisclaimer: typeof DEEPBOOK_CANDLE_RESPONSE_TEXT.usdcDisclaimer;
+  candleMeaning: "Each candle aggregates finalized DeepBook fills for the identified Sui mainnet pool and UTC interval.";
   excludedFromConclusion: DeepbookUsdcPriceHistoryUnsupportedClaim[];
 };
 
@@ -1145,6 +1186,7 @@ export type DeepbookUsdcPriceHistorySummary =
         selector: DeepbookUsdcPriceHistorySelector;
         range: DeepbookUsdcPriceHistoryRange;
       };
+      candidates?: MarketIdentity[];
       reason: DeepbookUsdcPriceHistoryUnsupportedPairReason;
       matchingPoolNames: string[];
       availablePoolNames: string[];
@@ -1173,6 +1215,7 @@ export type DeepbookUsdcPriceHistorySummary =
         selector: DeepbookUsdcPriceHistorySelector;
         range: DeepbookUsdcPriceHistoryRange;
       };
+      candidates?: MarketIdentity[];
       reason: DeepbookUsdcPriceHistorySourceUnavailableReason;
       pair?: DeepbookUsdcPriceHistoryPair | undefined;
       source?: Partial<DeepbookUsdcPriceHistorySource> | undefined;
@@ -1248,6 +1291,7 @@ export type DeepbookUsdcPriceAtTimeSummary =
         selector: DeepbookUsdcPriceHistorySelector;
         range: DeepbookUsdcPriceHistoryRange;
       };
+      candidates?: MarketIdentity[];
       reason: DeepbookUsdcPriceHistoryUnsupportedPairReason;
       matchingPoolNames: string[];
       availablePoolNames: string[];
@@ -1278,6 +1322,7 @@ export type DeepbookUsdcPriceAtTimeSummary =
         selector: DeepbookUsdcPriceHistorySelector;
         range: DeepbookUsdcPriceHistoryRange;
       };
+      candidates?: MarketIdentity[];
       reason: DeepbookUsdcPriceHistorySourceUnavailableReason;
       pair?: DeepbookUsdcPriceHistoryPair | undefined;
       source?: Partial<DeepbookUsdcPriceHistorySource> | undefined;
@@ -1292,6 +1337,7 @@ export type DeepBookFactoryOptions = {
 };
 
 export type DeepBookReadClient = {
+  gasFeePolicy?(poolKey: string): Promise<{ enabled: boolean; additionalTakerFeeRaw: string }>;
   midPrice(poolKey: string): Promise<number>;
   poolBookParams(poolKey: string): Promise<PoolBookParams>;
   getLevel2TicksFromMid(poolKey: string, ticks: number): Promise<Level2TicksFromMid>;
@@ -1353,6 +1399,15 @@ export type AccountInventorySummary = {
   objectGroups: AccountObjectGroup[];
   scannedObjects: number;
   objectsTruncated: boolean;
+  nameStatus?: "found" | "absent" | "unavailable";
+  balancePages?: number;
+  observedBalanceTypes?: number;
+  conflictingBalanceTypes?: number;
+  balancesIncompleteReason?: IntentEvidenceBlockedReason | undefined;
+  objectScanReason?: "source_unavailable" | "page_limit" | "cursor_did_not_advance";
+  objectScanStatus?: "complete" | "partial" | "unavailable";
+  displayObjectCount?: number; renderableDisplayCount?: number;
+  displayObjectsTruncated?: boolean;
 };
 
 export type SuiReadServiceOptions = {
@@ -1364,7 +1419,7 @@ export type SuiReadServiceOptions = {
   deepbookFactory?: (simulationSender: string, options?: DeepBookFactoryOptions) => DeepBookReadClient;
   coinMetadataTtlMs?: number;
   deepbookCoins?: DeepBookCoinRegistry;
-  deepbookOfficialIndexerSource?: DeepbookOfficialIndexerSourceClient | undefined;
+  deepbookCandleSource?: DeepbookCandleSourceClient | undefined;
 };
 
 export class ReadServiceInputError extends Error {

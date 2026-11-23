@@ -1,3 +1,4 @@
+import { previewBackup, confirmLocalRecords, confirmSettingsRecords, settingsWorkflowFixture } from "./fixtures/settingsWorkflow.js";
 import { connectViewSchema } from "../src/core/session/workflowView.js";
 import { seedReadAddressCleared } from "./fixtures/readAccount.js";
 import { closedReviewCardSchema, workflowViewSchema } from "../src/core/session/workflowView.js";
@@ -18,6 +19,10 @@ import { WalletUserRejectedError } from "../src/core/session/walletConnection.js
 
 const fixtures: Awaited<ReturnType<typeof walletWorkflowFixture>>[] = [];
 async function fixture() { const value = await walletWorkflowFixture(); fixtures.push(value); return value; }
+function readArchivedRequests(f: Awaited<ReturnType<typeof fixture>>) {
+  const archive = f.run(() => f.localData.exportLocalDataSync(f.now()));
+  return f.localData.validateBackupBytes(Buffer.from(JSON.stringify(archive))).data.reviewRequests;
+}
 afterEach(() => { for (const value of fixtures.splice(0)) value.close(); });
 
 describe("stored wallet workflows", () => {
@@ -70,6 +75,24 @@ describe("stored wallet workflows", () => {
     const fresh = await f.run(() => f.cards.create("connect", {}));
     expect(workflowViewSchema.parse(fresh.snapshot.data).allowedActions).toContain("connect");
     expect(f.connect).toHaveBeenCalledOnce(); expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+  });
+
+  it("preserves the admitted units on actual receipt rows when the completed card is reopened", async () => {
+    const f = await walletWorkflowFixture({ receiptDetails: true });
+    fixtures.push(f);
+    const { connection } = await f.approve();
+    const { session, card } = await f.prepare(connection.connectionId);
+    await f.act(card, { action: "request_signature", account: f.account, connectionId: connection.connectionId, reviewRevision: session.reviewRevision });
+    await vi.waitFor(() => expect(f.run(() => f.records.currentRequest(session.id)?.requestStatus)).toBe("completed"));
+    const saved = await f.run(() => f.cards.readSaved(card.snapshot.cardId));
+    expect(saved?.data).toMatchObject({ receipt: { receipt: { balanceChanges: expect.arrayContaining([
+      expect.objectContaining({ amountRaw: "-130", decimals: 9, symbol: "SUI" }),
+      expect.objectContaining({ amountRaw: "122840506", decimals: 6, symbol: "USDC" })
+    ]) } } });
+    const original = f.run(() => f.cardRecords.getClosedState(card.snapshot.cardId))!;
+    vi.spyOn(f.cardRecords, "getClosedState").mockReturnValue({ ...original, data: { nested: { privateKey: "public-test-marker" } } });
+    await expect(f.run(() => f.cards.readSaved(card.snapshot.cardId))).rejects.toThrow(/forbidden field/);
+    expect(f.sign).toHaveBeenCalledOnce();
   });
 
   it("binds a signed request to its reviewed bytes and records only verified chain effects as execution", async () => {
@@ -165,8 +188,36 @@ describe("stored wallet workflows", () => {
     pending.resolve(signed);
     await vi.waitFor(() => expect(f.run(() => f.records.authority(f.records.currentRequest(ready.session.id)!.attemptId)?.sdk_pending)).toBe(0));
     expect(f.run(() => f.records.currentRequest(ready.session.id)?.requestStatus)).toBe("stopped");
+    expect(readArchivedRequests(f)).toMatchObject([{ request_status: "stopped", signature_verified_at: null, submission_admitted_at: null }]);
     expect((await f.read(ready.card)).snapshot).toMatchObject({ state: "closed", reason: "cancelled", data: { allowedActions: [] } });
     expect(f.submit).not.toHaveBeenCalled();
+  });
+
+  it("records absence and endpoint denial separately, then recovers the same digest without another submission", async () => {
+    const f = await fixture(), { connection } = await f.approve(), ready = await f.prepare(connection.connectionId);
+    f.chainRead.mockRejectedValueOnce(Object.assign(new Error("Transaction not found"), { code: "NOT_FOUND" }));
+    f.chainRead.mockRejectedValueOnce(Object.assign(new Error("Not permitted"), { code: "PERMISSION_DENIED" }));
+    await f.act(ready.card, { action: "request_signature", connectionId: connection.connectionId, account: f.account, reviewRevision: ready.session.reviewRevision });
+    const request = () => f.run(() => f.records.currentRequest(ready.session.id))!;
+    await vi.waitFor(() => expect(request()).toMatchObject({ requestStatus: "awaiting_chain_result", lastObservation: { kind: "not_found" } }));
+    const digest = request().transactionDigest;
+    await f.run(() => f.workflow.readReview(ready.session.id));
+    await vi.waitFor(() => expect(request()).toMatchObject({ requestStatus: "outcome_unknown", lastObservation: { kind: "access_denied" } }));
+    expect(readArchivedRequests(f)[0]?.observation_json).toContain("access_denied");
+    expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow();
+
+    await f.run(() => f.workflow.readReview(ready.session.id));
+    expect(f.chainRead).toHaveBeenCalledTimes(2);
+    const lastTransition = request().updatedAt;
+    f.advance(-1000);
+    await f.run(() => f.workflow.readReview(ready.session.id,true));
+    expect(request().execution?.recordedAt).toBe(lastTransition);
+    expect(request().updatedAt).toBe(lastTransition);
+    expect(request().execution?.txDigest).toBe(digest);
+    expect(request().lastObservation).toBeUndefined();
+    expect(request().reason).toBeUndefined();
+    expect(readArchivedRequests(f)[0]).toMatchObject({request_status:"completed", reason:null});
+    expect(f.submit).toHaveBeenCalledOnce();
   });
 
   it("does not reinterpret a lost submission response as a chain failure or resubmit", async () => {
@@ -179,6 +230,8 @@ describe("stored wallet workflows", () => {
     await f.read(ready.card);
     const request = f.run(() => f.records.currentRequest(ready.session.id))!;
     expect(request.requestStatus).toBe("outcome_unknown"); expect(request.execution).toBeUndefined();
+    expect(readArchivedRequests(f)).toMatchObject([{ request_status: "outcome_unknown",
+      signature_verified_at: request.signatureVerifiedAt, submission_admitted_at: request.submissionAdmittedAt }]);
     expect(f.sign).toHaveBeenCalledOnce(); expect(f.submit).toHaveBeenCalledOnce();
   });
 });
@@ -190,14 +243,13 @@ describe("wallet startup and review expiry", () => {
     vi.mocked(f.transport.stop).mockClear(); f.connect.mockClear();
     const records = f.activity.createWalletWorkflowStore("next-owner");
     const subscribe = vi.fn(f.transport.onSessionChanged);
-    const restore = vi.fn(async () => {
+    const cleanupPairings = vi.fn(async () => {
       if (stage === "restore") throw new Error("PRIVATE-RESTORE-DETAIL");
-      return [f.transport.session("fixture-topic")!];
     });
     const db = new Database(join(f.directory, "activity.sqlite"));
     if (stage === "record") db.exec("CREATE TRIGGER refuse_restore BEFORE UPDATE ON live_wallet_connections BEGIN SELECT RAISE(ABORT,'PRIVATE-STORAGE-DETAIL'); END");
     if (stage === "subscription") subscribe.mockImplementation(() => { throw new Error("PRIVATE-SUBSCRIPTION-DETAIL"); });
-    const runtime = new FixtureWalletRuntime({ ...f.transport, restore, onSessionChanged: subscribe });
+    const runtime = new FixtureWalletRuntime({ ...f.transport, cleanupPairings, onSessionChanged: subscribe });
     const next = new WalletWorkflow({ records, sessions: f.sessions,
       ownerId: "next-owner", runtime, computation: f.computation,
       verifyReceipt: f.verifyReceipt, verifyNetwork: f.verifyNetwork, submitTransaction: f.submit,
@@ -393,20 +445,23 @@ it("checks data replacement again after endpoint verification and preserves unse
     now: f.now, advanceRequestDeadlines: (now) => f.records.advanceRequestDeadlines(now),
     verifySuiGrpcUrl: async () => { entered.resolve(); await verification.promise; }, verifySuiGraphqlUrl: async () => {} });
   const backup = await f.run(() => service.exportLocalData(f.now()));
-  const importing = f.run(() => service.importLocalDataReplace(backup));
-  const rejection = expect(importing).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+  const settings = await settingsWorkflowFixture({ existingWallet: f, existingLocalData: service });
+  try {
+  const importing = f.run(() => confirmSettingsRecords(settings, backup));
+  const rejection = expect(importing).rejects.toThrow();
   await entered.promise;
   const pending = deferred<{ transactionBytes: string; signature: string }>(); f.sign.mockImplementationOnce(() => pending.promise);
   await f.act(ready.card, { action: "request_signature", connectionId: connection.connectionId, account: f.account, reviewRevision: ready.session.reviewRevision });
   const request = f.run(() => f.records.currentRequest(ready.session.id))!;
   await f.act(await f.read(ready.card), { action: "stop_waiting" });
-  await expect(f.run(() => service.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+  expect(() => f.run(() => service.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
   verification.resolve(); await rejection;
   expect(f.run(() => f.records.request(request.attemptId)?.requestStatus)).toBe("stopped");
   pending.reject(new Error("Wallet dismissed"));
   await vi.waitFor(() => expect(f.run(() => f.records.authority(request.attemptId)?.sdk_pending)).toBe(0));
-  await f.run(() => service.resetLocalData());
+  await f.run(() => confirmSettingsRecords(settings));
   expect(f.run(() => f.records.request(request.attemptId))).toBeUndefined(); expect(f.submit).not.toHaveBeenCalled();
+  } finally { await settings.close(); }
 });
 
 it("coalesces receipt reads and keeps an unverified response unknown until the exact digest is confirmed", async () => {
@@ -505,6 +560,29 @@ it("disables the workflow if a wallet-change transaction cannot be committed and
   } finally { db.exec("DROP TRIGGER IF EXISTS reject_wallet_change"); db.close(); }
 });
 
+it.each(["simulation", "publication"] as const)("records quote expiry during %s without publishing approval material", async (stage) => {
+  const f = await fixture(), { connection } = await f.approve(), ready = await f.prepare(connection.connectionId);
+  if (stage === "simulation") {
+    const simulate = f.simulate.getMockImplementation()!;
+    f.simulate.mockImplementationOnce((input) => { f.advance(30_000); return simulate(input); });
+  } else {
+    const record = vi.mocked(f.sessions.recordReviewStateWithArtifacts).getMockImplementation()!;
+    vi.mocked(f.sessions.recordReviewStateWithArtifacts).mockImplementationOnce((...args) => {
+      f.advance(30_000);
+      return record(...args);
+    });
+  }
+  await f.act(ready.card, { action: "prepare_review", connectionId: connection.connectionId, account: f.account,
+    reviewRevision: ready.session.reviewRevision });
+  await vi.waitFor(async () => {
+    const saved = await f.read(ready.card);
+    expect(saved.snapshot.data).toMatchObject({ review: { state: { status: "refresh_required", refreshReason: "quote_stale" } } });
+    expect(workflowViewSchema.parse(saved.snapshot.data).allowedActions).not.toContain("request_signature");
+  });
+  expect(f.sign).not.toHaveBeenCalled();
+  expect(f.submit).not.toHaveBeenCalled();
+});
+
 it("does not reopen expired review state when a late preparation write fails", async () => {
   const f = await fixture(), { connection } = await f.approve(), ready = await f.prepare(connection.connectionId);
   const pending = deferred<void>(), entered = deferred<void>();
@@ -537,13 +615,15 @@ it("recovers interrupted requests without replay, preserves completed facts, and
   const nextRecords = f.activity.createWalletWorkflowStore("replacement");
   const sign = vi.fn(), connect = vi.fn(), submit = vi.fn();
   const next = new WalletWorkflow({ records: nextRecords, sessions: f.sessions, ownerId: "replacement",
-    computation: f.computation, runtime: new FixtureWalletRuntime({ ...f.transport, sign, connect, restore: async () => [f.transport.session("fixture-topic")!] }),
+    computation: f.computation, runtime: new FixtureWalletRuntime({ ...f.transport, sign, connect }),
     verifyReceipt: f.verifyReceipt, verifyNetwork: f.verifyNetwork, submitTransaction: submit,
     assertCurrent: f.access.assertCurrent, bindExternalEvent: (work) => f.access.bind(work), logger: f.logger, now: f.now });
   try {
     await f.run(() => next.start());
     expect(f.run(() => nextRecords.request(saved.attemptId))).toEqual(saved);
     expect(f.run(() => nextRecords.request(request.attemptId)?.requestStatus)).toBe("outcome_unknown");
+    expect(readArchivedRequests(f)).toContainEqual(expect.objectContaining({ attempt_id: request.attemptId,
+      request_status: "outcome_unknown", signature_verified_at: null, submission_admitted_at: null }));
     expect(f.run(() => nextRecords.authority(request.attemptId))).toMatchObject({ owner_id: "replacement", can_submit: 0, sdk_pending: 0, submit_pending: 0, lookup_pending: 0 });
     expect(await f.run(() => f.activity.getActiveAccount())).toBeUndefined();
     const db = new Database(join(f.directory, "activity.sqlite"));
@@ -624,7 +704,7 @@ describe("disconnect admission and completion share the stored card operation", 
     const pending = deferred<void>(); vi.mocked(f.transport.disconnect).mockImplementationOnce(() => pending.promise);
     await f.act(card, { action: "disconnect", connectionId: connection.connectionId }); f.workflow.stop();
     const disconnect = vi.fn();
-    const runtime = new FixtureWalletRuntime({ ...f.transport, disconnect, restore: async () => [f.transport.session("fixture-topic")!] });
+    const runtime = new FixtureWalletRuntime({ ...f.transport, disconnect });
     const nextRecords = f.activity.createWalletWorkflowStore("replacement", f.now, () => runtime.snapshot());
     const next = new WalletWorkflow({ records: nextRecords, sessions: f.sessions,
       ownerId: "replacement", runtime,
@@ -646,10 +726,10 @@ describe("disconnect admission and completion share the stored card operation", 
     const f = await fixture(), { connection } = await f.approve(), card = await f.createDisconnection();
     const pending = deferred<void>(); vi.mocked(f.transport.disconnect).mockImplementationOnce(() => pending.promise);
     await f.act(card, { action: "disconnect", connectionId: connection.connectionId });
-    await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+    expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
     pending.resolve(); await new Promise((resolve) => setImmediate(resolve));
     await vi.waitFor(() => expect(f.run(() => f.records.connection(connection.connectionId)?.sdkPending)).toBe(false));
-    await f.run(() => f.localData.resetLocalData());
+    await f.run(() => confirmLocalRecords(f, f.localData));
     expect(f.run(() => f.records.connections())).toMatchObject([{ connection: { connectionId: connection.connectionId, status: "disconnected" }, sdkPending: false }]);
     expect(f.run(() => f.cardRecords.get(card.snapshot.cardId))).toBeUndefined();
   });
@@ -674,7 +754,7 @@ describe("current data decisions settle request deadlines without a View", () =>
     expect(history.request?.requestStatus).toBe("awaiting_chain_result");
     expect(f.run(() => f.records.request(before.attemptId))).toEqual(before);
     const counts = consumer === "counts" ? await f.run(() => f.localData.getDataCounts())
-      : (await f.run(() => f.localData.previewImportLocalData(backup))).currentCounts;
+      : (await f.run(() => previewBackup(f.localData, backup, f.now()))).currentCounts;
     expect(counts.outcomeUnknownRequests).toBe(1); expect(counts.reviewExecutions).toBe(0);
     const after = f.run(() => f.records.request(before.attemptId))!;
     expect(after).toMatchObject({ requestStatus: "outcome_unknown", revision: before.revision + 1 });
@@ -695,7 +775,7 @@ describe("current data decisions settle request deadlines without a View", () =>
     f.advance(90_000);
     await f.run(() => f.localData.getDataCounts());
     expect(f.run(() => f.records.request(request.attemptId)?.requestStatus)).toBe("request_failed");
-    await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+    expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
     expect(f.run(() => f.records.authority(request.attemptId))).toMatchObject({ sdk_pending: 1, can_submit: 0 });
     pending.reject(new Error("Wallet dismissed"));
     await vi.waitFor(() => expect(f.run(() => f.records.authority(request.attemptId)?.sdk_pending)).toBe(0));
@@ -712,7 +792,7 @@ describe("current data decisions settle request deadlines without a View", () =>
     f.advance(600_000);
     expect((await f.run(() => f.localData.getDataCounts())).outcomeUnknownRequests).toBe(1);
     expect(f.run(() => f.records.authority(request.attemptId)?.lookup_pending)).toBe(1);
-    await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+    expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
     pending.resolve(await source());
     await vi.waitFor(() => expect(f.run(() => f.records.request(request.attemptId)?.requestStatus)).toBe("completed"));
     expect((await f.run(() => f.localData.getDataCounts())).outcomeUnknownRequests).toBe(0);
@@ -734,14 +814,15 @@ describe("current data decisions settle request deadlines without a View", () =>
     // The deletion boundary must see the stored outcome, not just an elapsed timestamp.
     db.exec("CREATE TRIGGER require_expired_outcome BEFORE DELETE ON review_requests WHEN OLD.request_status!='outcome_unknown' BEGIN SELECT RAISE(ABORT,'unsettled stored outcome'); END");
     try {
-      if (operation === "reset") { f.advance(600_000); await f.run(() => f.localData.resetLocalData()); }
+      if (operation === "reset") { f.advance(600_000); await f.run(() => confirmLocalRecords(f, f.localData)); }
       else {
-        const entered = deferred<void>(), release = deferred<void>();
-        const service = f.activity.createLocalDataService({ now: f.now, advanceRequestDeadlines: (now) => f.records.advanceRequestDeadlines(now),
-          suiGrpcUrl: DEFAULT_SUI_GRPC_URL, suiGraphqlUrl: DEFAULT_SUI_GRAPHQL_URL,
-          verifySuiGrpcUrl: async () => { entered.resolve(); await release.promise; }, verifySuiGraphqlUrl: async () => {} });
-        const importing = f.run(() => service.importLocalDataReplace(backup));
-        await entered.promise; f.advance(600_000); release.resolve(); await importing;
+        const settings = await settingsWorkflowFixture({ existingWallet: f, existingLocalData: f.localData });
+        try {
+        await expect(f.run(() => confirmSettingsRecords(settings, backup))).rejects.toThrow(/pending|waiting period/);
+        expect(f.run(() => f.records.currentRequest(ready.session.id))?.requestStatus).toBe("awaiting_chain_result");
+        f.advance(600_000);
+        await f.run(() => confirmSettingsRecords(settings, backup));
+        } finally { await settings.close(); }
       }
       expect(f.run(() => f.records.currentRequest(ready.session.id))).toBeUndefined();
       expect(f.submit).toHaveBeenCalledOnce();
@@ -758,6 +839,32 @@ function failWalletEvents(f: Awaited<ReturnType<typeof walletWorkflowFixture>>) 
   expect(f.run(() => f.workflow.walletAvailability())).toMatchObject({ status: "unavailable", reason: "wallet_state_unavailable" });
 }
 
+it("releases a failed local observation and shares the next digest lookup", async () => {
+  const f = await fixture(), { connection } = await f.approve(), ready = await f.prepare(connection.connectionId);
+  const submit = deferred<{}>();
+  f.submit.mockImplementationOnce(() => submit.promise);
+  await f.act(ready.card, { action: "request_signature", connectionId: connection.connectionId, account: f.account, reviewRevision: ready.session.reviewRevision });
+  await vi.waitFor(() => expect(f.submit).toHaveBeenCalledOnce());
+  const request = f.run(() => f.records.currentRequest(ready.session.id))!;
+  vi.spyOn(f.records, "requestReview").mockImplementationOnce(() => { throw Error("Transient storage read"); });
+  submit.resolve({});
+  await vi.waitFor(() => expect(f.run(() => f.records.request(request.attemptId))?.lastObservation?.kind).toBe("source_unavailable"));
+  expect(f.chainRead).not.toHaveBeenCalled();
+  const source = f.chainRead.getMockImplementation()!;
+  const allowRead = deferred<void>();
+  f.chainRead.mockImplementationOnce(async () => { await allowRead.promise; return source(); });
+  const retry = () => f.run(() => f.workflow.readReview(ready.session.id, true, request.attemptId));
+  const first = retry(), second = retry();
+  allowRead.resolve();
+  for (const state of await Promise.all([first, second])) {
+    expect(state?.request?.execution).toMatchObject({ status: "success", txDigest: request.transactionDigest });
+  }
+  expect(f.chainRead).toHaveBeenCalledOnce();
+  expect(f.submit).toHaveBeenCalledOnce();
+  expect(f.sign).toHaveBeenCalledOnce();
+  expect(f.run(() => f.records.authority(request.attemptId))?.lookup_pending).toBe(0);
+});
+
 it.each(["submission", "lookup"] as const)("records dispatched chain facts and settles callbacks after wallet failure during %s", async (phase) => {
   const f = await fixture(), { connection } = await f.approve(), ready = await f.prepare(connection.connectionId);
   const submit = deferred<{}>(), lookup = deferred<Awaited<ReturnType<typeof f.chainRead>>>();
@@ -770,7 +877,7 @@ it.each(["submission", "lookup"] as const)("records dispatched chain facts and s
   failWalletEvents(f);
   const pendingField = phase === "submission" ? "submit_pending" : "lookup_pending";
   expect(f.run(() => f.records.authority(request.attemptId))?.[pendingField]).toBe(1);
-  await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+  expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
   if (phase === "submission") submit.resolve({}); else lookup.resolve(await source());
   await vi.waitFor(() => expect(f.run(() => f.records.request(request.attemptId))?.requestStatus).toBe("completed"));
   expect(f.run(() => f.records.authority(request.attemptId))).toMatchObject({ can_submit: 0, sdk_pending: 0, submit_pending: 0, lookup_pending: 0 });
@@ -891,7 +998,7 @@ it.each(["completed", "outcome_unknown"] as const)("does not reopen %s when the 
     expect((await f.run(() => f.localData.getDataCounts())).outcomeUnknownRequests).toBe(1);
   }
   expect(f.run(() => f.records.authority(request.attemptId))).toMatchObject({ submit_pending: 1, sdk_pending: 1 });
-  await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+  expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
   const stored = f.run(() => f.records.request(request.attemptId)), deadline = f.run(() => f.records.authority(request.attemptId)?.lookup_deadline);
   submission.resolve({});
   await vi.waitFor(() => expect(f.run(() => f.records.authority(request.attemptId))).toMatchObject({ sdk_pending: 0, submit_pending: 0 }));
@@ -925,7 +1032,7 @@ it("keeps a failed callback-settlement write protected until its actual completi
     await f.act(ready.card, { action: "request_signature", connectionId: connection.connectionId, account: f.account, reviewRevision: 1 });
     await vi.waitFor(() => expect(f.logger.error).toHaveBeenCalledWith("Wallet operation failed", { stage: "callback_record" }));
     const request = f.run(() => f.records.currentRequest(ready.session.id))!;
-    await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+    expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
     db.exec("DROP TRIGGER reject_settle");
     expect((await f.run(() => f.workflow.readReview(ready.session.id, true)))?.request?.requestStatus).toBe("completed");
     expect(f.run(() => f.records.authority(request.attemptId))).toMatchObject({ submit_pending: 0, can_submit: 0 });

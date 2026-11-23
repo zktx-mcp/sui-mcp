@@ -1,3 +1,5 @@
+import { TransactionError } from "@mysten/sui/client";
+import { bcs } from "@mysten/sui/bcs";
 import type { SuiClientTypes } from "@mysten/sui/client";
 import { parseSuiAddress } from "../suiAddress.js";
 import type { SuiChainReceiptEffectsStatus, SuiChainReceiptPackageCall } from "./suiChainReceiptEvidence.js";
@@ -8,6 +10,34 @@ import type { SuiChainReceiptEffectsStatus, SuiChainReceiptPackageCall } from ".
 // Move-call, and object-type shapes are mapped in one place. Balance changes are
 // not here because the verifier filters them to the reviewed account while the
 // public reader keeps them all, so each owns its own balance mapper.
+
+export type ReviewedOutputGuard = { commandFailure?: "InsufficientCoinBalance" | undefined; transactionDigest: string; commandIndex: number;
+  protocolAbort?: { commandIndex: number; packageId: string; moduleOrigin: string; module: string; code: string } | undefined };
+export function matchesMinimumAbort(guard: ReviewedOutputGuard | undefined, digest: string, command: number,
+  address: string | undefined, module: string | undefined, code: string | undefined): boolean {
+  const abort = guard?.protocolAbort;
+  if (!abort || guard?.transactionDigest !== digest || abort.commandIndex !== command || abort.module !== module || abort.code !== code || !address) return false;
+  const id = parseSuiAddress(address);
+  return id === abort.packageId || id === abort.moduleOrigin;
+}
+export function receiptEffectsStatus(effects: SuiClientTypes.TransactionEffects, digest: string, guard?: ReviewedOutputGuard) {
+  const result = effectsStatusFromSdk(effects.status);
+  if (result.success || !effects.bcs) return result;
+  // Core may expose an Unknown SDK error for insufficient coin balance. The
+  // independently read effects BCS retains the protocol error and command.
+  try {
+    const parsed = bcs.TransactionEffects.parse(effects.bcs);
+    const data = parsed.V2 ?? parsed.V1;
+    const failure = data?.status.Failure;
+    if (data?.transactionDigest !== digest || !failure || failure.command == null) return result;
+    const failedCommand = Number(failure.command);
+    if (!Number.isSafeInteger(failedCommand) || failedCommand < 0) return result;
+    const abort = failure.error.MoveAbort;
+    const minimumMissed = (guard?.transactionDigest === digest && guard.commandIndex === failedCommand && guard.commandFailure !== undefined && failure.error.$kind === guard.commandFailure) ||
+      (abort && matchesMinimumAbort(guard, digest, failedCommand, abort[0].module.address, abort[0].module.name, abort[1]));
+    return { ...result, failedCommand, ...(minimumMissed ? { minimumReceiveFailure: true as const } : {}) };
+  } catch { return result; }
+}
 
 export function effectsStatusFromSdk(status: SuiClientTypes.ExecutionStatus): SuiChainReceiptEffectsStatus {
   if (status.success) {
@@ -85,7 +115,8 @@ export function requireReceiptAddress(
 // Shared error classification for the getTransaction read, used by both the
 // verifier and the public reader so a "transaction not found" is recognized one
 // way everywhere.
-export function isReceiptNotFoundError(error: unknown): boolean {
+export function isReceiptNotFoundError(error: unknown, digest: string): boolean {
+  if (error instanceof TransactionError) return error.reason === "notFound" && error.digest === digest;
   const code =
     typeof error === "object" && error !== null
       ? ((error as { code?: unknown; status?: unknown }).code ?? (error as { status?: unknown }).status)
@@ -93,12 +124,9 @@ export function isReceiptNotFoundError(error: unknown): boolean {
   if (code === "NOT_FOUND" || code === "NotFound" || code === "NOT_FOUND_ERROR" || code === 5) {
     return true;
   }
-  // Only genuine "this digest does not exist / is not indexed" signals map to
-  // not_found. Availability/outage phrasing (e.g. "service not available") is a
-  // provider failure and must stay an `unavailable` (502), not a 404.
-  return /\b(not found|not indexed|could not find|unable to find|no transaction)\b/i.test(
-    receiptErrorMessage(error, "")
-  );
+  if (code !== undefined) return false;
+  const message = receiptErrorMessage(error, "").trim();
+  return /^(?:transaction(?: block)?(?: (?:with |for )?digest [1-9A-HJ-NP-Za-km-z]+)? (?:was |is )?(?:not found|not indexed)|(?:could not|unable to) find transaction(?: block)?(?: (?:with |for )?digest [1-9A-HJ-NP-Za-km-z]+)?)[.!]?$/i.test(message);
 }
 
 export function receiptErrorMessage(error: unknown, fallback: string): string {

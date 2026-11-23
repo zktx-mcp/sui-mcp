@@ -1,3 +1,6 @@
+import { activityIndexGenesis } from "./fixtures/sqliteActivity.js";
+import { previewBackup, confirmLocalRecords, verifyBackup } from "./fixtures/settingsWorkflow.js";
+import { SUI_MAINNET_CHAIN_IDENTIFIER } from "../src/core/suiEndpoint.js";
 import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,7 +22,6 @@ import {
   SqliteActivityStore
 } from "../src/core/activity/sqliteActivityStore.js";
 import { SuiEndpointError } from "../src/core/suiEndpoint.js";
-import { InMemoryActivityStore } from "./fixtures/inMemoryActivityStore.js";
 
 const walletAccount = `0x${"a".repeat(64)}`;
 const otherWalletAccount = `0x${"b".repeat(64)}`;
@@ -93,7 +95,6 @@ async function withCoverageStores(fn: (store: ActivityStore) => Promise<void>): 
   await withTempDb(async (store) => {
     await fn(store);
   });
-  await fn(new InMemoryActivityStore());
 }
 
 function newTestSqliteActivityStore(databasePath: string): SqliteActivityStore {
@@ -138,8 +139,8 @@ function createIncompatibleExternalActivityTables(
       address TEXT NOT NULL UNIQUE,
       first_seen_at TEXT NOT NULL,
       last_used_at TEXT NOT NULL,
-      first_source TEXT NOT NULL CHECK (first_source IN ('wallet_connection', 'review_execution')),
-      last_source TEXT NOT NULL CHECK (last_source IN ('wallet_connection', 'review_execution'))
+      first_source TEXT NOT NULL CHECK (first_source IN ('wallet_connection', 'review_record')),
+      last_source TEXT NOT NULL CHECK (last_source IN ('wallet_connection', 'review_record'))
     );
     INSERT INTO accounts
       (id, address, first_seen_at, last_used_at, first_source, last_source)
@@ -232,7 +233,7 @@ async function recordConnectedReview(
   await store.recordReviewTransition({
     reviewSessionId: input.reviewSessionId,
     event: "wallet_connected",
-    fromStatus: "awaiting_wallet",
+    fromStatus: "proposed",
     toStatus: "wallet_connected",
     account: input.account,
     transitionedAt: iso(input.createdAtSeconds + 2)
@@ -512,7 +513,7 @@ describe("SqliteActivityStore", () => {
       const cache = store.createCoinMetadataCache();
       await cache.setCoinMetadata({
         coinType: "0x2::sui::SUI",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         decimals: 9,
         symbol: "SUI",
         name: "Sui",
@@ -523,14 +524,14 @@ describe("SqliteActivityStore", () => {
       await expect(
         cache.getCoinMetadata({
           coinType: "0x2::sui::SUI",
-          chainIdentifier: "mainnet-chain",
+          chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
           now: new Date("2026-05-11T00:01:00.000Z")
         })
       ).resolves.toMatchObject({
         status: "hit",
         record: {
           coinType: "0x2::sui::SUI",
-          chainIdentifier: "mainnet-chain",
+          chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
           decimals: 9,
           symbol: "SUI"
         }
@@ -538,7 +539,7 @@ describe("SqliteActivityStore", () => {
       await expect(
         cache.getCoinMetadata({
           coinType: "0x2::sui::SUI",
-          chainIdentifier: "mainnet-chain",
+          chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
           now: new Date("2026-05-12T00:00:01.000Z")
         })
       ).resolves.toMatchObject({ status: "expired" });
@@ -563,10 +564,11 @@ describe("SqliteActivityStore", () => {
           relationship: "affected",
           limit: 100,
           endpointHost: "graphql.mainnet.sui.io",
-          chainIdentifier: "mainnet-chain",
+          chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
           fetchedAt: "2026-05-11T00:00:00.000Z",
           hasMore: false,
-          windowComplete: true,
+          sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
+        windowComplete: true,
           transactions: []
         })
       ).rejects.toMatchObject({
@@ -581,7 +583,7 @@ describe("SqliteActivityStore", () => {
         relationship: "sent",
         limit: 100,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T00:00:00.000Z",
         hasMore: true,
         windowComplete: null,
@@ -632,15 +634,16 @@ describe("SqliteActivityStore", () => {
         ]
       });
       await store.recordExternalActivityScan({
-        scanId: "scan_2",
+        scanId: "scan_2", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_2" },
         kind: "account_scan",
         account: walletAccount,
         relationship: "sent",
         limit: 100,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T00:01:00.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: [
           {
@@ -658,16 +661,16 @@ describe("SqliteActivityStore", () => {
         dataScope: { account: walletAccount },
         summary: {
           transactionCount: 1,
-          statusCounts: { success: 0, failure: 1, unknown: 0 },
-          relationshipCounts: { affected: 0, sent: 1 }
+          statusCounts: { success: 0, failure: 0, unknown: 1 },
+          relationshipCounts: { affected: 0, sent: 1 }, relationshipObservationCounts: { affected: 0, sent: 2 }
         },
         transactions: [
           {
             account: walletAccount,
             digest: "5".repeat(44),
             relationship: "sent",
-            checkpoint: "101",
-            status: "failure",
+            checkpoint: undefined, timestamp: undefined, conflictingMetadata: ["checkpoint", "timestamp"],
+            status: "unknown",
             firstScanId: "scan_1",
             lastScanId: "scan_2",
             lastScanIncompleteReason: undefined,
@@ -686,15 +689,16 @@ describe("SqliteActivityStore", () => {
     await withTempDb(async (store) => {
       const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await store.recordExternalActivityScan({
-        scanId: "scan_summary_scope",
+        scanId: "scan_summary_scope", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_summary_scope" },
         kind: "account_scan",
         account: walletAccount,
         relationship: "sent",
         limit: 100,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T00:00:00.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: [
           {
@@ -760,7 +764,7 @@ describe("SqliteActivityStore", () => {
     await withCoverageStores(async (store) => {
       await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await store.recordExternalActivityScan({
-        scanId: "scan_empty_complete",
+        scanId: "scan_empty_complete", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_empty_complete" },
         kind: "account_scan",
         account: walletAccount,
         relationship: "affected",
@@ -768,9 +772,10 @@ describe("SqliteActivityStore", () => {
         toTimestamp: "2026-05-11T02:00:00.000Z",
         limit: 100,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T02:00:01.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: []
       });
@@ -795,11 +800,31 @@ describe("SqliteActivityStore", () => {
     });
   });
 
+  it("rejects restored period completion when more rows remain at the exact time boundary", async () => {
+    await withTempDb(async store => {
+      const from = "2026-05-11T00:00:00.000Z", to = "2026-05-11T02:00:00.000Z";
+      await seedCurrentReadAccount(store, walletAccount, new Date(from));
+      await store.recordExternalActivityScan({ scanId: "period", continuity: { sourceLower: activityIndexGenesis, rootScanId: "period" }, kind: "account_scan", account: walletAccount,
+        relationship: "affected", fromTimestamp: from, toTimestamp: to, limit: 100, endpointHost: "graphql.mainnet.sui.io",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER, sourceUpperTimestamp: to, sourceUpperCheckpoint: "100",
+        fetchedAt: to, hasMore: false, windowComplete: true, transactions: [] });
+      await store.createPreferencesRepository().ensureDefaultLocalSettings(localDataOptions());
+      const local = store.createLocalDataService(localDataOptions()), backup = await local.exportLocalData();
+      const scan = backup.data.externalActivityScans[0]!;
+      const missingRoot = { ...backup, data: { ...backup.data, externalActivityScans: [{ ...scan, continuity_json: null }] } };
+      await expect(previewBackup(local, missingRoot)).rejects.toMatchObject({ details: { reason: "missing_scan_continuity" } });
+      const altered = { ...backup, data: { ...backup.data, externalActivityScans: [{ ...scan, has_more: 1, response_cursor: "more",
+        continuity_json: JSON.stringify({ sourceLower: activityIndexGenesis, rootScanId: scan.scan_id, newestTimestamp: from, oldestTimestamp: from, newestCheckpoint: "98", oldestCheckpoint: "98" }) }] } };
+      await expect(previewBackup(local, altered)).rejects.toMatchObject({ details: { reason: "invalid_scan_completion" } });
+      expect((await store.getExternalActivityCoverage({ account: walletAccount, from, to })).coverageStatus).toBe("complete");
+    });
+  });
+
   it("keeps sent-only and incomplete scans as partial coverage while still reporting stored transactions", async () => {
     await withCoverageStores(async (store) => {
       const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       await store.recordExternalActivityScan({
-        scanId: "scan_sent_only",
+        scanId: "scan_sent_only", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_sent_only" },
         kind: "account_scan",
         account: walletAccount,
         relationship: "sent",
@@ -807,9 +832,10 @@ describe("SqliteActivityStore", () => {
         toTimestamp: "2026-05-11T02:00:00.000Z",
         limit: 100,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T02:00:01.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: [
           {
@@ -831,7 +857,7 @@ describe("SqliteActivityStore", () => {
         toTimestamp: "2026-05-11T02:00:00.000Z",
         limit: 100,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T02:00:02.000Z",
         hasMore: true,
         windowComplete: false,
@@ -881,13 +907,14 @@ describe("SqliteActivityStore", () => {
         toTimestamp: "2026-05-11T02:00:00.000Z",
         limit: 100,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true
       };
       await store.recordExternalActivityScan({
         ...scanBase,
-        scanId: "scan_repeat_1",
+        scanId: "scan_repeat_1", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_repeat_1" },
         fetchedAt: "2026-05-11T02:00:01.000Z",
         transactions: [
           {
@@ -902,14 +929,14 @@ describe("SqliteActivityStore", () => {
       });
       await store.recordExternalActivityScan({
         ...scanBase,
-        scanId: "scan_repeat_2",
+        scanId: "scan_repeat_2", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_repeat_2" },
         fetchedAt: "2026-05-11T02:00:02.000Z",
         transactions: [
           {
             digest: repeatedDigest,
             relationship: "affected",
-            checkpoint: "101",
-            timestamp: "2026-05-11T00:41:00.000Z",
+            checkpoint: "100",
+            timestamp: "2026-05-11T00:40:00.000Z",
             status: "failure",
             knownSenderAccountId: active.accountId
           }
@@ -927,10 +954,10 @@ describe("SqliteActivityStore", () => {
         scanCount: 2,
         storedTransactionCount: 1,
         storedTransactionRange: {
-          earliestTimestamp: "2026-05-11T00:41:00.000Z",
-          latestTimestamp: "2026-05-11T00:41:00.000Z",
-          earliestCheckpoint: "101",
-          latestCheckpoint: "101"
+          earliestTimestamp: "2026-05-11T00:40:00.000Z",
+          latestTimestamp: "2026-05-11T00:40:00.000Z",
+          earliestCheckpoint: "100",
+          latestCheckpoint: "100"
         },
         coverageEvidence: {
           completeAffectedAccountScanIds: ["scan_repeat_2", "scan_repeat_1"]
@@ -951,14 +978,15 @@ describe("SqliteActivityStore", () => {
         toTimestamp: "2026-05-11T01:00:00.000Z",
         limit: 100,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true
       };
 
       await store.recordExternalActivityScan({
         ...scanBase,
-        scanId: "scan_timeline_sent",
+        scanId: "scan_timeline_sent", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_timeline_sent" },
         relationship: "sent",
         fetchedAt: "2026-05-11T01:00:01.000Z",
         transactions: [
@@ -984,7 +1012,7 @@ describe("SqliteActivityStore", () => {
       });
       await store.recordExternalActivityScan({
         ...scanBase,
-        scanId: "scan_timeline_affected",
+        scanId: "scan_timeline_affected", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_timeline_affected" },
         relationship: "affected",
         fetchedAt: "2026-05-11T01:00:02.000Z",
         transactions: [
@@ -1029,9 +1057,9 @@ describe("SqliteActivityStore", () => {
         transactions: [
           {
             digest: sharedDigest,
-            relationship: "affected",
+            relationship: "sent",
             details: {
-              balanceChanges: [{ amountRaw: "100" }]
+              conflictingFields: ["balanceChanges"], balanceChanges: []
             }
           }
         ]
@@ -1052,10 +1080,11 @@ describe("SqliteActivityStore", () => {
           inputDigest: "6".repeat(44),
           limit: 1,
           endpointHost: "graphql.mainnet.sui.io",
-          chainIdentifier: "mainnet-chain",
+          chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
           fetchedAt: "2026-05-11T00:00:00.000Z",
           hasMore: false,
-          windowComplete: true,
+          sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
+        windowComplete: true,
           transactions: [
             {
               digest: "6".repeat(44),
@@ -1075,7 +1104,7 @@ describe("SqliteActivityStore", () => {
     });
   });
 
-  it("rejects malformed and oversized external activity details before local DB write", async () => {
+  it("rejects malformed or cross-account detail and records only the omission for an oversized observation", async () => {
     await withTempDb(async (store) => {
       const active = await seedCurrentReadAccount(store, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
       const baseTransaction = {
@@ -1091,9 +1120,10 @@ describe("SqliteActivityStore", () => {
         inputDigest: "7".repeat(44),
         limit: 1,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T00:00:00.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: [baseTransaction]
       };
@@ -1179,13 +1209,36 @@ describe("SqliteActivityStore", () => {
             }
           ]
         })
-      ).rejects.toMatchObject({
-        kind: "input_invalid",
-        details: { reason: "external_activity_detail_too_large" }
-      });
-
+      ).resolves.toMatchObject({ storedCount: 1 });
       await expect(store.summarizeExternalActivity({ account: walletAccount })).resolves.toMatchObject({
-        summary: { transactionCount: 0 }
+        summary: { transactionCount: 1 }, transactions: [expect.objectContaining({ details: undefined })]
+      });
+    });
+  });
+
+  it("preserves per-observation byte limits and richer prior detail through backup replacement", async () => {
+    await withTempDb(async source => {
+      await source.createPreferencesRepository().ensureDefaultLocalSettings(localDataOptions());
+      await seedCurrentReadAccount(source, walletAccount, new Date(0));
+      const limit = EXTERNAL_ACTIVITY_TRANSACTION_DETAIL_JSON_MAX_BYTES;
+      for (const [index, length] of [limit + 1, limit - 1, limit, limit + 1].entries()) {
+        const digest = (index < 2 ? "7" : "8").repeat(44);
+        const detail = { moveCalls: [], balanceChanges: [], objectChanges: [], events: [],
+          executionError: { message: "測" }, truncation: { moveCalls: false, balanceChanges: false, objectChanges: false, events: false } };
+        detail.executionError.message += "x".repeat(length - Buffer.byteLength(JSON.stringify(detail)));
+        expect(Buffer.byteLength(JSON.stringify(detail))).toBe(length);
+        await source.recordExternalActivityScan({ scanId: "size-" + index, kind: "digest_lookup", inputDigest: digest,
+          account: walletAccount, relationship: "affected", limit: 1, chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
+          endpointHost: "graphql.mainnet.sui.io", fetchedAt: new Date(index).toISOString(), hasMore: false, windowComplete: true,
+          transactions: [{ digest, status: "failure", relationship: "affected", details: detail }] });
+      }
+      const exported = await source.createLocalDataService(localDataOptions()).exportLocalData();
+      expect(exported.data.externalActivityObservations.map(row => row.detail_status)).toEqual(["size_limit", "available", "available", "size_limit"]);
+      expect(exported.data.externalActivityTransactions.map(row => Buffer.byteLength(row.detail_json!)).sort((a,b) => a-b)).toEqual([limit-1, limit]);
+      await withTempDb(async target => {
+        const restored = target.createLocalDataService(localDataOptions());
+        await confirmLocalRecords(target, restored, exported);
+        expect((await restored.exportLocalData()).data).toEqual(exported.data);
       });
     });
   });
@@ -1195,7 +1248,7 @@ describe("SqliteActivityStore", () => {
       await source.createPreferencesRepository().ensureDefaultLocalSettings({ suiGrpcUrl: "https://fullnode.mainnet.sui.io:443", suiGraphqlUrl: "https://graphql.mainnet.sui.io/graphql" });
       await source.createCoinMetadataCache().setCoinMetadata({
         coinType: "0x2::sui::SUI",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         decimals: 9,
         symbol: "SUI",
         name: "Sui",
@@ -1214,15 +1267,17 @@ describe("SqliteActivityStore", () => {
         throw new Error("Expected wallet account to be recorded");
       }
       await source.recordExternalActivityScan({
-        scanId: "scan_export",
+        scanId: "scan_export", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_export" },
         kind: "function_scan",
+        functionTarget: `0x${"2".padStart(64,"0")}::coin::transfer`,
         account: walletAccount,
         relationship: "sent",
         limit: 5,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T00:00:00.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: [
           {
@@ -1255,7 +1310,7 @@ describe("SqliteActivityStore", () => {
         const targetCache = target.createCoinMetadataCache();
         await targetCache.setCoinMetadata({
           coinType: "0x2::sui::SUI",
-          chainIdentifier: "mainnet-chain",
+          chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
           decimals: 9,
           symbol: "SUI",
           name: "Sui",
@@ -1263,7 +1318,7 @@ describe("SqliteActivityStore", () => {
           expiresAt: "2026-05-12T00:00:00.000Z"
         });
         const targetLocalData = target.createLocalDataService(localDataOptions());
-        const preview = await targetLocalData.previewImportLocalData(exported);
+        const preview = await previewBackup(targetLocalData, exported);
         expect(preview).toMatchObject({
           status: "valid",
           incomingCounts: {
@@ -1280,11 +1335,11 @@ describe("SqliteActivityStore", () => {
           willReplace: true,
           restartRequiredAfterImport: true
         });
-        await targetLocalData.importLocalDataReplace(exported);
+        await confirmLocalRecords(target, targetLocalData, exported);
         await expect(
           targetCache.getCoinMetadata({
             coinType: "0x2::sui::SUI",
-            chainIdentifier: "mainnet-chain",
+            chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
             now: new Date("2026-05-11T00:00:00.000Z")
           })
         ).resolves.toEqual({ status: "miss" });
@@ -1331,13 +1386,13 @@ describe("SqliteActivityStore", () => {
 
       await withTempDb(async (target) => {
         await expect(
-          target.createLocalDataService(localDataOptions()).previewImportLocalData(invalidBackup)
+          previewBackup(target.createLocalDataService(localDataOptions()), invalidBackup)
         ).rejects.toMatchObject({
           kind: "input_invalid",
           details: { reason: "invalid_json_shape", field: "state_json" }
         });
         await expect(
-          target.createLocalDataService(localDataOptions()).importLocalDataReplace(invalidBackup)
+          verifyBackup(target.createLocalDataService(localDataOptions()), invalidBackup)
         ).rejects.toMatchObject({
           kind: "input_invalid",
           details: { reason: "invalid_json_shape", field: "state_json" }
@@ -1358,7 +1413,7 @@ describe("SqliteActivityStore", () => {
         .exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
 
       await expect(
-        store.createLocalDataService(localDataOptions()).previewImportLocalData({
+        previewBackup(store.createLocalDataService(localDataOptions()), {
           ...exported,
           data: {
             ...exported.data,
@@ -1377,7 +1432,7 @@ describe("SqliteActivityStore", () => {
                 request_cursor: null,
                 response_cursor: null,
                 endpoint_host: "graphql.mainnet.sui.io",
-                chain_identifier: "mainnet-chain",
+                chain_identifier: SUI_MAINNET_CHAIN_IDENTIFIER,
                 fetched_at: "2026-05-11T00:00:00.000Z",
                 stored_count: 0,
                 skipped_count: 0,
@@ -1402,7 +1457,7 @@ describe("SqliteActivityStore", () => {
     const exported = await source.createLocalDataService(localDataOptions()).exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
     await withTempDb(async (target) => {
       await seedCurrentReadAccount(target, walletAccount, new Date(0));
-      const preview = await target.createLocalDataService(localDataOptions()).previewImportLocalData(exported);
+      const preview = await previewBackup(target.createLocalDataService(localDataOptions()), exported);
       expect(preview.currentCounts.accounts).toBe(1); expect(preview.incomingCounts.accounts).toBe(1);
       expect(preview).not.toHaveProperty("accountContextChanges");
       expect(await target.getActiveAccount()).toMatchObject({ address: walletAccount });
@@ -1438,8 +1493,8 @@ describe("SqliteActivityStore", () => {
         const oldFormat: Record<string, unknown> = { ...exported };
         delete oldFormat.format;
         for (const backup of [legacyBackup, oldFormat]) {
-          await expect(targetLocalData.previewImportLocalData(backup)).rejects.toMatchObject({ kind: "input_invalid" });
-          await expect(targetLocalData.importLocalDataReplace(backup)).rejects.toMatchObject({ kind: "input_invalid" });
+          await expect(previewBackup(targetLocalData, backup)).rejects.toMatchObject({ kind: "input_invalid" });
+          await expect(verifyBackup(targetLocalData, backup)).rejects.toMatchObject({ kind: "input_invalid" });
         }
         await expect(target.createPreferencesRepository().getSuiGraphqlUrl()).resolves.toMatchObject({
           value: "https://example.sui.provider/graphql"
@@ -1468,7 +1523,7 @@ describe("SqliteActivityStore", () => {
         }
       };
 
-      await expect(service.importLocalDataReplace(invalid)).rejects.toMatchObject({
+      await expect(verifyBackup(service, invalid)).rejects.toMatchObject({
         kind: "input_invalid"
       });
       await expect(store.getActiveAccount()).resolves.toMatchObject({ address: walletAccount });
@@ -1507,15 +1562,15 @@ describe("SqliteActivityStore", () => {
           checkedUrls.push(url);
           throw new SuiEndpointError("chain_identifier_mismatch", "wrong chain", {
             chainIdentifier: "wrong-chain",
-            expectedChainIdentifier: "mainnet-chain"
+            expectedChainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER
           });
         }
       });
 
-      await expect(service.previewImportLocalData(customEndpointExport)).resolves.toMatchObject({
+      await expect(previewBackup(service, customEndpointExport)).resolves.toMatchObject({
         status: "valid"
       });
-      await expect(service.importLocalDataReplace(customEndpointExport)).rejects.toMatchObject({
+      await expect(verifyBackup(service, customEndpointExport)).rejects.toMatchObject({
         kind: "input_invalid",
         details: {
           reason: "invalid_sui_grpc_url_endpoint",
@@ -1545,7 +1600,7 @@ describe("SqliteActivityStore", () => {
       const exported = await service.exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
 
       await expect(
-        service.previewImportLocalData({
+        previewBackup(service, {
           ...exported,
           data: {
             ...exported.data,
@@ -1555,7 +1610,7 @@ describe("SqliteActivityStore", () => {
       ).rejects.toMatchObject({ kind: "input_invalid" });
 
       await expect(
-        service.previewImportLocalData({
+        previewBackup(service, {
           ...exported,
           data: {
             ...exported.data,
@@ -1583,9 +1638,10 @@ describe("SqliteActivityStore", () => {
         inputDigest: "8".repeat(44),
         limit: 1,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T00:00:00.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: [
           {
@@ -1600,7 +1656,7 @@ describe("SqliteActivityStore", () => {
       const exported = await service.exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
 
       await expect(
-        service.previewImportLocalData({
+        previewBackup(service, {
           ...exported,
           data: {
             ...exported.data,
@@ -1631,9 +1687,10 @@ describe("SqliteActivityStore", () => {
         inputDigest: "8".repeat(44),
         limit: 1,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T00:00:00.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: [
           {
@@ -1658,7 +1715,7 @@ describe("SqliteActivityStore", () => {
       });
       const service = store.createLocalDataService(localDataOptions());
       const exported = await service.exportLocalData(new Date("2026-05-11T00:00:00.000Z"));
-      const previewWithDetail = (detail: unknown) => service.previewImportLocalData({
+      const previewWithDetail = (detail: unknown) => previewBackup(service, {
         ...exported,
         data: {
           ...exported.data,
@@ -1792,15 +1849,16 @@ describe("SqliteActivityStore", () => {
         throw new Error("Expected wallet account to be recorded");
       }
       await store.recordExternalActivityScan({
-        scanId: "scan_reset",
+        scanId: "scan_reset", continuity: { sourceLower: activityIndexGenesis, rootScanId: "scan_reset" },
         kind: "account_scan",
         account: walletAccount,
         relationship: "affected",
         limit: 100,
         endpointHost: "graphql.mainnet.sui.io",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         fetchedAt: "2026-05-11T00:00:00.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-05-12T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: [
           {
@@ -1814,7 +1872,7 @@ describe("SqliteActivityStore", () => {
       const cache = store.createCoinMetadataCache();
       await cache.setCoinMetadata({
         coinType: "0x2::sui::SUI",
-        chainIdentifier: "mainnet-chain",
+        chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
         decimals: 9,
         symbol: "SUI",
         name: "Sui",
@@ -1822,7 +1880,7 @@ describe("SqliteActivityStore", () => {
         expiresAt: "2026-05-12T00:00:00.000Z"
       });
       const service = store.createLocalDataService(localDataOptions());
-      await service.resetLocalData(new Date("2026-05-11T00:00:00.000Z"));
+      await confirmLocalRecords(store, service);
       await expect(store.listReviewActivity({ account: walletAccount })).resolves.toMatchObject({
         activities: []
       });
@@ -1839,7 +1897,7 @@ describe("SqliteActivityStore", () => {
       await expect(
         cache.getCoinMetadata({
           coinType: "0x2::sui::SUI",
-          chainIdentifier: "mainnet-chain",
+          chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
           now: new Date("2026-05-11T00:00:00.000Z")
         })
       ).resolves.toEqual({ status: "miss" });
@@ -1877,11 +1935,11 @@ describe("SqliteActivityStore", () => {
         lastSource: "wallet_connection"
       });
 
-      const reused = await store.upsertAccount(walletAccount, "review_execution", new Date(1));
+      const reused = await store.upsertAccount(walletAccount, "review_record", new Date(1));
       expect(reused).toMatchObject({
         id: initial.id,
         firstSource: "wallet_connection",
-        lastSource: "review_execution",
+        lastSource: "review_record",
         firstSeenAt: new Date(0).toISOString(),
         lastUsedAt: new Date(1).toISOString()
       });
@@ -2357,8 +2415,10 @@ describe("SqliteActivityStore", () => {
     });
   });
 
-  it("rejects non-canonical adapter lifecycle stored in review activity snapshots", async () => {
+  it("rejects stored non-canonical adapter lifecycle when reading or exporting review history", async () => {
     await withTempDb(async (store, dbPath) => {
+      const settings = localDataOptions();
+      await store.createPreferencesRepository().ensureDefaultLocalSettings(settings);
       const reviewSessionId = "review_bad_lifecycle_read";
       await recordConnectedReview(store, {
         reviewSessionId,
@@ -2380,12 +2440,12 @@ describe("SqliteActivityStore", () => {
         db.close();
       }
 
-      await expect(store.getReviewSessionDetail({ reviewSessionId, account: walletAccount })).rejects.toMatchObject({
-        kind: "internal_error"
+      const detail = store.getReviewSessionDetail({ reviewSessionId, account: walletAccount });
+      await expect(detail).rejects.toBeInstanceOf(ActivityStoreReadError);
+      await expect(detail).rejects.toMatchObject({ kind: "internal_error" });
+      await expect(store.createLocalDataService(settings).exportLocalData()).rejects.toMatchObject({
+        kind: "input_invalid", details: { reason: "invalid_json_shape", field: "state_json" }
       });
-      await expect(store.getReviewSessionDetail({ reviewSessionId, account: walletAccount })).rejects.toBeInstanceOf(
-        ActivityStoreReadError
-      );
     });
   });
 
@@ -2449,10 +2509,10 @@ it("rejects a previous-package backup without replacing current data", async () 
     const at = new Date("2026-05-11T00:00:00.000Z");
     const exported = await localData.exportLocalData(at);
     expect(exported.format).toBe("sui-mcp.local-data");
-    await expect(localData.previewImportLocalData(exported)).resolves.toMatchObject({ status: "valid" });
+    await expect(previewBackup(localData, exported)).resolves.toMatchObject({ status: "valid" });
     const previousPackage = { ...exported, format: "say-ur-intent.local-data" };
-    await expect(localData.previewImportLocalData(previousPackage)).rejects.toMatchObject({ kind: "input_invalid", details: { reason: "invalid_backup_shape" } });
-    await expect(localData.importLocalDataReplace(previousPackage)).rejects.toMatchObject({ kind: "input_invalid", details: { reason: "invalid_backup_shape" } });
+    await expect(previewBackup(localData, previousPackage)).rejects.toMatchObject({ kind: "input_invalid", details: { reason: "invalid_backup_shape" } });
+    await expect(verifyBackup(localData, previousPackage)).rejects.toMatchObject({ kind: "input_invalid", details: { reason: "invalid_backup_shape" } });
     expect(await localData.exportLocalData(at)).toEqual(exported);
   });
 });

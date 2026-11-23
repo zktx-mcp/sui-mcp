@@ -95,7 +95,7 @@ describe("transaction object ownership producer", () => {
       requestedIntent,
       poolResolution: resolveDeepbookPoolForSymbols({ sourceSymbol: "SUI", targetSymbol: "USDC" }),
       quote,
-      quotePolicy,
+      quotePolicy: { ...quotePolicy, feeBudgetRaw: quotePolicy.quotedDeepRequiredRaw },
       now: new Date("2026-05-15T00:00:29.000Z")
     });
     expect(materialOutcome.status).toBe("completed");

@@ -1,3 +1,4 @@
+import type { SwapQuoteInputFlow } from "./swapQuoteAmounts.js";
 import type { UserAnswerUse } from "../evidence/userAnswerUse.js";
 import type { ProposalReviewModel } from "../proposal/types.js";
 import type { LocalSessionBase } from "../session/localSession.js";
@@ -21,6 +22,7 @@ export const BLOCKED_REASONS = [
   "wallet_review_contract_emit_missing",
   "network_mismatch",
   "insufficient_balance",
+  "below_minimum_order",
   "insufficient_gas",
   "allowlist_violation",
   "asset_mismatch",
@@ -203,6 +205,7 @@ export type HumanReadableReviewEnvelope = {
   unsupportedClaims: HumanReadableReviewGap[];
   freshness: {
     status: "current";
+    quotedAt?: string | undefined;
     evaluatedAt: string;
     expiresAt: string;
     reason: string;
@@ -221,6 +224,10 @@ export type SwapHumanReadableReviewProjection = {
     expectedIncoming: SwapHumanReadableReviewAmount[];
     minimumIncoming: SwapHumanReadableReviewAmount[];
     fees: SwapHumanReadableReviewAmount[];
+    /** Older public review snapshots predate the itemized input flow. */
+    inputFlow?: SwapQuoteInputFlow | undefined;
+    feeTargetRaw?: string | undefined;
+    separateFeeBudgetRaw?: string | null | undefined;
   };
   targets: SwapHumanReadableReviewTarget[];
 };

@@ -119,20 +119,32 @@ export function transactionFactFromNode(node: GraphqlTransactionNode): SuiTransa
 }
 
 function transactionDetailsFromNode(node: GraphqlTransactionNode): ExternalActivityTransactionDetail {
+  const moveCalls = moveCallFactsFromKind(node.kind), balanceChanges = balanceChangeFactsFromEffects(node.effects);
+  const objectChanges = objectChangeFactsFromEffects(node.effects), events = eventFactsFromEffects(node.effects);
+  const commands = node.kind?.commands?.nodes;
+  type Reason = import("../core/activity/transactionActivityDetails.js").PartialFieldReason;
+  const why = (nodes: unknown, more: unknown, unreadable: boolean): Reason | undefined => {
+    if (!Array.isArray(nodes) || typeof more !== "boolean") return "not_returned";
+    if (unreadable) return more ? "truncated_and_unreadable" : "unreadable_rows";
+    return more ? "source_truncated" : undefined;
+  };
+  const incomplete = {
+    moveCalls: node.kind && node.kind.__typename !== "ProgrammableTransaction" ? undefined :
+      why(commands, node.kind?.commands?.pageInfo?.hasNextPage, commands?.filter((c) => c.__typename === "MoveCallCommand").length !== moveCalls.length),
+    balanceChanges: why(node.effects?.balanceChanges?.nodes, node.effects?.balanceChanges?.pageInfo?.hasNextPage,
+      node.effects?.balanceChanges?.nodes?.length !== balanceChanges.length || balanceChanges.some((c) => !c.owner || !parseSuiAddress(c.owner))),
+    objectChanges: why(node.effects?.objectChanges?.nodes, node.effects?.objectChanges?.pageInfo?.hasNextPage, node.effects?.objectChanges?.nodes?.length !== objectChanges.length),
+    events: why(node.effects?.events?.nodes, node.effects?.events?.pageInfo?.hasNextPage, node.effects?.events?.nodes?.length !== events.length)
+  };
+  const partialReasons = Object.fromEntries(Object.entries(incomplete).filter(([, reason]) => reason !== undefined));
   return {
     transactionKind: stringValue(node.kind?.__typename),
-    moveCalls: moveCallFactsFromKind(node.kind),
-    balanceChanges: balanceChangeFactsFromEffects(node.effects),
-    objectChanges: objectChangeFactsFromEffects(node.effects),
-    events: eventFactsFromEffects(node.effects),
+    moveCalls, balanceChanges, objectChanges, events,
     gas: gasFactFromEffects(node.effects),
     executionError: executionErrorFactFromEffects(node.effects),
-    truncation: {
-      moveCalls: node.kind?.commands?.pageInfo?.hasNextPage === true,
-      balanceChanges: node.effects?.balanceChanges?.pageInfo?.hasNextPage === true,
-      objectChanges: node.effects?.objectChanges?.pageInfo?.hasNextPage === true,
-      events: node.effects?.events?.pageInfo?.hasNextPage === true
-    }
+    partialReasons,
+    truncation: { moveCalls: !!partialReasons.moveCalls, balanceChanges: !!partialReasons.balanceChanges,
+      objectChanges: !!partialReasons.objectChanges, events: !!partialReasons.events }
   };
 }
 

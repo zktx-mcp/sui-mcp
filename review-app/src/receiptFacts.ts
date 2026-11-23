@@ -54,8 +54,11 @@ export function parseReceipt(value: unknown): PublicChainReceipt | null {
   if (!objectTypes) {
     return null;
   }
+  if (r.unavailableFields !== undefined && (!Array.isArray(r.unavailableFields) || !r.unavailableFields.every(v =>
+    ["sender","packageCalls","balanceChanges","objectTypes","gas","inputs","events","ptbGraph"].includes(v)))) return null;
+  const unavailableFields = r.unavailableFields as string[] | undefined;
   const gas = parseGas(r.gas);
-  if (!gas) {
+  if (!gas && !(r.gas === undefined && unavailableFields?.includes("gas"))) {
     return null;
   }
   const inputs = parseInputs(r.inputs);
@@ -77,7 +80,8 @@ export function parseReceipt(value: unknown): PublicChainReceipt | null {
     packageCalls,
     balanceChanges,
     objectTypes,
-    gas,
+    gas: gas ?? undefined,
+    ...(unavailableFields ? { unavailableFields } : {}),
     inputs,
     events,
     ptbGraph: ptbGraph.graph,
@@ -94,7 +98,9 @@ function parseEffectsStatus(value: unknown): SuiChainReceiptEffectsStatus | null
   if (r.success) {
     return { success: true };
   }
-  const status: { success: false; errorKind?: string; errorMessage?: string } = { success: false };
+  const status: { success: false; errorKind?: string; errorMessage?: string; failedCommand?: number; minimumReceiveFailure?: true } = { success: false };
+  if (typeof r.failedCommand === "number" && Number.isSafeInteger(r.failedCommand) && r.failedCommand >= 0) status.failedCommand = r.failedCommand;
+  if (r.minimumReceiveFailure === true && status.failedCommand !== undefined) status.minimumReceiveFailure = true;
   if (r.errorKind !== undefined) {
     if (typeof r.errorKind !== "string") {
       return null;

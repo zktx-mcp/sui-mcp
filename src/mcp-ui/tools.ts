@@ -1,3 +1,4 @@
+import type { CardStore } from "../core/session/cardSessionStore.js";
 import { workflowActionSchema } from "../core/session/workflowView.js";
 import { settingsActionSchema } from "../core/session/settingsOperation.js";
 import { MAX_JSON_BODY_BYTES, settingsJsonSize, settingsRawChunkBudget } from "../core/session/settingsFileProtocol.js";
@@ -33,12 +34,18 @@ export function supportsCards(server: McpServer): boolean {
   return ui !== null && typeof ui === "object" && !Array.isArray(ui) && Array.isArray(ui.mimeTypes) &&
     ui.mimeTypes.every((mimeType: unknown) => typeof mimeType === "string") && ui.mimeTypes.includes(RESOURCE_MIME_TYPE);
 }
-export function cardToolResult(response: CardResponse, savedLink = false): CallToolResult {
+export function cardUnavailableResult(): CallToolResult {
+  return errorToolResult({ kind: "ui_unavailable", details: {
+    reason: `This MCP connection did not advertise a valid card capability for ${RESOURCE_MIME_TYPE}. No card was created.`,
+    guidance: "Tell the user the requested card could not open on this connection. Get their agreement before providing a separate read-only alternative."
+  } });
+}
+export function cardToolResult(response: CardResponse, savedLink = false, gateway?: Record<string, unknown>): CallToolResult {
   const snapshot = response.snapshot;
   const result = response.error
     ? errorToolResult({ kind: response.error.code === "wallet_unavailable" ? "wallet_unavailable" : "input_invalid", details: { code: response.error.code,
         reason: response.error.message, snapshot } })
-    : okToolResult(snapshot);
+    : okToolResult(gateway ? { ...gateway, card: snapshot } : snapshot);
   if (savedLink) result.content.push({ type: "resource_link", name: `card_${response.snapshot.cardId}`,
     uri: `${CARD_RESOURCE_PREFIX}${response.snapshot.cardId}`, mimeType: "application/json", description: "Saved data for this exact card." });
   if (response.receiptDisplay) result._meta = { [CARD_DISPLAY_METADATA_KEY]: cardReceiptDisplaySchema.parse({
@@ -53,24 +60,27 @@ export function cardToolResult(response: CardResponse, savedLink = false): CallT
 
 export async function createWorkflowCard(server: McpServer, deps: Pick<McpServerDeps, "cards">,
   kind: "connect" | "disconnect" | "review" | "settings", input: Record<string, unknown>, gateway?: Record<string, unknown>): Promise<CallToolResult> {
-  if (!supportsCards(server)) return errorToolResult({ kind: "ui_unavailable", details: { reason: "This MCP client does not provide an internal card." } });
+  if (!supportsCards(server)) return cardUnavailableResult();
   if (!deps.cards) return errorToolResult({ kind: "internal_error", details: { reason: "Card service unavailable." } });
   const created = await deps.cards.store.create(kind, input);
-  const result = cardToolResult(created, true);
-  if (gateway) {
-    const payload = okToolResult({ ...gateway, card: created.snapshot });
-    result.structuredContent = payload.structuredContent;
-    result.content = [...payload.content, ...result.content.filter((item) => item.type === "resource_link")];
-  }
+  return createdWorkflowCardResult(created, gateway);
+}
+
+export function createdWorkflowCardResult(created: Awaited<ReturnType<CardStore["create"]>>, gateway?: Record<string, unknown>) {
+  const result = cardToolResult(created, true, gateway);
   return { ...result, _meta: { ...result._meta, [CARD_METADATA_KEY]: { cardId: created.snapshot.cardId, permission: created.permission } } };
 }
 
-export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "cards" | "activityStore" | "workflow" | "logger">): void {
+export function registerCardTools(server: McpServer, deps: Pick<McpServerDeps, "cards" | "activityStore" | "workflow" | "logger">) {
+  const fixedResources = [];
   for (const [kind, uri] of Object.entries(CARD_RESOURCE_URIS)) {
-    registerAppResource(server, `${kind}-card`, uri, { _meta: uiResourceMetadata }, async () => ({
+    const item = { name: `${kind}-card`, uri, title: `${kind[0]!.toUpperCase()}${kind.slice(1)} card`,
+      description: `Internal ${kind} card interface.` };
+    registerAppResource(server, item.name, uri, { title: item.title, description: item.description, _meta: uiResourceMetadata }, async () => ({
       contents: [{ uri, mimeType: RESOURCE_MIME_TYPE,
         text: await readFile(new URL(`../../dist/mcp-app/${kind}.html`, import.meta.url), "utf8"), _meta: uiResourceMetadata }]
     }));
+    fixedResources.push(item);
   }
   server.registerResource("saved-card", new ResourceTemplate(`${CARD_RESOURCE_PREFIX}{cardId}`, { list: undefined }),
     { mimeType: "application/json", description: "Saved data for one card; no input permission." }, async (uri, variables) => {
@@ -78,7 +88,7 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(await deps.cards.store.readSaved(variables.cardId)) }] };
     });
   async function create(kind: "account" | "receipt" | "chart", input: Record<string, unknown>): Promise<CallToolResult> {
-    if (!supportsCards(server)) return errorToolResult({ kind: "ui_unavailable", details: { reason: "This MCP client does not provide an internal card." } });
+    if (!supportsCards(server)) return cardUnavailableResult();
     if (!deps.cards) return errorToolResult({ kind: "internal_error", details: { reason: "Card service unavailable." } });
     let execute = Object.keys(input).length > 0;
     if (kind === "account") {
@@ -92,48 +102,49 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
     if (kind === "receipt" && input.digest === undefined) return okToolResult(cardInputRequiredSchema.parse({
       kind, status: "input_required", field: "digest", message: "Please provide a transaction hash in chat."
     }));
-    if (kind === "chart" && input.poolName === undefined) execute = false;
+    if (kind === "chart" && input.poolName === undefined && input.poolId === undefined) execute = false;
     const created = await deps.cards.store.create(kind, input, execute);
     const result = cardToolResult(created, true);
     return { ...result, _meta: { ...result._meta, [CARD_METADATA_KEY]: { cardId: created.snapshot.cardId, permission: created.permission } } };
   }
   registerAppTool(server, CARD_TOOLS.account, { title: "Account assets", description: "Open an account asset card.",
-    inputSchema: accountInputSchema.partial(), annotations: { readOnlyHint: true, openWorldHint: true }, _meta: cardMetadata("account")
+    inputSchema: accountInputSchema.partial(), annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false, idempotentHint: false }, _meta: cardMetadata("account")
   }, (input) => create("account", input));
   registerAppTool(server, CARD_TOOLS.receipt, { title: "Transaction result", description: "Open a Sui transaction result card.",
-    inputSchema: receiptInputSchema.partial(), annotations: { readOnlyHint: true, openWorldHint: true }, _meta: cardMetadata("receipt")
+    inputSchema: receiptInputSchema.partial(), annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false, idempotentHint: false }, _meta: cardMetadata("receipt")
   }, (input) => create("receipt", input));
   registerAppTool(server, CARD_TOOLS.chart, { title: "DeepBook USDC chart", description: "Open a DeepBook USDC candle chart card.",
-    inputSchema: chartOpenInputSchema, annotations: { readOnlyHint: true, openWorldHint: true }, _meta: cardMetadata("chart")
+    inputSchema: chartOpenInputSchema, annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false, idempotentHint: false }, _meta: cardMetadata("chart")
   }, (input) => create("chart", input));
 
-  const actions = [
-    { name: CARD_TOOLS.read, schema: cardReadReferenceSchema, run: (input: unknown) => deps.cards!.store.read(cardReadReferenceSchema.parse(input)) },
-    { name: CARD_TOOLS.submit, schema: cardSubmissionSchema, run: (input: unknown) => deps.cards!.store.submit(cardSubmissionSchema.parse(input)) },
-    { name: CARD_TOOLS.act, schema: cardActionSchema, run: (input: unknown) => deps.cards!.store.act(cardActionSchema.parse(input)) }
-  ];
-  for (const action of actions) {
-    registerAppTool(server, action.name, { description: "Use the current card session.", inputSchema: action.schema,
-      _meta: { ui: { visibility: ["app"] } }, annotations: {
-        readOnlyHint: false, openWorldHint: true, destructiveHint: action.name === CARD_TOOLS.act
-      }
-    }, async (input: unknown) => {
-      try {
-        if (!deps.cards) throw new CardError("Card service is unavailable.");
-        return cardToolResult(await action.run(input));
-      } catch (error) {
-        const domainError = sessionDomainToolError(error);
-        if (domainError) return domainError;
-        const invalid = error instanceof z.ZodError;
-        return errorToolResult({ kind: invalid ? "input_invalid" : "internal_error", details: {
-          code: invalid ? "invalid_card_input" : "card_unavailable", reason: invalid ? "This request is not valid for the card." : "This card request could not be completed." } });
-      }
-    });
+  const control = {
+    description: "Use the current card session.",
+    _meta: { ui: { visibility: ["app"] } },
+    annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
+  } satisfies McpUiAppToolConfig;
+  async function useCard(run: (store: CardStore) => Promise<CardResponse>) {
+    try {
+      if (!deps.cards) throw new CardError("Card service is unavailable.");
+      return cardToolResult(await run(deps.cards.store));
+    } catch (error) {
+      const domainError = sessionDomainToolError(error);
+      if (domainError) return domainError;
+      const invalid = error instanceof z.ZodError;
+      return errorToolResult({ kind: invalid ? "input_invalid" : "internal_error", details: {
+        code: invalid ? "invalid_card_input" : "card_unavailable", reason: invalid ? "This request is not valid for the card." : "This card request could not be completed." } });
+    }
   }
+  registerAppTool(server, CARD_TOOLS.read, { ...control, inputSchema: cardReadReferenceSchema },
+    input => useCard(store => store.read(input)));
+  registerAppTool(server, CARD_TOOLS.submit, { ...control, inputSchema: cardSubmissionSchema },
+    input => useCard(store => store.submit(input)));
+  registerAppTool(server, CARD_TOOLS.act, { ...control, inputSchema: cardActionSchema,
+    annotations: { ...control.annotations, destructiveHint: true } },
+    input => useCard(store => store.act(input)));
   const fileInput = cardReferenceSchema.extend({ attemptId: z.string().uuid(), operationId: z.string().uuid(), fileId: z.string().uuid(), offset: z.number().int().nonnegative().safe(),
     limit: z.number().int().positive().safe().optional() }).strict();
   registerAppTool(server, CARD_TOOLS.readSettingsFile, { description: "Read a verified backup file for its current download attempt.", inputSchema: fileInput,
-    _meta: { ui: { visibility: ["app"] } }, annotations: { readOnlyHint: true, openWorldHint: false }
+    _meta: { ui: { visibility: ["app"] } }, annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: true }
   }, async (input, extra) => {
     try {
       if (!deps.cards) throw new CardError("Card service is unavailable.");
@@ -155,4 +166,5 @@ export function registerReadCards(server: McpServer, deps: Pick<McpServerDeps, "
       return errorToolResult({ kind: "input_invalid", details: { reason: "This backup file could not be read or verified." } });
     }
   });
+  return fixedResources;
 }

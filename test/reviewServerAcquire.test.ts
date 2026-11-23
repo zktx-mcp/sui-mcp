@@ -1,3 +1,5 @@
+import { verifyMainnetGraphqlEndpoint, verifyMainnetGrpcEndpoint } from "../src/runtime/suiEndpoint.js";
+import { SuiEndpointError } from "../src/core/suiEndpoint.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   startOrDeferReviewServer,
@@ -98,6 +100,38 @@ describe("startOrDeferReviewServer", () => {
     await lifecycle.close();
     expect(start.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(acquiredServer.closed).toBe(true); // close() closes the acquired server
+  });
+
+  it.each(["endpoint_timeout", "chain_identifier_mismatch"] as const)("handles %s during owner takeover", async kind => {
+    const acquired = startedServer(), failure = vi.fn();
+    const start = vi.fn<() => Promise<typeof acquired>>().mockRejectedValueOnce(addrInUse())
+      .mockRejectedValueOnce(new SuiEndpointError(kind, kind)).mockResolvedValue(acquired);
+    const lifecycle = await startOrDeferReviewServer(start, 8765, baseDeps({ probeIdentity: async () => ownIdentity(42), onFailure: failure }));
+    await flush();
+    expect(start).toHaveBeenCalledTimes(kind === "endpoint_timeout" ? 3 : 2);
+    expect(failure).toHaveBeenCalledTimes(kind === "endpoint_timeout" ? 0 : 1);
+    await lifecycle.close();
+    expect(acquired.closed).toBe(kind === "endpoint_timeout");
+  });
+
+  it.each(["graphql", "grpc"] as const)("stops takeover after the installed %s transport reports denied access", async transport => {
+    const failure = vi.fn(), denied = vi.fn(async () => new Response("Access denied", { status: 403 }));
+    vi.stubGlobal("fetch", denied);
+    try {
+      const start = vi.fn(async () => {
+        if (start.mock.calls.length === 1) throw addrInUse();
+        if (transport === "graphql") await verifyMainnetGraphqlEndpoint({ url: "https://example.invalid/graphql" });
+        else await verifyMainnetGrpcEndpoint({ url: "https://example.invalid:443" });
+        return startedServer();
+      });
+      const lifecycle = await startOrDeferReviewServer(start, 8765, baseDeps({ probeIdentity: async () => ownIdentity(42), onFailure: failure,
+        delay: async () => new Promise(resolve => setTimeout(resolve, 1)) }));
+      try {
+        await vi.waitFor(() => expect(failure).toHaveBeenCalledWith(expect.objectContaining({ kind: "endpoint_access_denied" })));
+        expect(start).toHaveBeenCalledTimes(2);
+        expect(denied).toHaveBeenCalledOnce();
+      } finally { await lifecycle.close(); }
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("errors when the port is held by a foreign process", async () => {

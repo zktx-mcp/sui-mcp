@@ -11,6 +11,14 @@ function fileCode(error: unknown, code: string): boolean {
 }
 
 export function settingsFileDigest(data: Uint8Array): string { return createHash("sha256").update(data).digest("hex"); }
+const DOWNLOAD_BLOCK_BYTES = 64 * 1024;
+export function downloadBlockHashes(data: Buffer): string[] {
+  const hashes: string[] = [];
+  for (let at = 0; at < data.length; at += DOWNLOAD_BLOCK_BYTES) {
+    hashes.push(settingsFileDigest(data.subarray(at, at + DOWNLOAD_BLOCK_BYTES)));
+  }
+  return hashes;
+}
 export function decodeSettingsChunk(value: string): Buffer {
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
     throw new SettingsConflict("Part of the file was not encoded correctly.");
@@ -23,7 +31,16 @@ export function decodeSettingsChunk(value: string): Buffer {
 /** Private files are named from backend-generated identities only. SQLite owns
  * reservations and progress; this class verifies the corresponding physical fact. */
 export class SettingsFileStore {
+  private readonly sealedVersions = new Map<string, { sha256: string; version: string }>();
   constructor(private readonly dataDirectory: string) {}
+
+  private async fileVersion(handle: FileHandle, path: string): Promise<string> {
+    const [opened, named] = await Promise.all([handle.stat({ bigint: true }), lstat(path, { bigint: true })]);
+    if (!opened.isFile() || !named.isFile() || opened.dev !== named.dev || opened.ino !== named.ino) {
+      throw new SettingsConflict("The download snapshot path changed.");
+    }
+    return [opened.dev, opened.ino, opened.size, opened.mtimeNs, opened.ctimeNs].join(":");
+  }
   private directory(role: "staging" | "backups"): string {
     return join(this.dataDirectory, role === "staging" ? ".settings-staging" : "backups");
   }
@@ -58,7 +75,7 @@ export class SettingsFileStore {
     for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) hash.update(chunk as Buffer);
     const after = await handle.stat({ bigint: true }), atPath = await lstat(path, { bigint: true });
     if (!atPath.isFile() || atPath.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino ||
-        after.dev !== atPath.dev || after.ino !== atPath.ino || after.size !== before.size || atPath.size !== before.size ||
+        after.dev !== atPath.dev || after.ino !== atPath.ino || after.size !== before.size || atPath.size !== before.size || after.ctimeNs !== before.ctimeNs || after.mtimeNs !== before.mtimeNs ||
         hash.digest("hex") !== file.sha256) throw new SettingsConflict("The backup file changed while it was checked.");
     return { device: before.dev.toString(), inode: before.ino.toString() };
   }
@@ -69,7 +86,13 @@ export class SettingsFileStore {
     const directory = await lstat(this.directory("staging"));
     if (!directory.isDirectory() || directory.isSymbolicLink()) throw new SettingsConflict("The backup staging directory changed.");
     const path = this.stagingPath(file), handle = await this.handle(path, constants.O_RDONLY);
-    try { return await this.verifiedIdentity(handle, path, file); }
+    try {
+      const before = await this.fileVersion(handle, path);
+      const identity = await this.verifiedIdentity(handle, path, file);
+      if (await this.fileVersion(handle, path) !== before) throw new SettingsConflict("The snapshot changed during verification.");
+      this.sealedVersions.set(file.fileId, { sha256: file.sha256, version: before });
+      return identity;
+    }
     finally { await handle.close(); }
   }
   async publishDownload(file: SettingsFile, rememberSource: (identity: SettingsPhysicalFileIdentity) => void): Promise<SettingsLocalSaveOutcome> {
@@ -200,9 +223,12 @@ export class SettingsFileStore {
     try {
       await handle.writeFile(data); await handle.sync();
       if ((await handle.stat()).size !== file.totalSize) throw new SettingsConflict("The download snapshot length changed.");
+      const version = await this.fileVersion(handle, this.stagingPath(file));
       const hash = createHash("sha256");
       for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) hash.update(chunk as Buffer);
       if (hash.digest("hex") !== file.sha256) throw new SettingsConflict("The download snapshot content changed.");
+      if (await this.fileVersion(handle, this.stagingPath(file)) !== version) throw new SettingsConflict("The snapshot changed during sealing.");
+      this.sealedVersions.set(file.fileId, { sha256: file.sha256, version });
     } finally { await handle.close(); }
   }
   async readDownloadRange(file: SettingsFile, offset: number, length: number): Promise<Buffer> {
@@ -219,15 +245,39 @@ export class SettingsFileStore {
     const handle = await this.handle(path, constants.O_RDONLY);
     try {
       if ((await handle.stat()).size !== file.totalSize) throw new SettingsConflict("The local backup length changed.");
-      const hash = createHash("sha256");
-      for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk as Buffer);
-      if (hash.digest("hex") !== file.sha256) throw new SettingsConflict("The local backup content changed.");
-      const data = Buffer.alloc(length), actual = await handle.read(data, 0, length, offset);
-      if (actual.bytesRead !== length) throw new SettingsConflict("The local backup read was incomplete.");
-      return data;
+      const before = await this.fileVersion(handle, path);
+      const sealed = this.sealedVersions.get(file.fileId);
+      if (sealed && (sealed.sha256 !== file.sha256 || sealed.version !== before)) throw new SettingsConflict("The local backup content changed.");
+      if (!sealed) {
+        const hash = createHash("sha256");
+        for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) hash.update(chunk as Buffer);
+        if (hash.digest("hex") !== file.sha256 || await this.fileVersion(handle, path) !== before) throw new SettingsConflict("The local backup content changed.");
+        this.sealedVersions.set(file.fileId, { sha256: file.sha256, version: before });
+      }
+      if (file.blockHashes) {
+        const first = Math.floor(offset / DOWNLOAD_BLOCK_BYTES), last = Math.floor((offset + length - 1) / DOWNLOAD_BLOCK_BYTES);
+        const start = first * DOWNLOAD_BLOCK_BYTES, end = Math.min(file.totalSize, (last + 1) * DOWNLOAD_BLOCK_BYTES);
+        const blocks = Buffer.alloc(end - start);
+        const { bytesRead } = await handle.read(blocks, 0, blocks.length, start);
+        if (bytesRead !== blocks.length) throw new SettingsConflict("The local backup read was incomplete.");
+        for (let i = first; i <= last; i++) {
+          const at = (i - first) * DOWNLOAD_BLOCK_BYTES;
+          if (settingsFileDigest(blocks.subarray(at, at + DOWNLOAD_BLOCK_BYTES)) !== file.blockHashes[i]) {
+            throw new SettingsConflict("The local backup content changed.");
+          }
+        }
+        if (await this.fileVersion(handle, path) !== before) throw new SettingsConflict("The backup changed during the read.");
+        return blocks.subarray(offset - start, offset - start + length);
+      }
+      const bytes = Buffer.alloc(length);
+      if ((await handle.read(bytes, 0, length, offset)).bytesRead !== length || await this.fileVersion(handle, path) !== before) {
+        throw new SettingsConflict("The backup changed during the read.");
+      }
+      return bytes;
     } finally { await handle.close(); }
   }
   async cleanup(file: SettingsFile): Promise<void> {
+    this.sealedVersions.delete(file.fileId);
     await this.prepareDirectory("staging");
     try { await unlink(this.stagingPath(file)); }
     catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }

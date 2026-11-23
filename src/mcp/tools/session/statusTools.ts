@@ -29,7 +29,7 @@ export function registerSessionStatusTools(server: McpServer, deps: McpServerDep
           operationId: z.string().uuid(), status: pendingConnectionStatusSchema, progress: workflowProgressSchema, lastActivityAt: z.string() })) }),
       pendingReviewSessions: z.object({ limit: z.number().int().positive(), truncated: z.boolean(), items: z.array(z.object(reviewStatusResponseShape)) }),
       userAnswerUse: userAnswerUseSchema }),
-    annotations: { readOnlyHint: false, openWorldHint: false }
+    annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
   }, async () => {
     let active;
     try { active = await deps.activityStore.getActiveAccount(); }
@@ -39,8 +39,8 @@ export function registerSessionStatusTools(server: McpServer, deps: McpServerDep
       // Complete that maintenance before projecting its dependent review facts.
       const context = deps.workflow?.reconcileConnectionContext() ?? { requestedChains: [], canDisconnect: false,
         assetReadAccount: { status: "address_required" as const }, walletAvailability: walletUnavailable("initialization_failed") };
-      const connections = deps.workflow?.pendingConnections() ?? [];
-      const states = await Promise.all(deps.sessions.reviewSessionIds().map((id) => readCurrentReview(deps, id)));
+      const connections = deps.workflow?.pendingConnections(true) ?? [];
+      const states = await Promise.all((deps.workflow?.pendingReviewIds() ?? deps.sessions.reviewSessionIds()).map((id) => readCurrentReview(deps, id)));
       const reviews = states.flatMap((state) => state && isReviewInteractionPending(state) ? [reviewStatusResponse(state)] : []);
       return okToolResult({ activeAccount: activeAccountResponse(active), pendingWalletConnections: latest(connections),
         pendingReviewSessions: latest(reviews), ...context, connection: "connection" in context ? context.connection ?? null : null,
@@ -52,7 +52,7 @@ export function registerSessionStatusTools(server: McpServer, deps: McpServerDep
     title: "Get review status", description: "Read one review session, its admitted request and any observed chain result.",
     inputSchema: z.object({ reviewSessionId: z.string().min(1) }),
     outputSchema: successOutputSchema({ ...reviewStatusResponseShape, userAnswerUse: userAnswerUseSchema }),
-    annotations: { readOnlyHint: false, openWorldHint: false }
+    annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
   }, async ({ reviewSessionId }) => {
     try {
       const state = await readCurrentReview(deps, reviewSessionId);

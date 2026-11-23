@@ -16,16 +16,16 @@ Source-checkout scripts are not packaged product commands, MCP tools, review-tim
 
 | Utility | Command / Tool | Status | Notes |
 | --- | --- | --- | --- |
-| DeepBook registry generation | `npm run generate:deepbook-registry` | Implemented | Generates ignored mainnet metadata from `@mysten/deepbook-v3@2.6.4` constants. |
+| DeepBook registry generation | `npm run generate:deepbook-registry` | Implemented | Generates ignored mainnet metadata from `@mysten/deepbook-v3@2.13.0` constants. |
 | MCP server status | `read_get_server_status` | Implemented | Reports package version, evidence policy version, runtime, `implementedToolsCount`, resources, prompts, and implementation limits. |
 | Supported protocol list | `read_list_supported_protocols` | Implemented | Reports product support levels. |
 | DeepBook pool list | `read_list_deepbook_pools` | Implemented | Reads pinned SDK mainnet pool metadata. |
 | DeepBook token list | `read_list_deepbook_tokens` | Implemented | Reads pinned SDK mainnet token metadata, registry pool references, and decimals derived from pinned scalar values. |
 | Orderbook inspection | `read_inspect_deepbook_orderbook` | Implemented | Uses pinned DeepBook SDK simulation read methods over Sui gRPC with an internal sender placeholder; `ticks` is capped at 50. |
 | DeepBook mid price | `read_get_deepbook_mid_price` | Implemented | Returns pinned SDK pool mid price snapshots. Not a global market price. |
-| DeepBook USDC price history | `read_get_deepbook_usdc_price_history` | Implemented | Reads DeepBookV3 official Indexer USDC candle data for a requested official interval. Not a utility script, live quote, USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
-| DeepBook USDC price at time | `read_get_deepbook_usdc_price_at_time` | Implemented | Selects the DeepBookV3 official Indexer USDC candle for or nearest to one target UTC time. Not a utility script, live quote, USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
-| DeepBook USDC candle chart card | `ui_open_chart` | Implemented | Internal read-only MCP Apps card displaying official DeepBookV3 Indexer USDC-denominated candles through the shared server. Shows the selected pool, requested UTC range and candle limit with the saved result. Not a utility script, live feed, wallet connection, trading interface, fiat USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
+| DeepBook USDC price history | `read_get_deepbook_usdc_price_history` | Implemented | Reads pool-bound DeepBook USDC candle data for a requested UTC interval. Not a utility script, live quote, USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
+| DeepBook USDC price at time | `read_get_deepbook_usdc_price_at_time` | Implemented | Selects the pool-bound DeepBook USDC candle for or nearest to one target UTC time. Not a utility script, live quote, USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
+| DeepBook USDC candle chart card | `ui_open_chart` | Implemented | Internal read-only MCP Apps card displaying pool-bound DeepBook USDC-denominated candles through the shared server. Shows the selected pool, requested UTC range and candle limit with the saved result. Not a utility script, live feed, wallet connection, trading interface, fiat USD value, P&L, route recommendation, transaction-building input, or signing readiness. |
 | Quote calculation | `read_quote_deepbook_action` | Implemented | Quotes raw integer DeepBook quantities with pinned SDK transaction builders and raw `u64` simulation return values. |
 | Display amount quote | `read_quote_deepbook_display_amount` | Implemented | Converts explicit source display amounts through pinned DeepBook token units before quoting; returns exact decimal display quote strings plus raw quote evidence. Quote semantics mark payment coverage and shortfall contribution unavailable. |
 | DeepBook account inventory | `read_summarize_deepbook_account_inventory` | Implemented | Reports display-like BalanceManager inventory. Not raw balance or signing readiness. |
@@ -50,6 +50,9 @@ Source-checkout scripts are not packaged product commands, MCP tools, review-tim
 | Sui CLI transaction diagnostics | `npm exec -- tsx scripts/sui-cli-transaction-diagnostics.ts -- --help` | Manual, source checkout only | Allowlisted local `sui` CLI debug evidence. See notes below. |
 
 ## Release Package Check
+
+Set `SUI_MCP_RELEASE_OUTPUT` to an empty output directory to retain the checked package.tgz, release.json containing its SHA-512 integrity, and matching server.json. The release owner uses those files to compare the accepted candidate with the published artifact. Run `node --import tsx scripts/check-activity-lineages.ts` from the source checkout for the release-time package lineage check.
+
 
 `npm run release:check` is a source-checkout maintainer command. Node 22.12+ within
 22.x, or Node 24+,
@@ -78,7 +81,7 @@ wallet integration checks remain separate release requirements.
 `node scripts/wait-for-npm-publication.ts` is a read-only source-checkout
 maintainer/CI command. It requires Node 22.18 or newer with native TypeScript
 support and public npm access; it needs no installed dependencies or npm token.
-Run it from the checkout root. It reads `name`, `version` and `mcpName` from
+Run it from the checkout root. When used with a release manifest, it also checks the accepted tarball integrity. The default invocation reads `name`, `version` and `mcpName` from
 `package.json` and requires matching metadata from that exact public npm version
 endpoint before succeeding. It does not install, publish, approve a staged
 package, change dist-tags, or call a wallet or Sui endpoint.
@@ -228,8 +231,8 @@ It is not an MCP tool, not a CI check, not packaged product functionality, not r
 - Live read outputs include `fetchedAt` as ISO 8601 UTC.
 - DeepBook mid-price outputs are pool snapshots. For `SUI_USDC`, the price is USDC per SUI.
 - DeepBook mid prices are not fiat USD cash-out estimates, external market lookups, USDC/USD peg assumptions, effective quote prices, quote-vs-mid slippage, price-impact calculations, venue comparisons, best-route claims, P&L, cost basis, or route recommendations.
-- DeepBook USDC price-history output reads DeepBookV3 official Indexer candle data for the requested official interval. It is MCP tool evidence, not a source-checkout utility, on-demand chain-history scan, live quote, historical mid price, global market price, USD value, user-account history, P&L, cost basis, route recommendation, transaction-building input, or signing-readiness signal.
-- `ui_open_chart` opens an internal read-only DeepBook USDC candle card. The server queries the official Indexer; the view does not fetch it directly. This is not a utility script, persistent price database, auto-refresh feed, live quote, trading interface, fiat USD value, user-account history, P&L, cost basis, route recommendation, transaction-building input or signing-readiness signal.
+- DeepBook USDC price-history output reads pool-bound DeepBook candle data for the requested UTC interval. Sui MCP aggregates finalized mainnet fills on demand. It is MCP tool evidence, not a source-checkout utility, live quote, historical mid price, global market price, USD value, user-account history, P&L, cost basis, route recommendation, transaction-building input, or signing-readiness signal.
+- `ui_open_chart` opens an internal read-only DeepBook USDC candle card. The server reads the covered market history and chain fills for the selected pool. The view reads the saved result. The card provides no auto-refresh trading feed, live quote, trading interface, fiat USD value, user-account history, P&L, cost basis, route recommendation, transaction-building input or signing-readiness signal.
 - USDC in DeepBook USDC price-history output is a token-denominated quote asset, not fiat USD and not a USDC/USD peg guarantee.
 - `read_quote_deepbook_action` amounts are raw integer quantities that fit the SDK `u64` quote input, not decimal display amounts. Quote responses include `rawQuote.kind: "deepbook_quote_raw_u64"` from simulated raw `u64` return values.
 - `rawQuote.sourceMoveFunction` names the simulated public entrypoint. `rawQuote.returnValueSourceMoveFunction: "pool::get_quantity_out"` names the official Move function that defines the return-value order.

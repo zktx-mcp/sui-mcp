@@ -1,3 +1,4 @@
+import { bcs } from "@mysten/sui/bcs";
 import { GrpcTypes } from "@mysten/sui/grpc";
 import type { SuiClientTypes } from "@mysten/sui/client";
 import { Transaction } from "@mysten/sui/transactions";
@@ -35,6 +36,15 @@ export function createSuccessfulReviewTimeSimulationClient(
         const transactionData = transaction.getData() as SuiClientTypes.TransactionData;
         const gasObjectId = sourceEffects.gasObjectId === undefined ? transactionData.gasData.payment?.[0]?.objectId : sourceEffects.gasObjectId;
         const gasObjectType = "0x2::coin::Coin<0x2::sui::SUI>";
+        const data = transaction.getData();
+        const swap = data.commands.map((c) => c.MoveCall).find((c) => c && ["swap_exact_quote_for_base","swap_exact_base_for_quote"].includes(c.function));
+        const mockChanges = [{ address: account, coinType: "0x2::sui::SUI", amount: swap ? "-130" : "-1000" }];
+        const minArg = swap?.arguments[3];
+        if (swap && minArg?.$kind === "Input" && data.inputs[minArg.Input]?.Pure) {
+          const min = BigInt(bcs.U64.parse(Buffer.from(data.inputs[minArg.Input]!.Pure!.bytes,"base64")));
+          const type = swap.typeArguments[swap.function === "swap_exact_quote_for_base" ? 0 : 1]!;
+          mockChanges.push({ address: account, coinType: type, amount: (min + 1000n).toString() });
+        }
         return {
           $kind: "Transaction",
           Transaction: {
@@ -43,13 +53,7 @@ export function createSuccessfulReviewTimeSimulationClient(
             epoch: "1",
             timestampMs: null, checkpoint: null,
             status: { success: true, error: null },
-            balanceChanges: [
-              {
-                address: account,
-                coinType: "0x2::sui::SUI",
-                amount: "-1000"
-              }
-            ],
+            balanceChanges: mockChanges,
             effects: {
               bcs: null,
               version: 1,

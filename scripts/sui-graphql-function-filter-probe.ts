@@ -27,10 +27,12 @@ export const FUNCTION_FILTER_PROBE_SAMPLE_SIZE = 50;
 export const FUNCTION_FILTER_PROBE_ROW_LIMIT = 1;
 export const FUNCTION_FILTER_PROBE_STALE_AFTER_DAYS = 90;
 export const FUNCTION_FILTER_PROBE_SCHEMA_PATH = "node_modules/@mysten/sui/src/graphql/generated/schema.graphql";
-export const FUNCTION_FILTER_PROBE_SCHEMA_LINE_RANGES = {
-  transactionFilter: "4199-4235",
-  transactionKindInput: "4279-4289"
-} as const;
+function schemaDefinitionLines(schema: string, definition: string) {
+  const lines = schema.split("\n"), start = lines.findIndex((line) => line.startsWith(definition + " {"));
+  const end = lines.findIndex((line, index) => index > start && line.trim() === "}");
+  if (start < 0 || end < 0) throw new Error(`Schema definition not found: ${definition}`);
+  return `${start + 1}-${end + 1}`;
+}
 
 const REDACTION_MARKERS = {
   digest: "[REDACTED_SAMPLE_DIGEST]",
@@ -107,7 +109,7 @@ type ProbeMetadata = {
   schemaPath: string;
   schemaSha256: string;
   scriptSha256: string;
-  schemaLineRanges: typeof FUNCTION_FILTER_PROBE_SCHEMA_LINE_RANGES;
+  schemaLineRanges: { transactionFilter: string; transactionKindInput: string };
   sampleSize: number;
   rowLimit: 1;
 };
@@ -497,7 +499,8 @@ async function probeMetadata(options: CliOptions): Promise<ProbeMetadata> {
     schemaPath: FUNCTION_FILTER_PROBE_SCHEMA_PATH,
     schemaSha256: createHash("sha256").update(schemaSource).digest("hex"),
     scriptSha256: createHash("sha256").update(scriptSource).digest("hex"),
-    schemaLineRanges: FUNCTION_FILTER_PROBE_SCHEMA_LINE_RANGES,
+    schemaLineRanges: { transactionFilter: schemaDefinitionLines(schemaSource, "input TransactionFilter"),
+      transactionKindInput: schemaDefinitionLines(schemaSource, "enum TransactionKindInput") },
     sampleSize: options.sampleSize,
     rowLimit: FUNCTION_FILTER_PROBE_ROW_LIMIT
   };

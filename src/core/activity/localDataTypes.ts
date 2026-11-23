@@ -12,6 +12,7 @@ export type LocalDataCounts = {
   outcomeUnknownRequests: number;
   externalActivityScans: number;
   externalActivityTransactions: number;
+  externalActivityObservations: number;
   localSettings: number;
 };
 
@@ -31,6 +32,7 @@ export type LocalDataPayload = {
   reviewRequests: ReviewRequestExportRow[];
   externalActivityScans: ExternalActivityScanExportRow[];
   externalActivityTransactions: ExternalActivityTransactionExportRow[];
+  externalActivityObservations: ExternalActivityObservationExportRow[];
   localSettings: LocalSettingExportRow[];
 };
 
@@ -106,7 +108,7 @@ export type ReviewRequestExportRow = {
   account_id: number; transaction_digest: string; review_state_json: string;
   request_status: import("../session/transactionRequest.js").TransactionRequestStatus;
   revision: number; reason: string | null; created_at: string; updated_at: string;
-  signature_verified_at: string | null; submitted_at: string | null;
+  signature_verified_at: string | null; submission_admitted_at: string | null; observation_json: string | null;
 };
 
 export type ExternalActivityScanExportRow = {
@@ -115,6 +117,10 @@ export type ExternalActivityScanExportRow = {
   account_id: number;
   relationship: string;
   input_digest: string | null;
+  function_target: string | null;
+  continuity_json: string | null;
+  source_upper_timestamp: string | null;
+  source_upper_checkpoint: string | null;
   from_checkpoint: string | null;
   to_checkpoint: string | null;
   from_timestamp: string | null;
@@ -127,9 +133,15 @@ export type ExternalActivityScanExportRow = {
   fetched_at: string;
   stored_count: number;
   skipped_count: number;
+  outside_filter_count: number;
+  unconfirmed_relation_count: number;
   has_more: number;
   window_complete: number | null;
   incomplete_reason: string | null;
+};
+
+export type ExternalActivityObservationExportRow = {
+  scan_id: string; account_id: number; digest: string; detail_status: "available" | "missing" | "size_limit";
 };
 
 export type ExternalActivityTransactionExportRow = {
@@ -138,6 +150,7 @@ export type ExternalActivityTransactionExportRow = {
   relationship: string;
   checkpoint: string | null;
   timestamp: string | null;
+  metadata_conflicts: number; status_conflict: number;
   status: string;
   known_sender_account_id: number | null;
   first_scan_id: string;
@@ -153,11 +166,17 @@ export type LocalSettingExportRow = {
   updated_at: string;
 };
 
+export type StoredSettingsValues = {
+  suiGrpcUrl: string | null; suiGraphqlUrl: string | null; walletConnectionChains: WalletChainId[] | null;
+};
+
 export type LocalDataImportPreview = {
   status: "valid";
   format: typeof LOCAL_DATA_EXPORT_FORMAT;
   network: typeof LOCAL_DATA_NETWORK;
   exportedAt: string;
+  currentSettings: StoredSettingsValues;
+  incomingSettings: StoredSettingsValues;
   currentCounts: LocalDataCounts;
   incomingCounts: LocalDataCounts;
   willReplace: true;
@@ -183,9 +202,6 @@ export class LocalDataError extends Error {
 export interface LocalDataService {
   getDataCounts(): Promise<LocalDataCounts>;
   exportLocalData(now?: Date): Promise<LocalDataEnvelope>;
-  previewImportLocalData(input: unknown): Promise<LocalDataImportPreview>;
-  importLocalDataReplace(input: unknown, now?: Date): Promise<LocalDataMutationResult>;
-  resetLocalData(now?: Date): Promise<LocalDataMutationResult>;
 }
 
 type EndpointImportValidator = (url: string) => Promise<void> | void;

@@ -12,8 +12,9 @@ export function receiptForCard(snapshot: CardSnapshot, display?: CardReceiptDisp
       throw new Error("Receipt display details do not match this transaction.");
     }
     if (snapshot.kind === "review" && display.attemptId !== asRecord(result?.request)?.attemptId) throw new Error("Receipt details belong to a different request.");
+    const inputs = new Map(receipt.inputs.map((item) => [item.index, item]));
     for (const value of display.pureInputs) {
-      const input = receipt.inputs.find((item) => item.index === value.index);
+      const input = inputs.get(value.index);
       if (!input || input.kind !== "pure") throw new Error("Receipt input details do not match this transaction.");
       input.bytes = value.bytes;
     }

@@ -1,3 +1,4 @@
+import { isFixtureSharedObject } from "./fixtures/transactionMaterial.js";
 import { describe, expect, it } from "vitest";
 import type { ActionPlan } from "../src/core/action/types.js";
 import { ReadServiceInputError } from "../src/core/read/readServiceTypes.js";
@@ -56,7 +57,7 @@ function withSupportedLifecycleValidator(
 ): ReviewComputationDeps {
   return {
     validateAdapterLifecycle: validateSupportedAdapterLifecycle,
-    adapters: buildSupportedReviewAdapters({ deepbook: wiring })
+    adapters: buildSupportedReviewAdapters({ deepbook: { deepbookDeepBalanceSource: async () => "25000", gasFeePolicySource: async () => ({ enabled: false, additionalTakerFeeRaw: "1000000" }), ...wiring } })
   };
 }
 
@@ -210,8 +211,8 @@ describe("review computation", () => {
     ]);
     const quoteRules = state.checks.find((check) => check.id === "deepbook_quote_policy")!;
     expect(quoteRules).toMatchObject({ status: "pass", source: "quote" });
-    // 50 bps: floor(123456789 * 9950 / 10000) = 122839505 raw units.
-    expect(quoteRules.message).toContain("minimum receive on success 122839505");
+    // 50 bps: 123456789 - floor(123456789 * 50 / 10000) = 122839506 raw units.
+    expect(quoteRules.message).toContain("review minimum receive 122839506");
     expect(quoteRules.message).toContain("DEEP fee 25000");
     expect(state.status).not.toBe("ready_for_wallet_review");
   });
@@ -234,7 +235,7 @@ describe("review computation", () => {
           expect(input.plan.id).toBe("plan_1");
           expect(input.requestedIntent.from.amountDisplay).toBe("1");
           expect(input.poolResolution.poolKey).toBe("SUI_USDC");
-          expect(input.quotePolicy.minOutRaw).toBe("122839505");
+          expect(input.quotePolicy.minOutRaw).toBe("122839506");
 
           const { handle } = await recordTestTransactionMaterial({
             materialStore,
@@ -647,7 +648,7 @@ describe("review computation", () => {
         assetFlow: {
           outgoing: [expect.objectContaining({ role: "input", rawAmount: "1000000000" })],
           expectedIncoming: [expect.objectContaining({ role: "expected_output", rawAmount: "123456789" })],
-          minimumIncoming: [expect.objectContaining({ role: "minimum_output", rawAmount: "122839505" })],
+          minimumIncoming: [expect.objectContaining({ role: "minimum_output", rawAmount: "122839506" })],
           fees: [expect.objectContaining({ role: "fee", rawAmount: "25000" })]
         },
         missingEvidence: [
@@ -703,6 +704,7 @@ describe("review computation", () => {
         },
         deepbookTransactionMaterialProducer: async (input) => {
           const material = await recordTestTransactionMaterial({
+            swap: input,
             materialStore,
             reviewSessionId: "review_1",
             planId: input.plan.id,
@@ -714,7 +716,7 @@ describe("review computation", () => {
           materialDigest = material.digest;
           return {
             status: "completed",
-            evidence: material.handle,
+            evidence: material.handle, ...(material.guardCommand !== undefined ? { guardCommand:material.guardCommand } : {}),
             checks: [
               {
                 id: "deepbook_transaction_material_build_or_verify",
@@ -748,7 +750,7 @@ describe("review computation", () => {
           materialStore,
           objectSource: {
             async getObject(input) {
-              if (input.objectId === `0x${"c".repeat(64)}`) {
+              if (isFixtureSharedObject(input.objectId)) {
                 return {
                   object: {
                     objectId: input.objectId,

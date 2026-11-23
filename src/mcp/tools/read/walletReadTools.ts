@@ -1,3 +1,4 @@
+import { swapQuoteInputFlowSchema } from "../../../core/action/swapQuoteAmounts.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
@@ -10,6 +11,7 @@ import {
   DEEPBOOK_MID_PRICE_DIRECTION,
   DEEPBOOK_MID_PRICE_PRECISION,
   DEFAULT_DEEPBOOK_SIMULATION_SENDER,
+  DEEPBOOK_QUOTE_OUTCOMES,
   INTENT_EVIDENCE_QUANTITY_KIND,
   INTENT_EVIDENCE_TARGET_ASSET_SELECTION_SOURCES,
   SETTLEMENT_ASSET_GROUP_PARITY_QUANTITY_KIND,
@@ -37,7 +39,7 @@ type ResponseWithUserAnswerUse = {
 
 function withToolAvailability<T extends ResponseWithUserAnswerUse>(
   data: T,
-  requiredTools: readonly string[]
+  registeredTools: ReadonlySet<string>, requiredTools: readonly string[]
 ): T & { toolAvailability: ToolAvailability } {
   const preconditionFields = new Set(data.userAnswerUse.preconditionFields ?? []);
   preconditionFields.add("toolAvailability");
@@ -47,7 +49,7 @@ function withToolAvailability<T extends ResponseWithUserAnswerUse>(
       ...data.userAnswerUse,
       preconditionFields: [...preconditionFields]
     },
-    toolAvailability: toolAvailability(requiredTools)
+    toolAvailability: toolAvailability(requiredTools, registeredTools)
   };
 }
 
@@ -372,7 +374,7 @@ const intentEvidenceAggregateSchema = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("unavailable_wallet_balance_scan_incomplete"),
     requiredDisplayAmount: z.string().optional(),
-    reason: z.enum(["wallet_balance_page_limit_exceeded", "wallet_balance_pagination_did_not_advance"])
+    reason: z.enum(["wallet_balance_conflict", "wallet_balance_source_unavailable", "wallet_balance_page_limit_exceeded", "wallet_balance_pagination_did_not_advance"])
   })
 ]);
 
@@ -415,7 +417,7 @@ const intentEvidenceSettlementAssetCoverageSchema = z.discriminatedUnion("status
   z.object({
     status: z.literal("unavailable_wallet_balance_scan_incomplete"),
     requiredDisplayAmount: z.string().optional(),
-    reason: z.enum(["wallet_balance_page_limit_exceeded", "wallet_balance_pagination_did_not_advance"]),
+    reason: z.enum(["wallet_balance_conflict", "wallet_balance_source_unavailable", "wallet_balance_page_limit_exceeded", "wallet_balance_pagination_did_not_advance"]),
     boundary: intentEvidenceSettlementAssetCoverageBoundarySchema
   })
 ]);
@@ -495,7 +497,7 @@ const intentEvidenceResponseSummarySchema = z.object({
   unavailableReason: z
     .enum([
       "asset_group_assets_do_not_share_verified_decimals",
-      "wallet_balance_page_limit_exceeded",
+      "wallet_balance_conflict", "wallet_balance_source_unavailable", "wallet_balance_page_limit_exceeded",
       "wallet_balance_pagination_did_not_advance"
     ])
     .optional(),
@@ -543,7 +545,8 @@ const intentEvidenceCandidateConversionSchema = z.union([
       poolKey: z.string(),
       direction: z.enum(["base_to_quote", "quote_to_base"])
     }),
-    quote: z.object({ status: z.literal("ok") }).loose(),
+    quote: z.object({ status: z.literal("ok"), quoteOutcome: z.enum(DEEPBOOK_QUOTE_OUTCOMES),
+      fetchedAt: fetchedAtSchema, inputFlow: swapQuoteInputFlowSchema }).loose(),
     boundary: z.tuple([
       z.literal("quote_snapshot_only"),
       z.literal("not_final_min_out"),
@@ -576,7 +579,7 @@ const intentEvidenceCandidateConversionSchema = z.union([
 
 const intentEvidenceSettlementAssetGroupSchema = settlementAssetGroupSchema.omit({ excludedAssets: true });
 
-export function registerWalletReadTools(server: McpServer, deps: McpServerDeps): void {
+export function registerWalletReadTools(server: McpServer, deps: McpServerDeps, registeredTools: ReadonlySet<string>): void {
   server.registerTool(
     TOOL_NAMES.readSummarizeWalletAssets,
     {
@@ -597,7 +600,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
         hasNextPage: z.boolean(),
         cursor: z.string().nullable()
       }),
-      annotations: { readOnlyHint: false, openWorldHint: false }
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
     },
     async ({ account, cursor }) => {
       const target = await resolveExplicitOrActiveAccount({ mode: "explicit_or_connected", account }, deps);
@@ -633,7 +636,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
         hasNextPage: z.boolean(),
         cursor: z.string().nullable()
       }),
-      annotations: { readOnlyHint: false, openWorldHint: false }
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
     },
     async ({ account, cursor }) => {
       const target = await resolveExplicitOrActiveAccount({ mode: "explicit_or_connected", account }, deps);
@@ -725,7 +728,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
         responseSummary: settlementAssetGroupParityResponseSummarySchema,
         unsupportedClaims: z.array(settlementAssetGroupParityUnsupportedClaimsSchema)
       }),
-      annotations: { readOnlyHint: true, openWorldHint: false }
+      annotations: { readOnlyHint: true, openWorldHint: true }
     },
     async ({ denomination, referenceAssetSymbol }) => {
       try {
@@ -736,7 +739,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
               referenceAssetSymbol,
               simulationSender: DEFAULT_DEEPBOOK_SIMULATION_SENDER
             }),
-            USD_PARITY_ANSWER_REQUIRED_TOOLS
+            registeredTools, USD_PARITY_ANSWER_REQUIRED_TOOLS
           )
         );
       } catch (error) {
@@ -786,7 +789,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
         selectedTarget: intentEvidenceSelectedTargetSchema.optional(),
         candidateConversions: z.array(intentEvidenceCandidateConversionSchema),
         blockedReasons: z.array(
-          z.enum(["wallet_balance_page_limit_exceeded", "wallet_balance_pagination_did_not_advance"])
+          z.enum(["wallet_balance_conflict", "wallet_balance_source_unavailable", "wallet_balance_page_limit_exceeded", "wallet_balance_pagination_did_not_advance"])
         ),
         responseEvidence: intentEvidenceResponseEvidenceSchema,
         responseSummary: intentEvidenceResponseSummarySchema,
@@ -797,7 +800,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
         inspectedBalancePages: z.number().int().nonnegative(),
         inspectedCoinBalanceCount: z.number().int().nonnegative()
       }),
-      annotations: { readOnlyHint: true, openWorldHint: false }
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
     },
     async ({
       account,
@@ -824,7 +827,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps):
               targetAssetSelectionSource,
               acceptedSourceAssetSymbols
             }),
-            USD_INTENT_ANSWER_REQUIRED_TOOLS
+            registeredTools, USD_INTENT_ANSWER_REQUIRED_TOOLS
           )
         );
       } catch (error) {

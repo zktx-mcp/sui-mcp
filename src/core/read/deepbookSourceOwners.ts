@@ -1,7 +1,7 @@
 import {
-  DEEPBOOK_OFFICIAL_INDEXER_PRICE_CONVENTION,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT
-} from "./deepbookOfficialIndexerSource.js";
+  DEEPBOOK_CANDLE_PRICE_CONVENTION,
+  DEEPBOOK_CANDLE_SOURCE_STATEMENT
+} from "./deepbookCandleSource.js";
 import { DEEPBOOK_SCALAR_UNIT_SOURCE } from "./coinMetadata.js";
 
 export const DEEPBOOK_SOURCE_OWNER_GROUPS = {
@@ -17,8 +17,8 @@ export const DEEPBOOK_SOURCE_OWNER_GROUPS = {
     label: "direct Sui gRPC plus local material stores",
     owns: ["wallet balances", "object facts", "transaction material", "review-time simulation", "receipt reads"]
   },
-  officialIndexerRest: {
-    label: "DeepBookV3 official Indexer REST",
+  onchainFillHistory: {
+    label: "Sui mainnet DeepBook fill aggregation",
     owns: ["USDC-quoted candle history", "price-at-time candles", "chart candles", "account-timeline USDC candle references"]
   },
   localTransactionActivity: {
@@ -32,14 +32,15 @@ export const DEEPBOOK_SOURCE_OWNER_GROUPS = {
 } as const;
 
 export const DEEPBOOK_ANSWER_USE = {
-  officialUsdcCandleHistory: "official_deepbook_usdc_candle_history",
-  officialCandleAvailabilityForRequestedUtcRange: "official_candle_availability_for_the_requested_utc_range",
-  officialUsdcCandleForRequestedTime: "official_deepbook_usdc_candle_for_requested_time",
+  poolUsdcCandleHistory: "pool_bound_usdc_candle_history",
+  candleAvailabilityThroughCutoff: "verified_candle_coverage_through_reported_cutoff",
+  candleAvailabilityForRequestedUtcRange: "verified_candle_coverage_for_the_requested_utc_range",
+  poolUsdcCandleForRequestedTime: "pool_bound_usdc_candle_for_requested_time",
   representativeClosePriceForMatchedCandle: "representative_close_price_for_the_matched_candle"
 } as const;
 
 export const DEEPBOOK_SOURCE_FIELD_VALUES = {
-  officialIndexer: "deepbook_v3_official_indexer",
+  onchainFills: "sui_mainnet_deepbook_order_fills",
   sdkMainnetPackageId: "deepbook_v3_sdk_mainnet_package_id",
   pinnedSdkWhenTargetAssetSelected: "pinned_deepbook_sdk_when_target_asset_selected"
 } as const;
@@ -57,35 +58,35 @@ export const DEEPBOOK_PINNED_SDK_METADATA_SOURCE = {
   unitSource: DEEPBOOK_SCALAR_UNIT_SOURCE
 } as const;
 
-export const DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE = {
-  kind: DEEPBOOK_SOURCE_FIELD_VALUES.officialIndexer,
-  chainRecomputedBySuiMcp: false
+export const DEEPBOOK_CANDLE_SOURCE_BASE = {
+  kind: DEEPBOOK_SOURCE_FIELD_VALUES.onchainFills,
+  chainRecomputedBySuiMcp: true
 } as const;
 
-export const DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE = {
+export const DEEPBOOK_CANDLE_USDC_REFERENCE = {
   quoteAsset: "USDC",
-  priceConvention: DEEPBOOK_OFFICIAL_INDEXER_PRICE_CONVENTION,
+  priceConvention: DEEPBOOK_CANDLE_PRICE_CONVENTION,
   usdcIsFiatUsd: false,
   usdPegGuaranteeAvailable: false
 } as const;
 
-export const DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE = {
-  allowedUse: DEEPBOOK_ANSWER_USE.officialUsdcCandleHistory,
-  source: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind,
-  ...DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE,
-  chainRecomputedBySuiMcp: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.chainRecomputedBySuiMcp
+export const DEEPBOOK_CANDLE_CANDLE_USE = {
+  allowedUse: DEEPBOOK_ANSWER_USE.poolUsdcCandleHistory,
+  source: DEEPBOOK_CANDLE_SOURCE_BASE.kind,
+  ...DEEPBOOK_CANDLE_USDC_REFERENCE,
+  chainRecomputedBySuiMcp: DEEPBOOK_CANDLE_SOURCE_BASE.chainRecomputedBySuiMcp
 } as const;
 
 export const DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING = {
-  officialIndexerCandleData: "DeepBookV3 official Indexer candle data",
-  officialIndexerCandleReferences: "DeepBookV3 official Indexer candle references",
-  officialIndexerUsdcDenominatedCandles: "DeepBookV3 official Indexer USDC-denominated candles",
+  chainCandleData: "pool-bound DeepBook candle data",
+  chainCandleReferences: "pool-bound DeepBook candle references",
+  chainUsdcDenominatedCandles: "pool-bound DeepBook USDC-denominated candles",
   pinnedSdkSnapshots: "pinned-SDK snapshots",
   usdcNotFiatUsdAndNotPeg: "not fiat USD and not a USDC/USD peg guarantee"
 } as const;
 
-export const DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT = {
-  sourceStatement: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT,
+export const DEEPBOOK_CANDLE_RESPONSE_TEXT = {
+  sourceStatement: DEEPBOOK_CANDLE_SOURCE_STATEMENT,
   usdcDisclaimer: `USDC is a token-denominated reference asset here, ${DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.usdcNotFiatUsdAndNotPeg}.`
 } as const;
 

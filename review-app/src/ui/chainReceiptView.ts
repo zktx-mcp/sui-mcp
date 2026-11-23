@@ -11,10 +11,10 @@ export function chainReceiptDetails(receipt: PublicChainReceipt): HTMLElement {
   if (!receipt.effectsStatus.success && receipt.effectsStatus.errorMessage) node.append(row("Failure details", receipt.effectsStatus.errorMessage));
   node.append(element("h3", "ui-section-title", "Network fee breakdown"));
   node.append(element("p", "ui-note", t.receipt.netFeeExplanation));
-  for (const item of gasRows(receipt.gas)) node.append(item);
-  if (receipt.gas.budgetMist !== undefined) node.append(row(t.receipt.gasBudget, suiAmount(receipt.gas.budgetMist)), element("p", "ui-note", t.receipt.gasLimitExplanation));
-  if (receipt.gas.priceMist !== undefined) node.append(row(t.receipt.gasPrice, `${receipt.gas.priceMist} MIST`));
-  if (receipt.gas.paymentObjectId !== undefined) node.append(row(t.receipt.gasPayment, mono(receipt.gas.paymentObjectId)));
+  if (receipt.gas) for (const item of gasRows(receipt.gas)) node.append(item);
+  if (receipt.gas?.budgetMist !== undefined) node.append(row(t.receipt.gasBudget, suiAmount(receipt.gas.budgetMist)), element("p", "ui-note", t.receipt.gasLimitExplanation));
+  if (receipt.gas?.priceMist !== undefined) node.append(row(t.receipt.gasPrice, `${receipt.gas.priceMist} MIST`));
+  if (receipt.gas?.paymentObjectId !== undefined) node.append(row(t.receipt.gasPayment, mono(receipt.gas.paymentObjectId)));
   if (receipt.balanceChanges.length) {
     const balances = section("Balance change records (raw units)");
     for (const change of receipt.balanceChanges) balances.append(detailItem({
@@ -23,8 +23,12 @@ export function chainReceiptDetails(receipt: PublicChainReceipt): HTMLElement {
     }));
     node.append(balances);
   }
-  node.append(inputsSection(receipt.inputs), moveCallsSection(receipt.packageCalls),
-    objectChangesSection(receipt.objectTypes), eventsSection(receipt.events));
+  const missing = receipt.unavailableFields ?? [];
+  if (!missing.includes("inputs")) node.append(inputsSection(receipt.inputs));
+  if (!missing.includes("packageCalls")) node.append(moveCallsSection(receipt.packageCalls));
+  if (!missing.includes("objectTypes")) node.append(objectChangesSection(receipt.objectTypes));
+  if (!missing.includes("events")) node.append(eventsSection(receipt.events));
+  if (missing.length) node.append(row("Unavailable receipt fields", missing.join(", ")));
   return node;
 }
 

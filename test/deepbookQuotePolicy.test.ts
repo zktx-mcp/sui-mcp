@@ -58,7 +58,7 @@ describe("DeepBook quote policy", () => {
       deriveDeepbookSwapQuotePolicy({
         rawQuote: rawQuote(),
         fetchedAt: "2026-05-15T00:00:00.000Z",
-        now: new Date("2026-05-15T00:00:29.000Z"),
+        now: new Date("2026-05-15T00:00:29.999Z"),
         maxSlippageBps: 50
       })
     ).toEqual({
@@ -66,14 +66,15 @@ describe("DeepBook quote policy", () => {
       direction: "base_to_quote",
       feeMode: "deep",
       quoteFresh: true,
+      expiresAt: "2026-05-15T00:00:30.000Z",
       fetchedAt: "2026-05-15T00:00:00.000Z",
-      quoteAgeMs: 29_000,
+      quoteAgeMs: 29_999,
       staleAfterMs: DEEPBOOK_REVIEW_QUOTE_STALE_AFTER_MS,
       maxSlippageBps: 50,
       sourceAmountRaw: "1000000000",
       expectedOutRaw: "123456789",
-      minOutRaw: "122839505",
-      deepAmountRaw: "25000"
+      minOutRaw: "122839506",
+      quotedDeepRequiredRaw: "25000"
     });
   });
 
@@ -98,23 +99,23 @@ describe("DeepBook quote policy", () => {
       status: "ok",
       direction: "quote_to_base",
       expectedOutRaw: "987654321",
-      minOutRaw: "888888888"
+      minOutRaw: "888888889"
     });
   });
 
-  it("requires refresh when the quote is older than the 30 second policy", () => {
+  it("requires refresh when the quote is exactly 30 seconds old", () => {
     expect(
       deriveDeepbookSwapQuotePolicy({
         rawQuote: rawQuote(),
         fetchedAt: "2026-05-15T00:00:00.000Z",
-        now: new Date("2026-05-15T00:00:30.001Z"),
+        now: new Date("2026-05-15T00:00:30.000Z"),
         maxSlippageBps: 50
       })
     ).toMatchObject({
       status: "refresh_required",
       refreshReason: "quote_stale",
       reason: "quote_stale",
-      quoteAgeMs: 30_001,
+      quoteAgeMs: 30_000,
       staleAfterMs: 30_000
     });
   });
@@ -136,7 +137,7 @@ describe("DeepBook quote policy", () => {
     });
   });
 
-  it("treats sub-tolerance future skew as a fresh quote and records the skew", () => {
+  it("requires refresh even for a small future timestamp", () => {
     expect(
       deriveDeepbookSwapQuotePolicy({
         rawQuote: rawQuote(),
@@ -145,14 +146,14 @@ describe("DeepBook quote policy", () => {
         maxSlippageBps: 50
       })
     ).toMatchObject({
-      status: "ok",
-      quoteFresh: true,
+      status: "refresh_required",
+      reason: "quote_timestamp_in_future",
       quoteAgeMs: 0,
       clockSkewMs: 400
     });
   });
 
-  it("defaults the fee mode to deep and passes an explicit input_coin mode through", () => {
+  it("rejects a requested fee mode inconsistent with the quote getter", () => {
     const base = {
       rawQuote: rawQuote(),
       fetchedAt: "2026-05-15T00:00:00.000Z",
@@ -160,10 +161,7 @@ describe("DeepBook quote policy", () => {
       maxSlippageBps: 50
     };
     expect(deriveDeepbookSwapQuotePolicy(base)).toMatchObject({ status: "ok", feeMode: "deep" });
-    expect(deriveDeepbookSwapQuotePolicy({ ...base, feeMode: "input_coin" })).toMatchObject({
-      status: "ok",
-      feeMode: "input_coin"
-    });
+    expect(() => deriveDeepbookSwapQuotePolicy({ ...base, feeMode: "input_coin" })).toThrow(/fee mode/);
   });
 
   it("keeps base_to_quote direction for the input-fee quote source function", () => {
@@ -203,27 +201,18 @@ describe("DeepBook quote policy", () => {
     ).toThrow(/now must be a valid Date/);
   });
 
-  it("fails closed when the raw output cannot produce a positive min-out", () => {
-    expect(
-      deriveDeepbookSwapQuotePolicy({
-        rawQuote: rawQuote({
-          directionalOutput: {
-            raw: "1",
-            symbol: "USDC",
-            coinType: "0x2::usdc::USDC",
-            decimals: 6,
-            unitSource: DEEPBOOK_SCALAR_UNIT_SOURCE
-          }
-        }),
-        fetchedAt: "2026-05-15T00:00:00.000Z",
-        now: new Date("2026-05-15T00:00:01.000Z"),
-        maxSlippageBps: 1000
-      })
-    ).toMatchObject({
-      status: "refresh_required",
-      refreshReason: "quote_unavailable",
-      reason: "zero_min_out"
+  it.each(["1", "101", "9007199254740993"])("keeps output %s within the requested 1 bp tolerance", (raw) => {
+    const quote = rawQuote();
+    const output = { ...quote.quoteOut, raw };
+    const policy = deriveDeepbookSwapQuotePolicy({
+      rawQuote: { ...quote, quoteOut: output, directionalOutput: output }, fetchedAt: "2026-05-15T00:00:00.000Z",
+      now: new Date("2026-05-15T00:00:01.000Z"), maxSlippageBps: 1
     });
+    expect(policy.status).toBe("ok");
+    if (policy.status !== "ok") throw Error("Expected a positive minimum");
+    const expected = BigInt(raw), minimum = BigInt(policy.minOutRaw);
+    expect(10_000n * (expected - minimum)).toBeLessThanOrEqual(expected);
+    expect(10_000n * (expected - minimum + 1n)).toBeGreaterThan(expected);
   });
 
   it("rejects invalid slippage policy inputs before signable quantity derivation", () => {

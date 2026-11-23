@@ -9,8 +9,8 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { describe, expect, it, vi } from "vitest";
-import { registerReadCards } from "../src/mcp-ui/tools.js";
-import { createReadCardStore } from "../src/mcp-ui/readCards.js";
+import { registerCardTools } from "../src/mcp-ui/tools.js";
+import { createCardStore } from "../src/mcp-ui/readCards.js";
 import { createDeepbookUsdcChartService } from "../src/core/read/deepbookUsdcChartService.js";
 import { SqliteActivityStore } from "../src/core/activity/sqliteActivityStore.js";
 import { validateSupportedAdapterLifecycle } from "../src/adapters/adapterLifecycleValidators.js";
@@ -30,7 +30,7 @@ async function harness(ui: boolean, transaction = cardReceiptTransaction, peer?:
   const activityStore = new SqliteActivityStore({ databasePath: join(directory, "state.sqlite"), validateAdapterLifecycle: validateSupportedAdapterLifecycle });
   const accountInputs: unknown[] = []; const receiptInputs: unknown[] = [];
   const chart = createDeepbookUsdcChartService();
-  const cards = createReadCardStore({ chart, records: activityStore.createCardRecordStore(), ownerId: "owner", now: () => new Date(fetchedAt),
+  const cards = createCardStore({ chart, records: activityStore.createCardRecordStore(), ownerId: "owner", now: () => new Date(fetchedAt),
     readService: { summarizeAccountInventory: async (input) => { accountInputs.push(input); return inventory; } },
     publicChainReceiptReader: async (input) => {
       receiptInputs.push(input);
@@ -42,7 +42,7 @@ async function harness(ui: boolean, transaction = cardReceiptTransaction, peer?:
     }
   });
   const server = new McpServer({ name: "card-service-fixture", version: "1" });
-  registerReadCards(server, { cards: { store: cards }, activityStore, logger: { error: vi.fn() } });
+  registerCardTools(server, { cards: { store: cards }, activityStore, logger: { error: vi.fn() } });
   const client = new Client({ name: peer?.name ?? "card-test-client", version: "1" }, { capabilities: peer?.capabilities ?? (ui ? { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } : {}) });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport); await client.connect(clientTransport);
@@ -82,12 +82,15 @@ describe("MCP read cards, persisted results and private display", () => {
     const context = await harness(true);
     try {
       await seedCurrentReadAccount(context.activityStore, `0x${"b".repeat(64)}`, new Date());
-      const creating = await context.client.callTool({ name: CARD_TOOLS.account, arguments: { account } });
+      const upper = "0x" + account.slice(2).toUpperCase();
+      const creating = await context.client.callTool({ name: CARD_TOOLS.account, arguments: { account: upper } });
       const ref = cardReferenceSchema.parse(creating._meta?.[CARD_METADATA_KEY]);
       expect(snapshot(creating)).toMatchObject({ state: "closed", reason: "completed", input: { account }, data: inventory });
       for (let frame = 0; frame < 2; frame++) {
         expect(snapshot(await context.client.callTool({ name: CARD_TOOLS.read, arguments: ref }))).toMatchObject({ input: { account }, data: inventory });
       }
+      const replay = await context.client.callTool({ name: CARD_TOOLS.submit, arguments: { ...ref, revision: 0, input: { account: upper } } });
+      expect(snapshot(replay)).toEqual(snapshot(creating));
       const conflict = await context.client.callTool({ name: CARD_TOOLS.submit, arguments: { ...ref, revision: snapshot(creating).revision, input: { account: `0x${"b".repeat(64)}` } } });
       expect(conflict.isError).toBe(true);
       const denied = await context.client.callTool({ name: CARD_TOOLS.read, arguments: { ...ref, permission: "wrong" } });
@@ -144,17 +147,35 @@ describe("MCP read cards, persisted results and private display", () => {
   it("keeps not-found results distinct and rejects invalid digests before source access", async () => {
     const context = await harness(true);
     try {
-      expect(snapshot(await context.client.callTool({ name: CARD_TOOLS.receipt, arguments: { digest: otherChainReceiptDigest } })).data).toEqual({ status: "not_found" });
+      const created = await context.client.callTool({ name: CARD_TOOLS.receipt, arguments: { digest: otherChainReceiptDigest } });
+      const card = snapshot(created);
+      expect(card.data).toEqual({ status: "not_found" });
       expect((await context.client.callTool({ name: CARD_TOOLS.receipt, arguments: { digest: "bad" } })).isError).toBe(true);
+      const ref = cardReferenceSchema.parse(created._meta?.[CARD_METADATA_KEY]);
+      const invalid = await context.client.callTool({ name: CARD_TOOLS.submit, arguments: {
+        ...ref, revision: card.revision, input: { digest: "bad" }
+      } });
+      expect(invalid.isError).toBe(true);
+      const [error] = invalid.content as { type: string; text: string }[];
+      expect(error?.type).toBe("text");
+      expect(JSON.parse(error!.text)).toMatchObject({ ok: false, error: { kind: "input_invalid", details: { code: "invalid_card_input" } } });
       expect(context.receiptInputs).toHaveLength(1);
     } finally { await context.close(); }
   });
-  it("does not create UI permission or call the source for an ordinary MCP client", async () => {
+  it("reports a declined Chart on the current connection before creating a card", async () => {
     const context = await harness(false);
     try {
-      const result = await context.client.callTool({ name: CARD_TOOLS.account, arguments: { account } });
-      expect(result.isError).toBe(true); expect(result._meta).toBeUndefined();
-      expect(JSON.stringify(result.content)).toContain("ui_unavailable"); expect(context.accountInputs).toEqual([]);
+      const create = vi.spyOn(context.cards, "create");
+      const result = await context.client.callTool({ name: CARD_TOOLS.chart, arguments: { poolName: "SUI_USDC" } });
+      expect(result.isError).toBe(true);
+      expect(result._meta).toBeUndefined();
+      const text = result.content.find(item => item.type === "text");
+      expect(JSON.parse(text?.type === "text" ? text.text : "null")).toMatchObject({
+        ok: false, error: { kind: "ui_unavailable", details: {
+          reason: expect.stringMatching(/this MCP connection.*text\/html;profile=mcp-app/i)
+        } }
+      });
+      expect(create).not.toHaveBeenCalled();
     } finally { await context.close(); }
   });
 });

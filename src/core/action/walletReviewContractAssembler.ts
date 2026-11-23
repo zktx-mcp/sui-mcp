@@ -402,9 +402,11 @@ export function assembleTransactionReviewData(
     gas: gas.gas,
     expiry: expiry.expiry,
     slippageOrMinOut: {
+      ...(quote.enforcement ? { enforcement: quote.enforcement } : {}),
       status: "required_and_verified",
       quoteEvidenceId: quote.quoteEvidenceId,
       quoteEvidenceClaimId: "swap_quote_min_out_claim",
+      maxSlippageSource: quote.maxSlippageSource,
       maxSlippageBps: quote.maxSlippageBps,
       minOutRaw: quote.minimumOutput.raw,
       policySource: "adapter_policy_from_quote_evidence",

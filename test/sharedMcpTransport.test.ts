@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { Client } from "@modelcontextprotocol/client";
+import { Client, ProtocolError } from "@modelcontextprotocol/client";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/client/validators/ajv";
 import { McpServer } from "@modelcontextprotocol/server";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { startSharedServer } from "../src/runtime/shared/server.js";
 import { createInternalMcpHandler } from "../src/runtime/shared/mcpHttp.js";
 import type { ControlIdentity } from "../src/runtime/shared/control.js";
@@ -23,7 +24,7 @@ import type { Transport } from "@modelcontextprotocol/client";
 
 const logger = { info() {}, warn() {}, error() {} };
 it("enforces the complete SDK request-body bound before dispatch and preserves the stdio connection after rejection", async () => {
-  // The adopted SDK 2.3.1 transport contract is 4 MiB per body, including
+  // The adopted SDK 2.4.0 transport contract is 4 MiB per body, including
   // UTF-8 metadata. It is independent of the 64 KiB card-message budget.
   const maximum = 4 * 1024 * 1024;
   const control: ControlIdentity = { key: randomBytes(32).toString("base64url"), databaseId: "1".repeat(64), configurationId: "2".repeat(64) };
@@ -117,6 +118,7 @@ it("preserves a valid external proposal larger than the card/HTTP body limit ove
     expect(Buffer.byteLength(JSON.stringify(proposal))).toBeGreaterThan(MAX_JSON_BODY_BYTES);
     const result = await client.callTool({ name: TOOL_NAMES.actionCreateProposalReview, arguments: { proposal } });
     expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ data: { card: { state: "closed", reason: "completed", revision: 0 } } });
     expect(JSON.stringify(result.structuredContent)).toContain("proposal_review_only");
     expect(JSON.stringify(result.structuredContent)).not.toContain('"transactionBytes":');
   } finally { await client.close(); await proxy.close(); await runtime.close(); f.close(); }
@@ -163,7 +165,7 @@ it("preserves MCP discovery, completions and private results across clients and 
     expect((await a.readResource({ uri: "fixture://state" })).contents).toEqual([{ uri: "fixture://state", text: "first" }]);
     expect((await a.listPrompts()).prompts.some((prompt) => prompt.name === "swap")).toBe(true);
     expect(JSON.stringify(await a.getPrompt({ name: "swap", arguments: { intent: "10 sui to usdc" } }))).toContain("action_start_review");
-    expect((await a.complete({ ref: { type: "ref/prompt", name: "swap" }, argument: { name: "intent", value: "" } })).completion.values).toEqual(["10 sui to usdc", "10 수이 usdc로 환전"]);
+    expect((await a.complete({ ref: { type: "ref/prompt", name: "swap" }, argument: { name: "intent", value: "" } })).completion.values).toEqual(["10 sui to usdc", "swap 10 SUI for USDC"]);
     const result = await b.callTool({ name: "fixture.call", arguments: { hold: false } });
     expect(result.structuredContent).toEqual({ owner: "first" });
     expect(result._meta).toEqual({ privateSentinel: "view-only" });
@@ -185,5 +187,64 @@ it("preserves MCP discovery, completions and private results across clients and 
     await Promise.all(clients.map((client) => client.close()));
     await Promise.all(bridges.map((bridge) => bridge.close()));
     await second?.close(); await first.close();
+  }
+});
+
+it("compiles the requested backend schema on a cold call and still rejects mismatched output", async () => {
+  const control: ControlIdentity = {
+    key: randomBytes(32).toString("base64url"),
+    databaseId: "1".repeat(64),
+    configurationId: "2".repeat(64),
+  };
+  const handler = createInternalMcpHandler(() => {
+    const fixture = new McpServer({ name: "schema-fixture", version: "1" });
+    fixture.registerTool(
+      "fixture.wanted",
+      { inputSchema: { bad: z.boolean() }, outputSchema: z.object({ wantedValue: z.boolean() }) },
+      async () => ({ content: [], structuredContent: { wantedValue: true } }),
+    );
+    fixture.registerTool("fixture.unused", { outputSchema: z.object({ unusedValue: z.string() }) }, async () => ({
+      content: [],
+      structuredContent: { unusedValue: "unused" },
+    }));
+    // Simulate an independently failing producer at the actual transport boundary.
+    fixture.server.setRequestHandler("tools/call", async (req) => {
+      if (req.params.name !== "fixture.wanted") throw new ProtocolError(-32602, "Fixture backend rejected this name.");
+      return { content: [], structuredContent: { wantedValue: req.params.arguments?.bad ? "wrong type" : true } };
+    });
+    return fixture;
+  });
+  const runtime = await startSharedServer({
+    port: 0,
+    control,
+    onError() {},
+    createApplication: async () => ({
+      handleMcp: handler.handle,
+      handleHttp: async (_req, res) => {
+        res.writeHead(404).end();
+      },
+      close: handler.close,
+    }),
+  });
+  const [outer, inner] = InMemoryTransport.createLinkedPair();
+  const proxy = await startSharedStdio({ stdio: inner, port: runtime.port, control, onError() {} });
+  const host = new Client({ name: "schema-host", version: "1" });
+  const compile = vi.spyOn(AjvJsonSchemaValidator.prototype, "getValidator");
+  try {
+    await host.connect(outer);
+    await host.request({ method: "tools/list", params: {} });
+    const call = (name: string, bad = false) =>
+      host.request({ method: "tools/call", params: { name, arguments: { bad } } });
+    expect((await call("fixture.wanted")).structuredContent).toEqual({ wantedValue: true });
+    await expect(call("fixture.wanted", true)).rejects.toThrow(/schema|validation/i);
+    await expect(call("fixture.missing")).rejects.toThrow("Fixture backend rejected this name.");
+    const compiled = compile.mock.calls.map(([schema]) => Object.keys(schema.properties ?? {}));
+    expect(compiled.some((keys) => keys.includes("wantedValue"))).toBe(true);
+    expect(compiled.some((keys) => keys.includes("unusedValue"))).toBe(false);
+  } finally {
+    compile.mockRestore();
+    await host.close();
+    await proxy.close();
+    await runtime.close();
   }
 });

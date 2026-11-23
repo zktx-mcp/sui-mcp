@@ -1,10 +1,11 @@
+import { AccountInventoryReader } from "./accountInventoryReader.js";
+import { DeepbookUsdcPriceService } from "./deepbookUsdcPriceService.js";
 import type { SuiClientTypes } from "@mysten/sui/client";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import {
   COIN_METADATA_CACHE_TTL_MS,
   DEEPBOOK_SCALAR_UNIT_SOURCE,
   assertValidDecimals,
-  decimalsFromScalar,
   parseDisplayAmountToRaw,
   normalizeCoinType,
   type CoinMetadataCache,
@@ -14,29 +15,12 @@ import {
   type WalletBalanceWithUnit
 } from "./coinMetadata.js";
 import { createDeepBookReadClient } from "./deepbookRawQuoteClient.js";
-import {
-  DEFAULT_DEEPBOOK_OFFICIAL_INDEXER_INTERVAL,
-  DeepbookOfficialIndexerSourceError,
-  deepbookOfficialIndexerIntervalDurationMs,
-  parseDeepbookOfficialIndexerInterval,
-  selectDeepbookOfficialIndexerCanonicalUsdcPools,
-  type DeepbookOfficialIndexerCandle,
-  type DeepbookOfficialIndexerFetchSource,
-  type DeepbookOfficialIndexerInterval,
-  type DeepbookOfficialIndexerPool,
-  type DeepbookOfficialIndexerSourceClient
-} from "./deepbookOfficialIndexerSource.js";
-import {
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE,
-  DEEPBOOK_SDK_SIMULATION_SOURCE_BASE,
-  DEEPBOOK_SOURCE_FIELD_VALUES
-} from "./deepbookSourceOwners.js";
+import { DEEPBOOK_SDK_SIMULATION_SOURCE_BASE, DEEPBOOK_SOURCE_FIELD_VALUES } from "./deepbookSourceOwners.js";
 import {
   deepbookUnitForCoinType,
   canonicalDeepbookSymbol,
-  getDeepbookCoinEntryBySymbol,
+  deepbookQuoteAssets,
   getKnownPool,
-  invalidDeepbookScalar,
   listDeepbookTokenRegistry,
   PINNED_DEEPBOOK_COINS,
   resolveDeepbookPoolForSymbols
@@ -52,13 +36,12 @@ import {
   assertDeepbookDisplayBalances,
   assertPositiveInteger,
   assertValidDeepbookMidPrice,
-  assertValidDeepbookQuote,
+  deepbookQuoteInputFlow,
+  deepbookMinimumInputRaw,
+  deepbookQuoteGetters,
   deepbookAccountInventorySource,
   deepbookDisplayQuantitySemantics,
   deepbookMidPriceSemantics,
-  deepbookUsdcPriceHistoryPairFromOfficialPool,
-  deepbookUsdcPriceHistoryQuantitySemantics,
-  deepbookUsdcPriceHistoryResponseSummary,
   deepbookQuoteQuantitySemantics,
   normalizeManagerAddresses,
   normalizeOptionalManagerAddress,
@@ -80,8 +63,6 @@ import {
   deepbookAccountInventoryUserAnswerUse,
   deepbookMidPriceUserAnswerUse,
   deepbookOrderbookUserAnswerUse,
-  deepbookUsdcPriceAtTimeUserAnswerUse,
-  deepbookUsdcPriceHistoryUserAnswerUse,
   deepbookQuoteUserAnswerUse,
   intentEvidenceUserAnswerUse,
   settlementAssetGroupParityUserAnswerUse,
@@ -108,13 +89,10 @@ import {
   DEEPBOOK_MID_PRICE_PRECISION,
   DEEPBOOK_MID_PRICE_TYPE,
   DEEPBOOK_RAW_QUOTE_QUANTITY_KIND,
-  DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS,
   DEFAULT_DEEPBOOK_SIMULATION_SENDER,
   INTENT_EVIDENCE_TARGET_ASSET_SELECTION_SOURCES,
   MAX_DEEPBOOK_ACCOUNT_OPEN_ORDER_IDS,
-  MAX_DEEPBOOK_USDC_PRICE_HISTORY_BARS,
   MAX_DEEPBOOK_ORDERBOOK_TICKS,
-  MAX_WALLET_BALANCE_SCAN_PAGES,
   NOT_INSPECTED_ASSET_CLASSES,
   ReadServiceCacheError,
   ReadServiceInputError,
@@ -127,24 +105,12 @@ import {
   type DeepbookDisplayQuoteSummary,
   type DeepbookMidPriceSummary,
   type DeepbookOrderbookSummary,
-  type DeepbookRawQuoteAmount,
   type DeepbookRawQuoteEvidence,
+  type DeepbookRawQuoteInput,
   type DeepbookRawQuoteReturnValues,
   type DeepbookQuoteSummary,
   type DeepbookUsdcPriceAtTimeInput,
-  type DeepbookUsdcPriceAtTimeMatch,
-  type DeepbookUsdcPriceAtTimeSummary,
-  type DeepbookUsdcPriceAtTimeTarget,
-  type DeepbookUsdcPriceHistoryBar,
   type DeepbookUsdcPriceHistoryInput,
-  type DeepbookUsdcPriceHistoryPair,
-  type DeepbookUsdcPriceHistoryQuantitySemantics,
-  type DeepbookUsdcPriceHistoryRange,
-  type DeepbookUsdcPriceHistoryResponseSummary,
-  type DeepbookUsdcPriceHistorySelector,
-  type DeepbookUsdcPriceHistorySource,
-  type DeepbookUsdcPriceHistorySummary,
-  type DeepbookUsdcPriceHistoryUnsupportedClaim,
   type DeepbookTokenRegistryEntry,
   type IntentEvidenceBlockedReason,
   type IntentEvidenceCandidateConversion,
@@ -166,12 +132,8 @@ import {
   type SuiReadCoreClient,
   type SuiReadServiceOptions,
   type WalletAssetClassificationSummary,
-  type AccountInventorySummary,
-  type AccountNft,
-  type AccountObjectGroup,
   type WalletBalanceInput,
-  type WalletBalanceSummary
-,
+  type WalletBalanceSummary,
   type DeepbookQuoteFeeMode
 } from "./readServiceTypes.js";
 
@@ -186,304 +148,6 @@ type WalletBalanceClassificationScan = {
   blockedReason?: IntentEvidenceBlockedReason | undefined;
 };
 
-const DEFAULT_DEEPBOOK_USDC_PRICE_AT_TIME_MAX_DISTANCE_MINUTES = 360;
-
-// Account inventory object scan: pages of listOwnedObjects to walk (50 objects per
-// page) and the max NFTs to surface. A coin-heavy account may truncate before all
-// objects are seen; the snapshot flags that rather than paging unbounded.
-const ACCOUNT_OBJECT_SCAN_PAGES = 6;
-const ACCOUNT_NFT_LIMIT = 60;
-
-const DEEPBOOK_USDC_PRICE_HISTORY_RESPONSE_SUMMARY = {
-  ...deepbookUsdcPriceHistoryResponseSummary()
-} as const satisfies DeepbookUsdcPriceHistoryResponseSummary;
-
-function deepbookUsdcPriceHistorySelector(input: DeepbookUsdcPriceHistoryInput): DeepbookUsdcPriceHistorySelector {
-  const selectors = [
-    input.poolName === undefined ? undefined : ({ kind: "pool_name", value: input.poolName.trim().toUpperCase() } as const),
-    input.assetSymbol === undefined
-      ? undefined
-      : ({ kind: "asset_symbol", value: input.assetSymbol.trim().toUpperCase() } as const),
-    input.coinType === undefined
-      ? undefined
-      : ({ kind: "coin_type", value: normalizedHistoryCoinType(input.coinType) } as const)
-  ].filter((selector): selector is DeepbookUsdcPriceHistorySelector => selector !== undefined && selector.value.length > 0);
-
-  if (selectors.length !== 1) {
-    throw new ReadServiceInputError(
-      "input_invalid",
-      "Provide exactly one DeepBook USDC history selector: poolName, assetSymbol, or coinType",
-      {
-        fields: ["poolName", "assetSymbol", "coinType"],
-        providedSelectorCount: selectors.length
-      }
-    );
-  }
-  return selectors[0]!;
-}
-
-function normalizedHistoryCoinType(value: string): string {
-  try {
-    return normalizeCoinType(value);
-  } catch {
-    throw new ReadServiceInputError("input_invalid", "coinType must be a valid Sui coin type", {
-      field: "coinType",
-      value
-    });
-  }
-}
-
-function parseDeepbookUsdcPriceHistoryInterval(
-  value: DeepbookOfficialIndexerInterval | undefined
-): DeepbookOfficialIndexerInterval {
-  if (value === undefined) {
-    return DEFAULT_DEEPBOOK_OFFICIAL_INDEXER_INTERVAL;
-  }
-  if (typeof value !== "string") {
-    throw new ReadServiceInputError("input_invalid", "interval must be a supported DeepBook official Indexer interval", {
-      field: "interval",
-      value
-    });
-  }
-  try {
-    return parseDeepbookOfficialIndexerInterval(value);
-  } catch (error) {
-    if (error instanceof DeepbookOfficialIndexerSourceError && error.reason === "invalid_payload") {
-      throw new ReadServiceInputError("input_invalid", "interval must be a supported DeepBook official Indexer interval", {
-        field: "interval",
-        value
-      });
-    }
-    throw error;
-  }
-}
-
-function deepbookUsdcPriceHistoryRange(
-  start: string,
-  end: string,
-  interval: DeepbookOfficialIndexerInterval | undefined
-): DeepbookUsdcPriceHistoryRange {
-  const startDate = parseUtcIsoHistoryDate(start, "start");
-  const endDate = parseUtcIsoHistoryDate(end, "end");
-  const durationMs = endDate.getTime() - startDate.getTime();
-  if (durationMs <= 0) {
-    throw new ReadServiceInputError("input_invalid", "end must be after start for DeepBook USDC history", {
-      start,
-      end
-    });
-  }
-  const selectedInterval = parseDeepbookUsdcPriceHistoryInterval(interval);
-  const intervalDurationMs = deepbookOfficialIndexerIntervalDurationMs(selectedInterval);
-  return {
-    start: startDate.toISOString(),
-    end: endDate.toISOString(),
-    timeZone: "UTC",
-    interval: selectedInterval,
-    intervalDurationMs,
-    maxBars: MAX_DEEPBOOK_USDC_PRICE_HISTORY_BARS,
-    requestedCandleSlots: Math.ceil(durationMs / intervalDurationMs)
-  };
-}
-
-function deepbookUsdcPriceAtTimeTarget(input: DeepbookUsdcPriceAtTimeInput): DeepbookUsdcPriceAtTimeTarget {
-  const target = parseUtcIsoHistoryDate(input.targetTime, "targetTime");
-  const maxDistanceMinutes = input.maxDistanceMinutes ?? DEFAULT_DEEPBOOK_USDC_PRICE_AT_TIME_MAX_DISTANCE_MINUTES;
-  if (!Number.isInteger(maxDistanceMinutes) || maxDistanceMinutes <= 0) {
-    throw new ReadServiceInputError("input_invalid", "maxDistanceMinutes must be a positive integer", {
-      field: "maxDistanceMinutes",
-      value: input.maxDistanceMinutes
-    });
-  }
-  const interval = parseDeepbookUsdcPriceHistoryInterval(input.interval);
-  const intervalDurationMs = deepbookOfficialIndexerIntervalDurationMs(interval);
-  const intervalMinutes = intervalDurationMs / 60_000;
-  const maxSearchMinutes = Math.floor(
-    (MAX_DEEPBOOK_USDC_PRICE_HISTORY_BARS * intervalMinutes -
-      intervalMinutes) /
-      2
-  );
-  if (maxDistanceMinutes > maxSearchMinutes) {
-    throw new ReadServiceInputError("input_invalid", "maxDistanceMinutes exceeds the supported DeepBook USDC search window", {
-      field: "maxDistanceMinutes",
-      maxDistanceMinutes,
-      maxSupportedMinutes: maxSearchMinutes
-    });
-  }
-
-  const targetMs = target.getTime();
-  const start = new Date(targetMs - maxDistanceMinutes * 60 * 1000);
-  const end = new Date(targetMs + maxDistanceMinutes * 60 * 1000 + intervalDurationMs);
-  return {
-    targetTime: target.toISOString(),
-    searchWindow: {
-      start: start.toISOString(),
-      end: end.toISOString(),
-      maxDistanceMinutes
-    }
-  };
-}
-
-function parseUtcIsoHistoryDate(value: string, field: "start" | "end" | "targetTime"): Date {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    throw new ReadServiceInputError("input_invalid", `${field} must be an ISO UTC timestamp`, { field, value });
-  }
-  const date = new Date(timestamp);
-  if (date.toISOString() !== value) {
-    throw new ReadServiceInputError("input_invalid", `${field} must be a canonical ISO UTC timestamp`, {
-      field,
-      value
-    });
-  }
-  return date;
-}
-
-function deepbookUsdcPriceHistoryMatchingPairs(
-  usdcPools: DeepbookOfficialIndexerPool[],
-  selector: DeepbookUsdcPriceHistorySelector
-): DeepbookOfficialIndexerPool[] {
-  switch (selector.kind) {
-    case "pool_name":
-      return usdcPools.filter((pool) => pool.pool_name.toUpperCase() === selector.value);
-    case "asset_symbol":
-      return usdcPools.filter((pool) => pool.base_asset_symbol.toUpperCase() === selector.value);
-    case "coin_type":
-      return usdcPools.filter((pool) => normalizeCoinType(pool.base_asset_id) === selector.value);
-  }
-}
-
-function deepbookUsdcPriceHistorySource(input: {
-  poolSource: DeepbookOfficialIndexerFetchSource;
-  candleSource: DeepbookOfficialIndexerFetchSource;
-}): DeepbookUsdcPriceHistorySource {
-  return {
-    kind: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind,
-    baseUrl: input.poolSource.baseUrl,
-    sourceStatement: input.candleSource.sourceStatement,
-    poolList: {
-      url: input.poolSource.url,
-      fetchedAt: input.poolSource.fetchedAt
-    },
-    candles: {
-      url: input.candleSource.url,
-      fetchedAt: input.candleSource.fetchedAt,
-      poolName: input.candleSource.poolName ?? "",
-      interval: input.candleSource.interval ?? DEFAULT_DEEPBOOK_OFFICIAL_INDEXER_INTERVAL,
-      startTimeMs: input.candleSource.startTimeMs ?? 0,
-      endTimeMs: input.candleSource.endTimeMs ?? 0,
-      limit: input.candleSource.limit ?? MAX_DEEPBOOK_USDC_PRICE_HISTORY_BARS
-    },
-    chainRecomputedBySuiMcp: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.chainRecomputedBySuiMcp
-  };
-}
-
-function deepbookOfficialSourceUnavailableReason(
-  error: unknown,
-  phase: "pools" | "candles"
-): "pool_list_unavailable" | "candle_fetch_failed" | "official_indexer_invalid_payload" {
-  if (error instanceof DeepbookOfficialIndexerSourceError && error.reason === "invalid_payload") {
-    return "official_indexer_invalid_payload";
-  }
-  return phase === "pools" ? "pool_list_unavailable" : "candle_fetch_failed";
-}
-
-function deepbookUsdcPriceAtTimeMatch(input: {
-  target: DeepbookUsdcPriceAtTimeTarget;
-  pair: DeepbookUsdcPriceHistoryPair;
-  bars: DeepbookUsdcPriceHistoryBar[];
-}): { candle: DeepbookOfficialIndexerCandle; match: DeepbookUsdcPriceAtTimeMatch } | undefined {
-  const targetMs = Date.parse(input.target.targetTime);
-  const exact = input.bars.find((candle) => {
-    const startMs = Date.parse(candle.start);
-    const endMs = Date.parse(candle.end);
-    return targetMs >= startMs && targetMs < endMs;
-  });
-  if (exact !== undefined) {
-    return {
-      candle: exact,
-      match: deepbookUsdcPriceAtTimeMatchFromBar({
-        kind: "exact_bucket",
-        distanceMinutes: 0,
-        pair: input.pair,
-        candle: exact
-      })
-    };
-  }
-
-  const candidates = input.bars
-    .flatMap((candle): Array<{
-      candle: DeepbookOfficialIndexerCandle;
-      kind: "nearest_before" | "nearest_after";
-      distanceMinutes: number;
-    }> => {
-      const startMs = Date.parse(candle.start);
-      const endMs = Date.parse(candle.end);
-      if (endMs <= targetMs) {
-        return [
-          {
-            candle,
-            kind: "nearest_before",
-            distanceMinutes: (targetMs - endMs) / 60_000
-          }
-        ];
-      }
-      if (startMs > targetMs) {
-        return [
-          {
-            candle,
-            kind: "nearest_after",
-            distanceMinutes: (startMs - targetMs) / 60_000
-          }
-        ];
-      }
-      return [];
-    })
-    .filter((candidate) => candidate.distanceMinutes <= input.target.searchWindow.maxDistanceMinutes)
-    .sort((left, right) => {
-      const byDistance = left.distanceMinutes - right.distanceMinutes;
-      if (byDistance !== 0) {
-        return byDistance;
-      }
-      if (left.kind !== right.kind) {
-        return left.kind === "nearest_before" ? -1 : 1;
-      }
-      return Date.parse(left.candle.start) - Date.parse(right.candle.start);
-    });
-
-  const best = candidates[0];
-  if (best === undefined) {
-    return undefined;
-  }
-  return {
-    candle: best.candle,
-    match: deepbookUsdcPriceAtTimeMatchFromBar({
-      kind: best.kind,
-      distanceMinutes: best.distanceMinutes,
-      pair: input.pair,
-      candle: best.candle
-    })
-  };
-}
-
-function deepbookUsdcPriceAtTimeMatchFromBar(input: {
-  kind: DeepbookUsdcPriceAtTimeMatch["kind"];
-  distanceMinutes: number;
-  pair: DeepbookUsdcPriceHistoryPair;
-  candle: DeepbookOfficialIndexerCandle;
-}): DeepbookUsdcPriceAtTimeMatch {
-  return {
-    kind: input.kind,
-    distanceMinutes: Number(input.distanceMinutes.toFixed(6)),
-    representativePrice: {
-      field: "matchedCandle.close",
-      value: input.candle.close,
-      quoteAsset: "USDC",
-      baseAssetSymbol: input.pair.baseAsset.symbol,
-      priceConvention: "USDC_PER_BASE"
-    }
-  };
-}
-
 export class SuiReadService {
   readonly #client: SuiReadCoreClient;
   readonly #network: "mainnet";
@@ -493,7 +157,8 @@ export class SuiReadService {
   readonly #deepbookFactory: (simulationSender: string, options?: DeepBookFactoryOptions) => DeepBookReadClient;
   readonly #coinMetadataTtlMs: number;
   readonly #deepbookCoins: DeepBookCoinRegistry;
-  readonly #deepbookOfficialIndexerSource: DeepbookOfficialIndexerSourceClient | undefined;
+  readonly prices: DeepbookUsdcPriceService;
+  readonly #accounts: AccountInventoryReader;
 
   constructor(options: SuiReadServiceOptions) {
     this.#client = options.client;
@@ -514,7 +179,8 @@ export class SuiReadService {
             ? {}
             : { balanceManagers: factoryOptions.balanceManagers })
         }));
-    this.#deepbookOfficialIndexerSource = options.deepbookOfficialIndexerSource;
+    this.prices = new DeepbookUsdcPriceService(options.deepbookCandleSource, () => this.#fetchedAt());
+    this.#accounts = new AccountInventoryReader(options.client, balance => this.#withUnit(balance), () => this.#fetchedAt());
   }
 
   async summarizeWalletAssets(input: WalletBalanceInput): Promise<WalletBalanceSummary> {
@@ -565,101 +231,7 @@ export class SuiReadService {
   // balances (with the held-as split), owned NFTs, and other owned objects grouped
   // by type. Each part is read independently so a missing name or object scan never
   // blocks the balances.
-  async summarizeAccountInventory(input: WalletBalanceInput): Promise<AccountInventorySummary> {
-    const [walletSummary, name, owned] = await Promise.all([
-      this.summarizeWalletAssets(input),
-      this.#resolveAccountName(input.account),
-      this.#scanOwnedObjects(input.account)
-    ]);
-    return {
-      status: "ok",
-      account: input.account,
-      fetchedAt: this.#fetchedAt(),
-      name,
-      // Drop coins whose total balance is zero — an emptied coin object or
-      // accumulator residue is not a holding worth listing on the account page.
-      balances: walletSummary.balances.filter((balance) => {
-        try {
-          return BigInt(balance.balance) !== 0n;
-        } catch {
-          return true;
-        }
-      }),
-      nfts: owned.nfts,
-      objectGroups: owned.objectGroups,
-      scannedObjects: owned.scanned,
-      objectsTruncated: owned.truncated
-    };
-  }
-
-  // The account's primary SuiNS name, or null when it has none (the lookup throws
-  // NOT_FOUND) or the call fails — a name is convenience, never gating.
-  async #resolveAccountName(account: string): Promise<string | null> {
-    const resolve = this.#client.core.defaultNameServiceName;
-    if (!resolve) {
-      return null;
-    }
-    try {
-      const response = await resolve.call(this.#client.core, { address: account });
-      return response.data.name ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  // Enumerate owned objects (capped) and split them: Coin objects belong to the
-  // balance view, objects carrying a Display name/image are NFTs, and the rest are
-  // grouped by Move type. listOwnedObjects returns all three intermixed, so a
-  // coin-heavy account may truncate before reaching every NFT.
-  async #scanOwnedObjects(
-    account: string
-  ): Promise<{ nfts: AccountNft[]; objectGroups: AccountObjectGroup[]; scanned: number; truncated: boolean }> {
-    const nfts: AccountNft[] = [];
-    const groups = new Map<string, number>();
-    const core = this.#client.core;
-    const listOwnedObjects = core.listOwnedObjects;
-    if (!listOwnedObjects) {
-      return { nfts, objectGroups: [], scanned: 0, truncated: false };
-    }
-    let cursor: string | undefined;
-    let scanned = 0;
-    let truncated = false;
-    for (let page = 0; page < ACCOUNT_OBJECT_SCAN_PAGES; page += 1) {
-      const response = await listOwnedObjects.call(core, {
-        owner: account,
-        include: { display: true },
-        ...(cursor === undefined ? {} : { cursor })
-      });
-      for (const object of response.objects ?? []) {
-        scanned += 1;
-        const type = object.type ?? "";
-        if (type.includes("::coin::Coin<")) {
-          continue;
-        }
-        const output = object.display?.output;
-        const name = typeof output?.name === "string" ? output.name : undefined;
-        const imageUrl = typeof output?.image_url === "string" ? output.image_url : undefined;
-        if (name !== undefined || imageUrl !== undefined) {
-          if (nfts.length < ACCOUNT_NFT_LIMIT) {
-            nfts.push({ objectId: object.objectId, type, name, imageUrl });
-          }
-        } else {
-          groups.set(type, (groups.get(type) ?? 0) + 1);
-        }
-      }
-      if (!response.hasNextPage) {
-        break;
-      }
-      cursor = response.cursor ?? undefined;
-      if (page === ACCOUNT_OBJECT_SCAN_PAGES - 1) {
-        truncated = true;
-      }
-    }
-    const objectGroups = [...groups.entries()]
-      .map(([type, count]) => ({ type, count }))
-      .sort((left, right) => right.count - left.count || left.type.localeCompare(right.type));
-    return { nfts, objectGroups, scanned, truncated };
-  }
+  summarizeAccountInventory(input: WalletBalanceInput) { return this.#accounts.summarizeAccountInventory(input); }
 
   listSettlementAssetGroups(): SettlementAssetGroupListSummary {
     return {
@@ -1036,259 +608,72 @@ export class SuiReadService {
     };
   }
 
-  async getDeepbookUsdcPriceHistory(input: DeepbookUsdcPriceHistoryInput): Promise<DeepbookUsdcPriceHistorySummary> {
-    const fetchedAt = this.#fetchedAt();
-    const selector = deepbookUsdcPriceHistorySelector(input);
-    const range = deepbookUsdcPriceHistoryRange(input.start, input.end, input.interval);
-    const common = {
-      fetchedAt,
-      requested: { selector, range },
-      userAnswerUse: deepbookUsdcPriceHistoryUserAnswerUse(),
-      quantitySemantics: deepbookUsdcPriceHistoryQuantitySemantics(),
-      responseSummary: DEEPBOOK_USDC_PRICE_HISTORY_RESPONSE_SUMMARY,
-      unsupportedClaims: [...DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS]
-    } satisfies {
-      fetchedAt: string;
-      requested: { selector: DeepbookUsdcPriceHistorySelector; range: DeepbookUsdcPriceHistoryRange };
-      userAnswerUse: ReturnType<typeof deepbookUsdcPriceHistoryUserAnswerUse>;
-      quantitySemantics: DeepbookUsdcPriceHistoryQuantitySemantics;
-      responseSummary: DeepbookUsdcPriceHistoryResponseSummary;
-      unsupportedClaims: DeepbookUsdcPriceHistoryUnsupportedClaim[];
-    };
+  priceHistoryReaderForRequest(signal?: AbortSignal, baseTypes?: readonly string[]) {
+    return this.prices.priceHistoryReaderForRequest(signal, baseTypes);
+  }
+  async getDeepbookUsdcPriceHistory(input: DeepbookUsdcPriceHistoryInput, signal?: AbortSignal) { return this.prices.prepareHistory(input).read(signal); }
+  async getDeepbookUsdcPriceAtTime(input: DeepbookUsdcPriceAtTimeInput, signal?: AbortSignal) { return this.prices.preparePoint(input).read(signal); }
 
-    if (range.requestedCandleSlots > MAX_DEEPBOOK_USDC_PRICE_HISTORY_BARS) {
-      return {
-        status: "unsupported_range",
-        ...common,
-        reason: "requested_range_exceeds_max_bars"
-      };
-    }
-
-    if (this.#deepbookOfficialIndexerSource === undefined) {
-      return {
-        status: "source_unavailable",
-        ...common,
-        reason: "official_indexer_not_configured"
-      };
-    }
-
-    let poolResult: Awaited<ReturnType<DeepbookOfficialIndexerSourceClient["fetchPools"]>>;
-    try {
-      poolResult = await this.#deepbookOfficialIndexerSource.fetchPools();
-    } catch (error) {
-      return {
-        status: "source_unavailable",
-        ...common,
-        reason: deepbookOfficialSourceUnavailableReason(error, "pools")
-      };
-    }
-
-    const usdcPools = selectDeepbookOfficialIndexerCanonicalUsdcPools(poolResult.pools);
-    const matchingPools = deepbookUsdcPriceHistoryMatchingPairs(usdcPools, selector);
-    if (matchingPools.length !== 1) {
-      return {
-        status: "unsupported_pair",
-        ...common,
-        reason:
-          matchingPools.length === 0
-            ? "selector_not_in_official_indexer"
-            : "selector_resolves_to_multiple_usdc_pools",
-        matchingPoolNames: matchingPools.map((pool) => pool.pool_name),
-        availablePoolNames: usdcPools.map((pool) => pool.pool_name)
-      };
-    }
-
-    const pool = matchingPools[0]!;
-    const outputPair = deepbookUsdcPriceHistoryPairFromOfficialPool(pool);
-    let candleResult: Awaited<ReturnType<DeepbookOfficialIndexerSourceClient["fetchCandles"]>>;
-    try {
-      candleResult = await this.#deepbookOfficialIndexerSource.fetchCandles({
-        poolName: pool.pool_name,
-        interval: range.interval,
-        startTimeMs: Date.parse(range.start),
-        endTimeMs: Date.parse(range.end),
-        limit: MAX_DEEPBOOK_USDC_PRICE_HISTORY_BARS
-      });
-    } catch (error) {
-      return {
-        status: "source_unavailable",
-        ...common,
-        reason: deepbookOfficialSourceUnavailableReason(error, "candles"),
-        pair: outputPair,
-        source: {
-          kind: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind,
-          baseUrl: poolResult.source.baseUrl,
-          sourceStatement: poolResult.source.sourceStatement,
-          poolList: {
-            url: poolResult.source.url,
-            fetchedAt: poolResult.source.fetchedAt
-          },
-          chainRecomputedBySuiMcp: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.chainRecomputedBySuiMcp
-        }
-      };
-    }
-
-    const source = deepbookUsdcPriceHistorySource({
-      poolSource: poolResult.source,
-      candleSource: candleResult.source
-    });
-
-    const startMs = Date.parse(range.start);
-    const endMs = Date.parse(range.end);
-    const bars = candleResult.candles
-      .filter((candle) => {
-        const candleStart = Date.parse(candle.start);
-        return candleStart >= startMs && candleStart < endMs;
-      })
-      .sort((left, right) => Date.parse(left.start) - Date.parse(right.start));
-    const candleAvailability = bars.length === 0 ? "no_candles_in_range" : "available";
-
-    return {
-      status: "ok",
-      ...common,
-      pair: outputPair,
-      candleAvailability,
-      barCount: bars.length,
-      bars,
-      source
-    };
+  async quoteDeepbookAction(input: DeepbookRawQuoteInput): Promise<DeepbookQuoteSummary> {
+    return this.#readDeepbookQuote(input, deepbookQuoteAssets(input.poolKey, this.#deepbookCoins));
   }
 
-  async getDeepbookUsdcPriceAtTime(input: DeepbookUsdcPriceAtTimeInput): Promise<DeepbookUsdcPriceAtTimeSummary> {
-    const target = deepbookUsdcPriceAtTimeTarget(input);
-    const history = await this.getDeepbookUsdcPriceHistory({
-      poolName: input.poolName,
-      assetSymbol: input.assetSymbol,
-      coinType: input.coinType,
-      interval: input.interval,
-      start: target.searchWindow.start,
-      end: target.searchWindow.end
-    });
-    const common = {
-      fetchedAt: history.fetchedAt,
-      target,
-      requested: history.requested,
-      quantitySemantics: history.quantitySemantics,
-      responseSummary: history.responseSummary,
-      unsupportedClaims: history.unsupportedClaims
-    };
-
-    if (history.status === "unsupported_pair") {
-      return {
-        status: "unsupported_pair",
-        ...common,
-        reason: history.reason,
-        matchingPoolNames: history.matchingPoolNames,
-        availablePoolNames: history.availablePoolNames,
-        userAnswerUse: deepbookUsdcPriceAtTimeUserAnswerUse(false)
-      };
-    }
-    if (history.status === "unsupported_range") {
-      return {
-        status: "unsupported_range",
-        ...common,
-        reason: history.reason,
-        userAnswerUse: deepbookUsdcPriceAtTimeUserAnswerUse(false)
-      };
-    }
-    if (history.status === "source_unavailable") {
-      return {
-        status: "source_unavailable",
-        ...common,
-        reason: history.reason,
-        pair: history.pair,
-        source: history.source,
-        userAnswerUse: deepbookUsdcPriceAtTimeUserAnswerUse(false)
-      };
-    }
-
-    const matched = deepbookUsdcPriceAtTimeMatch({
-      target,
-      pair: history.pair,
-      bars: history.bars
-    });
-    if (matched === undefined) {
-      return {
-        status: "no_price_in_search_window",
-        ...common,
-        pair: history.pair,
-        candleAvailability: history.candleAvailability,
-        source: history.source,
-        userAnswerUse: deepbookUsdcPriceAtTimeUserAnswerUse(false)
-      };
-    }
-
-    return {
-      status: "ok",
-      ...common,
-      pair: history.pair,
-      match: matched.match,
-      matchedCandle: matched.candle,
-      candleAvailability: history.candleAvailability,
-      source: history.source,
-      userAnswerUse: deepbookUsdcPriceAtTimeUserAnswerUse(true)
-    };
-  }
-
-  async quoteDeepbookAction(input: {
-    poolKey: string;
-    direction: QuoteDirection;
-    amountRaw: string;
-    simulationSender: string;
-    feeMode?: DeepbookQuoteFeeMode | undefined;
-  }): Promise<DeepbookQuoteSummary> {
-    const pool = getKnownPool(input.poolKey);
+  async #readDeepbookQuote(
+    input: DeepbookRawQuoteInput,
+    assets: ReturnType<typeof deepbookQuoteAssets>
+  ): Promise<DeepbookQuoteSummary> {
     const amount = parseRawAmount(input.amountRaw);
     const feeMode = input.feeMode ?? "deep";
-
+    const getter = deepbookQuoteGetters[input.direction][feeMode];
     const deepbook = this.#deepbookFactory(input.simulationSender);
-    if (feeMode === "input_coin" && (!deepbook.getQuoteQuantityOutInputFeeRaw || !deepbook.getBaseQuantityOutInputFeeRaw)) {
-      throw new ReadServiceInputError("quote_unavailable", "Input-fee DeepBook quoting is not supported by this read client", {
-        poolKey: input.poolKey
+    const read = deepbook[`${getter.method}Raw`];
+    if (!read) {
+      throw new ReadServiceInputError("quote_unavailable", "DeepBook quote getter is unavailable", {
+        poolKey: input.poolKey, method: getter.method
       });
     }
-    const rawReturnValues =
-      input.direction === "base_to_quote"
-        ? feeMode === "input_coin"
-          ? await deepbook.getQuoteQuantityOutInputFeeRaw!(input.poolKey, amount)
-          : await deepbook.getQuoteQuantityOutRaw(input.poolKey, amount)
-        : feeMode === "input_coin"
-          ? await deepbook.getBaseQuantityOutInputFeeRaw!(input.poolKey, amount)
-          : await deepbook.getBaseQuantityOutRaw(input.poolKey, amount);
+    const [{ rawReturnValues, fetchedAt }, gasFeePolicy] = await Promise.all([
+      read.call(deepbook, input.poolKey, amount).then(rawReturnValues => ({
+        rawReturnValues, fetchedAt: this.#fetchedAt()
+      })),
+      deepbook.gasFeePolicy?.(input.poolKey).then(
+        policy => ({ status: policy.enabled ? "enabled" as const : "disabled" as const, additionalTakerFeeRaw: policy.additionalTakerFeeRaw }),
+        () => ({ status: "unavailable" as const }))
+    ]);
     const rawQuote = this.#toDeepbookRawQuoteEvidence({
-      poolKey: input.poolKey,
-      direction: input.direction,
-      amountRaw: input.amountRaw,
-      rawReturnValues,
-      feeMode
+      assets, direction: input.direction, amountRaw: input.amountRaw, feeMode,
+      rawReturnValues: gasFeePolicy && rawReturnValues.poolTerms ? { ...rawReturnValues, poolTerms: { ...rawReturnValues.poolTerms, gasFeePolicy } } : rawReturnValues
     });
-    const quote = assertValidDeepbookQuote(
-      input.poolKey,
-      input.direction,
-      toDeepbookDisplayQuoteFromRaw(rawReturnValues, this.#deepbookQuoteUnits(pool.baseCoin, pool.quoteCoin))
-    );
-
+    const quote = toDeepbookDisplayQuoteFromRaw(rawReturnValues, {
+      baseDecimals: rawQuote.baseOut.decimals,
+      quoteDecimals: rawQuote.quoteOut.decimals,
+      deepDecimals: rawQuote.deepRequired.decimals
+    });
+    const inputFlow = deepbookQuoteInputFlow(rawQuote);
+    const minimumInput = deepbookMinimumInputRaw(rawQuote);
+    if (minimumInput !== undefined) rawQuote.minimumInputRaw = minimumInput.toString();
+    let quoteOutcome: DeepbookQuoteSummary["quoteOutcome"];
+    if (minimumInput !== undefined && amount < minimumInput) quoteOutcome = "below_minimum_input";
+    else if (BigInt(rawQuote.directionalOutput.raw) > 0n) quoteOutcome = BigInt(inputFlow.expectedReturnRaw) === 0n ? "full_input_spend" : "input_returned";
+    else if (rawQuote.poolTerms?.bestOppositePriceRaw === null) quoteOutcome = "empty_opposite_book";
+    else if (rawQuote.poolTerms?.minimumBuyQuoteRaw === null) quoteOutcome = "insufficient_depth_for_minimum";
+    else quoteOutcome = "no_output";
     return {
       status: "ok",
       poolKey: input.poolKey,
       direction: input.direction,
       amountRaw: input.amountRaw,
-      fetchedAt: this.#fetchedAt(),
-      userAnswerUse: deepbookQuoteUserAnswerUse("raw"),
+      fetchedAt,
+      userAnswerUse: deepbookQuoteUserAnswerUse("raw", !!rawQuote.poolTerms?.gasFeePolicy),
       quantitySemantics: deepbookQuoteQuantitySemantics("raw_u64"),
       source: {
         ...DEEPBOOK_SDK_SIMULATION_SOURCE_BASE,
-        method:
-          input.direction === "base_to_quote"
-            ? feeMode === "input_coin"
-              ? "getQuoteQuantityOutInputFee"
-              : "getQuoteQuantityOut"
-            : feeMode === "input_coin"
-              ? "getBaseQuantityOutInputFee"
-              : "getBaseQuantityOut",
+        method: getter.method,
         returnValueEncoding: "bcs.u64"
       },
       quote,
+      inputFlow,
+      quoteOutcome,
       rawQuote
     };
   }
@@ -1300,80 +685,56 @@ export class SuiReadService {
     simulationSender: string;
     feeMode?: DeepbookQuoteFeeMode | undefined;
   }): Promise<DeepbookDisplayQuoteSummary> {
-    const pool = getKnownPool(input.poolKey);
-    const sourceSymbol = input.direction === "base_to_quote" ? pool.baseCoin : pool.quoteCoin;
-    const sourceCoin = getDeepbookCoinEntryBySymbol(sourceSymbol, this.#deepbookCoins);
-    const decimals = decimalsFromScalar(sourceCoin.coin.scalar);
-    if (decimals === undefined) {
-      throw invalidDeepbookScalar(sourceCoin.symbol, sourceCoin.coin.scalar);
-    }
-    const amountRaw = parseQuoteDisplayAmount(input.amountDisplay, decimals);
-    const rawQuote = await this.quoteDeepbookAction({
-      poolKey: input.poolKey,
-      direction: input.direction,
-      amountRaw,
-      simulationSender: input.simulationSender,
-      feeMode: input.feeMode
-    });
+    const assets = deepbookQuoteAssets(input.poolKey, this.#deepbookCoins);
+    const sourceAsset = input.direction === "base_to_quote" ? assets.base : assets.quote;
+    const amountRaw = parseQuoteDisplayAmount(input.amountDisplay, sourceAsset.decimals);
+    const rawQuote = await this.#readDeepbookQuote({ ...input, amountRaw }, assets);
 
     return {
       status: "ok",
       pool: {
         poolKey: input.poolKey,
-        base: pool.baseCoin,
-        quote: pool.quoteCoin
+        base: assets.base.symbol,
+        quote: assets.quote.symbol
       },
       direction: input.direction,
       inputAmount: {
         display: input.amountDisplay,
         raw: amountRaw,
-        asset: {
-          symbol: sourceCoin.symbol,
-          coinType: normalizeCoinType(sourceCoin.coin.type),
-          decimals,
-          unitSource: DEEPBOOK_SCALAR_UNIT_SOURCE
-        }
+        asset: sourceAsset
       },
       fetchedAt: rawQuote.fetchedAt,
-      userAnswerUse: deepbookQuoteUserAnswerUse("display"),
+      userAnswerUse: deepbookQuoteUserAnswerUse("display", !!rawQuote.rawQuote.poolTerms?.gasFeePolicy),
       quantitySemantics: deepbookQuoteQuantitySemantics("display_source_amount_converted_to_raw_u64"),
       source: rawQuote.source,
+      inputFlow: rawQuote.inputFlow,
+      quoteOutcome: rawQuote.quoteOutcome,
       quote: rawQuote.quote,
       rawQuote: rawQuote.rawQuote
     };
   }
 
   #toDeepbookRawQuoteEvidence(input: {
-    poolKey: string;
+    assets: ReturnType<typeof deepbookQuoteAssets>;
     direction: QuoteDirection;
     amountRaw: string;
     rawReturnValues: DeepbookRawQuoteReturnValues;
-    feeMode?: DeepbookQuoteFeeMode | undefined;
+    feeMode: DeepbookQuoteFeeMode;
   }): DeepbookRawQuoteEvidence {
-    const pool = getKnownPool(input.poolKey);
-    const inputSymbol = input.direction === "base_to_quote" ? pool.baseCoin : pool.quoteCoin;
-    const outputSymbol = input.direction === "base_to_quote" ? pool.quoteCoin : pool.baseCoin;
-    const baseOut = this.#deepbookRawQuoteAmount(pool.baseCoin, input.rawReturnValues.baseOutRaw);
-    const quoteOut = this.#deepbookRawQuoteAmount(pool.quoteCoin, input.rawReturnValues.quoteOutRaw);
-
+    const baseOut = { ...input.assets.base, raw: input.rawReturnValues.baseOutRaw };
+    const quoteOut = { ...input.assets.quote, raw: input.rawReturnValues.quoteOutRaw };
     return {
       kind: DEEPBOOK_RAW_QUOTE_QUANTITY_KIND,
-      sourceMoveFunction:
-        input.direction === "base_to_quote"
-          ? input.feeMode === "input_coin"
-            ? "pool::get_quote_quantity_out_input_fee"
-            : "pool::get_quote_quantity_out"
-          : input.feeMode === "input_coin"
-            ? "pool::get_base_quantity_out_input_fee"
-            : "pool::get_base_quantity_out",
+      ...(input.rawReturnValues.poolTerms ? { poolTerms: input.rawReturnValues.poolTerms } : {}),
+      sourceMoveFunction: deepbookQuoteGetters[input.direction][input.feeMode].move,
       returnValueSourceMoveFunction:
         input.feeMode === "input_coin" ? "pool::get_quantity_out_input_fee" : "pool::get_quantity_out",
       returnValueOrder: ["base_quantity_out", "quote_quantity_out", "deep_quantity_required"],
-      inputAmount: this.#deepbookRawQuoteAmount(inputSymbol, input.amountRaw),
+      inputAmount: { ...(input.direction === "base_to_quote" ? baseOut : quoteOut), raw: input.amountRaw },
       baseOut,
       quoteOut,
-      deepRequired: this.#deepbookRawQuoteAmount("DEEP", input.rawReturnValues.deepRequiredRaw),
-      directionalOutput: outputSymbol === pool.baseCoin ? baseOut : quoteOut,
+      deepRequired: { ...input.assets.deep, raw: input.rawReturnValues.deepRequiredRaw },
+      directionalOutput: input.direction === "base_to_quote" ? quoteOut : baseOut,
       boundary: {
         outputBeforeSlippagePolicy: true,
         notFor: [
@@ -1397,48 +758,6 @@ export class SuiReadService {
           "cost_basis"
         ]
       }
-    };
-  }
-
-  #deepbookRawQuoteAmount(symbol: string, raw: string): DeepbookRawQuoteAmount {
-    const coin = getDeepbookCoinEntryBySymbol(symbol, this.#deepbookCoins);
-    const decimals = decimalsFromScalar(coin.coin.scalar);
-    if (decimals === undefined) {
-      throw invalidDeepbookScalar(coin.symbol, coin.coin.scalar);
-    }
-    return {
-      raw,
-      symbol: coin.symbol,
-      coinType: normalizeCoinType(coin.coin.type),
-      decimals,
-      unitSource: DEEPBOOK_SCALAR_UNIT_SOURCE
-    };
-  }
-
-  #deepbookQuoteUnits(baseSymbol: string, quoteSymbol: string): {
-    baseDecimals: number;
-    quoteDecimals: number;
-    deepDecimals: number;
-  } {
-    const baseCoin = getDeepbookCoinEntryBySymbol(baseSymbol, this.#deepbookCoins);
-    const quoteCoin = getDeepbookCoinEntryBySymbol(quoteSymbol, this.#deepbookCoins);
-    const deepCoin = getDeepbookCoinEntryBySymbol("DEEP", this.#deepbookCoins);
-    const baseDecimals = decimalsFromScalar(baseCoin.coin.scalar);
-    const quoteDecimals = decimalsFromScalar(quoteCoin.coin.scalar);
-    const deepDecimals = decimalsFromScalar(deepCoin.coin.scalar);
-    if (baseDecimals === undefined) {
-      throw invalidDeepbookScalar(baseCoin.symbol, baseCoin.coin.scalar);
-    }
-    if (quoteDecimals === undefined) {
-      throw invalidDeepbookScalar(quoteCoin.symbol, quoteCoin.coin.scalar);
-    }
-    if (deepDecimals === undefined) {
-      throw invalidDeepbookScalar(deepCoin.symbol, deepCoin.coin.scalar);
-    }
-    return {
-      baseDecimals,
-      quoteDecimals,
-      deepDecimals
     };
   }
 
@@ -1990,63 +1309,10 @@ export class SuiReadService {
   }
 
   async #scanWalletAssetClassificationPages(account: string): Promise<WalletBalanceClassificationScan> {
-    const classifiedAssets: ClassifiedWalletAsset[] = [];
-    let uninspectedAssetClasses: UninspectedAssetClass[] = NOT_INSPECTED_ASSET_CLASSES.map((assetClass) => ({
-      ...assetClass
-    }));
-    let cursor: string | null | undefined;
-    const requestedCursors = new Set<string>();
-
-    for (let pageIndex = 0; pageIndex < MAX_WALLET_BALANCE_SCAN_PAGES; pageIndex += 1) {
-      if (cursor !== undefined && cursor !== null) {
-        if (requestedCursors.has(cursor)) {
-          return {
-            classifiedAssets,
-            uninspectedAssetClasses,
-            inspectedBalancePages: pageIndex,
-            inspectedCoinBalanceCount: classifiedAssets.length,
-            blockedReason: "wallet_balance_pagination_did_not_advance"
-          };
-        }
-        requestedCursors.add(cursor);
-      }
-
-      const page = await this.classifyWalletAssets({ account, ...(cursor === undefined ? {} : { cursor }) });
-      classifiedAssets.push(...page.classifiedAssets);
-      uninspectedAssetClasses = page.uninspectedAssetClasses;
-
-      if (!page.hasNextPage) {
-        return {
-          classifiedAssets,
-          uninspectedAssetClasses,
-          inspectedBalancePages: pageIndex + 1,
-          inspectedCoinBalanceCount: classifiedAssets.length
-        };
-      }
-      if (
-        typeof page.cursor !== "string" ||
-        page.cursor.length === 0 ||
-        page.cursor === cursor ||
-        requestedCursors.has(page.cursor)
-      ) {
-        return {
-          classifiedAssets,
-          uninspectedAssetClasses,
-          inspectedBalancePages: pageIndex + 1,
-          inspectedCoinBalanceCount: classifiedAssets.length,
-          blockedReason: "wallet_balance_pagination_did_not_advance"
-        };
-      }
-      cursor = page.cursor;
-    }
-
-    return {
-      classifiedAssets,
-      uninspectedAssetClasses,
-      inspectedBalancePages: MAX_WALLET_BALANCE_SCAN_PAGES,
-      inspectedCoinBalanceCount: classifiedAssets.length,
-      blockedReason: "wallet_balance_page_limit_exceeded"
-    };
+    const scan = await this.#accounts.scanBalancePages(account);
+    const classifiedAssets = scan.balances.map((balance) => classifyWalletBalance(balance, this.#deepbookCoins));
+    return { classifiedAssets, uninspectedAssetClasses: NOT_INSPECTED_ASSET_CLASSES.map((value) => ({ ...value })),
+      inspectedBalancePages: scan.pages, inspectedCoinBalanceCount: classifiedAssets.length, blockedReason: scan.blockedReason };
   }
 
   #cacheRecordFromMetadata(

@@ -25,7 +25,7 @@ export class WaitRequestAbortedError extends Error {
 }
 
 export type ExecutionWaitResult = ReviewSnapshot & { waitOutcome: WaitOutcome; status: ExecutionPollingStatus };
-export type ReviewStateReader = (reviewSessionId: string, now?: Date) => Promise<ReviewSnapshot | undefined>;
+export type ReviewStateReader = (reviewSessionId: string, now?: Date, fixedAttemptId?: string) => Promise<ReviewSnapshot | undefined>;
 type WaitOptions = {
   timeoutMs?: number | undefined;
   signal?: AbortSignal;
@@ -55,10 +55,13 @@ export async function waitForExecutionResult(
   const timeoutMs = options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
   const sleep = options.sleep ?? sleepMs, startedAt = Date.now();
   let reason: WaitSessionMissingReason = "missing";
+  let fixedAttemptId: string | undefined;
   while (true) {
     assertNotAborted(options.signal);
-    const state = await readState(reviewSessionId, options.now?.());
+    const state = await readState(reviewSessionId, options.now?.(), fixedAttemptId);
     if (!state) throw new SessionStoreError("session_not_found", `Review session not found: ${reviewSessionId}`, { reason });
+    if (fixedAttemptId && state.request?.attemptId !== fixedAttemptId) throw new SessionStoreError("session_mismatch", "The requested transaction attempt changed.");
+    fixedAttemptId ??= state.request?.attemptId;
     const status = getExecutionPollingStatus(state.session, state.request);
     if (executionStatusCategory(status) === "final") return { ...state, status, waitOutcome: "status_reached" };
     if (state.progress.status === "unavailable") return { ...state, status, waitOutcome: "unavailable" };

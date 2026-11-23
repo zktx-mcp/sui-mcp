@@ -85,7 +85,7 @@ describe("DeepBook human-readable review producer", () => {
         assetFlow: {
           outgoing: [expect.objectContaining({ role: "input", rawAmount: "1000000000" })],
           expectedIncoming: [expect.objectContaining({ role: "expected_output", rawAmount: "123456789" })],
-          minimumIncoming: [expect.objectContaining({ role: "minimum_output", rawAmount: "122839505" })],
+          minimumIncoming: [expect.objectContaining({ role: "minimum_output", rawAmount: "122839506" })],
           fees: [expect.objectContaining({ role: "fee", rawAmount: "25000" })]
         },
         missingEvidence: [
@@ -544,7 +544,8 @@ async function buildHumanReviewFixture() {
       raw: quotePolicy.minOutRaw,
       asset: amount(quote.rawQuote.directionalOutput).asset
     },
-    protocolFee: amount(quote.rawQuote.deepRequired),
+    inputFlow: quote.inputFlow,
+    separateFeeBudgetRaw: quote.rawQuote.deepRequired.raw,
     derivedAt: now
   });
   const transactionObjectOwnership: TransactionObjectOwnershipEvidence = {

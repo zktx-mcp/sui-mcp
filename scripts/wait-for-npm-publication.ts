@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 type NpmPublication = { name: string; version: string; mcpName: string };
 type WaitOptions = {
+  integrity?: string;
   timeoutMs?: number;
   pollIntervalMs?: number;
   fetch?: typeof globalThis.fetch;
@@ -77,6 +78,9 @@ export async function waitForNpmPublication(input: unknown, options: WaitOptions
       if (actual.name !== expected.name || actual.version !== expected.version || actual.mcpName !== expected.mcpName) {
         throw new Error("Public npm name, version or mcpName differs from the release metadata. Registry publication was not attempted.");
       }
+      if (options.integrity && (metadata as { dist?: { integrity?: string } }).dist?.integrity !== options.integrity) {
+        throw new Error("Public npm integrity differs from the tested tarball.");
+      }
       log(`Confirmed public npm package ${label} for ${expected.mcpName}.`);
       return;
     }
@@ -95,7 +99,9 @@ export async function waitForNpmPublication(input: unknown, options: WaitOptions
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    await waitForNpmPublication(JSON.parse(await readFile("package.json", "utf8")));
+    const release = JSON.parse(await readFile(process.argv[2] ?? "package.json", "utf8"));
+    if (process.argv[2] && !/^sha512-[A-Za-z0-9+/]{86}==$/.test(release.integrity)) throw new Error("Missing release integrity.");
+    await waitForNpmPublication(release, { ...(release.integrity ? { integrity: release.integrity } : {}) });
   } catch (error) {
     console.error(error instanceof Error ? error.message : "Public npm availability check failed.");
     process.exitCode = 1;

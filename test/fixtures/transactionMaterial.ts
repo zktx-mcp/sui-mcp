@@ -1,3 +1,18 @@
+import { DeepBookClient, mainnetPools } from "@mysten/deepbook-v3";
+import { appendGuardedSwap, type DeepbookSwapTransactionMaterialProducerInput } from "../../src/adapters/deepbook/deepbookTransactionMaterialProducer.js";
+import { verifyDeepbookSwapCommands } from "../../src/adapters/deepbook/deepbookSwapCommands.js";
+import { createDeepbookBuildClient } from "./deepbookBuildClient.js";
+
+export function isFixtureSharedObject(id: string) {
+  return id === `0x${"c".repeat(64)}` || id === "0x" + "6".padStart(64,"0") || Object.values(mainnetPools).some((p) => p.address === id);
+}
+
+function fixtureLimits(input: DeepbookSwapTransactionMaterialProducerInput) {
+  return { account: input.account, poolKey: input.poolResolution.poolKey, poolId: input.poolResolution.pool.address,
+    baseType: input.quote.rawQuote.baseOut.coinType, quoteType: input.quote.rawQuote.quoteOut.coinType,
+    deepType: input.quote.rawQuote.deepRequired.coinType, direction: input.quotePolicy.direction,
+    principal: BigInt(input.quotePolicy.sourceAmountRaw), minimum: BigInt(input.quotePolicy.minOutRaw), deepBudget: BigInt(input.quotePolicy.feeBudgetRaw) };
+}
 import { SUI_MAINNET_CHAIN_IDENTIFIER as BUILD_CHAIN } from "../../src/runtime/suiEndpoint.js";
 import type { TransactionFundingEvidence } from "../../src/core/action/transactionFunding.js";
 import { Inputs, Transaction } from "@mysten/sui/transactions";
@@ -9,7 +24,7 @@ import type {
 
 export async function buildTestTransactionBytes(
   account: string,
-  options: { includeSharedObject?: boolean | undefined; moveCallTarget?: string | undefined; addressBalance?: boolean | undefined } = {}
+  options: { swap?: DeepbookSwapTransactionMaterialProducerInput | undefined; includeSharedObject?: boolean | undefined; moveCallTarget?: string | undefined; addressBalance?: boolean | undefined } = {}
 ): Promise<Uint8Array> {
   const transaction = new Transaction();
   transaction.setSender(account);
@@ -22,6 +37,15 @@ export async function buildTestTransactionBytes(
       digest: "7".repeat(44)
     }
   ]);
+  if (options.swap) {
+    const limits = fixtureLimits(options.swap);
+    const addressBalances = options.addressBalance ? { [limits.baseType]: "2000000000", [limits.quoteType]: "2000000000", [limits.deepType]: "2000000000" } : {};
+    const client = createDeepbookBuildClient({ expectedChainIdentifier: BUILD_CHAIN, addressBalances,
+      ...(options.addressBalance ? { gasPayments: [] } : {}) });
+    const sdk = new DeepBookClient({ address: account, network: "mainnet", client });
+    appendGuardedSwap(transaction, sdk, limits);
+    return transaction.build({ client });
+  }
   if (options.addressBalance) {
     transaction.setExpiration({ ValidDuring: { minEpoch: "1", maxEpoch: "2", minTimestamp: null, maxTimestamp: null, chain: BUILD_CHAIN, nonce: 7 } });
     const coin = transaction.moveCall({ target: "0x2::coin::redeem_funds", typeArguments: ["0x2::sui::SUI"], arguments: [transaction.withdrawal({ amount: 1000000000n })] });
@@ -50,6 +74,7 @@ export async function buildTestTransactionBytes(
 }
 
 export async function recordTestTransactionMaterial(input: {
+  swap?: DeepbookSwapTransactionMaterialProducerInput | undefined;
   materialStore: Pick<LocalTransactionMaterialStore, "recordTransactionMaterial">;
   reviewSessionId: string;
   planId: string;
@@ -61,11 +86,12 @@ export async function recordTestTransactionMaterial(input: {
   addressBalance?: boolean | undefined;
   moveCallTarget?: string | undefined;
 }): Promise<{
+  guardCommand?: number;
   handle: LocalTransactionMaterialHandle;
   digest: LocalTransactionMaterialDigestCommitment;
 }> {
   const transactionBytes = await buildTestTransactionBytes(input.account, {
-    includeSharedObject: input.includeSharedObject,
+    swap: input.swap, includeSharedObject: input.includeSharedObject,
     addressBalance: input.addressBalance,
     moveCallTarget: input.moveCallTarget
   });
@@ -84,6 +110,7 @@ export async function recordTestTransactionMaterial(input: {
   const transactionDigest = await Transaction.from(transactionBytes).getDigest();
   return {
     handle,
+    ...(input.swap ? { guardCommand: verifyDeepbookSwapCommands(Transaction.from(transactionBytes).getData(), fixtureLimits(input.swap)) } : {}),
     digest: {
       materialId: handle.materialId,
       reviewSessionId: handle.reviewSessionId,

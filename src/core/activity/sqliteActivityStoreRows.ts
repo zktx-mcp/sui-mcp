@@ -1,3 +1,4 @@
+import { windowCompletion } from "./transactionActivityScanPolicy.js";
 import { REVIEW_PREPARATION_STATUSES } from "../action/types.js";
 import { TRANSACTION_REQUEST_STATUSES, type TransactionRequest } from "../session/transactionRequest.js";
 import { actionPlanSchema } from "../action/schemas.js";
@@ -12,7 +13,6 @@ import {
   REVIEW_ACTIVITY_LOW_SAMPLE_THRESHOLD
 } from "./activityStore.js";
 import type {
-  AccountSource,
   ExternalActivityRelationship,
   ExternalActivityScanRecord,
   ExternalActivitySummaryResult,
@@ -77,6 +77,10 @@ export type ExternalActivityScanRow = {
   account: string;
   relationship: string;
   input_digest: string | null;
+  function_target: string | null;
+  continuity_json: string | null;
+  source_upper_timestamp: string | null;
+  source_upper_checkpoint: string | null;
   from_checkpoint: string | null;
   to_checkpoint: string | null;
   from_timestamp: string | null;
@@ -89,6 +93,8 @@ export type ExternalActivityScanRow = {
   fetched_at: string;
   stored_count: number;
   skipped_count: number;
+  outside_filter_count: number;
+  unconfirmed_relation_count: number;
   has_more: number;
   window_complete: number | null;
   incomplete_reason: string | null;
@@ -101,6 +107,7 @@ export type ExternalActivityTransactionRow = {
   relationship: string;
   checkpoint: string | null;
   timestamp: string | null;
+  metadata_conflicts: number;
   status: string;
   known_sender_account_id: number | null;
   first_scan_id: string;
@@ -109,6 +116,8 @@ export type ExternalActivityTransactionRow = {
   last_fetched_at: string;
   last_scan_incomplete_reason: string | null;
   detail_json: string | null;
+  observation_count?: number;
+  last_detail_status?: "available" | "missing" | "size_limit";
 };
 
 export type ReviewStateSnapshotRow = {
@@ -333,12 +342,15 @@ function dataScope(
 }
 
 export function externalActivityScanFromRow(row: ExternalActivityScanRow): ExternalActivityScanRecord {
-  return {
+  const scan: ExternalActivityScanRecord = {
     scanId: asString(row.scan_id),
     kind: asExternalActivityScanKind(row.kind),
     accountId: row.account_id,
     account: asString(row.account),
     relationship: asExternalActivityRelationship(row.relationship),
+    functionTarget: row.function_target ?? undefined,
+    ...(row.continuity_json ? { continuity: JSON.parse(row.continuity_json) } : {}),
+    sourceUpperTimestamp: row.source_upper_timestamp ?? undefined, sourceUpperCheckpoint: row.source_upper_checkpoint ?? undefined,
     inputDigest: row.input_digest === null ? undefined : asString(row.input_digest),
     fromCheckpoint: row.from_checkpoint === null ? undefined : asString(row.from_checkpoint),
     toCheckpoint: row.to_checkpoint === null ? undefined : asString(row.to_checkpoint),
@@ -352,16 +364,22 @@ export function externalActivityScanFromRow(row: ExternalActivityScanRow): Exter
     fetchedAt: asString(row.fetched_at),
     storedCount: row.stored_count,
     skippedCount: row.skipped_count,
+    skippedReasons: { outsideFilter: row.outside_filter_count, unconfirmedRelation: row.unconfirmed_relation_count,
+      repeatedDigest: row.skipped_count - row.outside_filter_count - row.unconfirmed_relation_count },
     hasMore: row.has_more === 1,
     windowComplete: row.window_complete === null ? null : row.window_complete === 1,
     incompleteReason: row.incomplete_reason === null
       ? undefined
       : asExternalActivityIncompleteReason(row.incomplete_reason)
   };
+  if (scan.kind !== "digest_lookup" && scan.windowComplete === true) scan.windowComplete = windowCompletion(scan);
+  return scan;
 }
 
 export function externalActivityTransactionFromRow(row: ExternalActivityTransactionRow): ExternalActivityTransactionRecord {
   return {
+    ...(row.metadata_conflicts ? { conflictingMetadata: (["checkpoint","timestamp","knownSender"] as const)
+      .filter((_, index) => (row.metadata_conflicts & (1 << index)) !== 0) } : {}),
     accountId: row.account_id,
     account: asString(row.account),
     digest: asString(row.digest),
@@ -377,6 +395,8 @@ export function externalActivityTransactionFromRow(row: ExternalActivityTransact
     lastScanIncompleteReason: row.last_scan_incomplete_reason === null
       ? undefined
       : asExternalActivityIncompleteReason(row.last_scan_incomplete_reason),
+    ...(row.observation_count !== undefined ? { observationCount: row.observation_count } : {}),
+    ...(row.last_detail_status ? { lastObservationDetail: row.last_detail_status } : {}),
     details: row.detail_json === null
       ? undefined
       : parseEvidenceJson<ExternalActivityTransactionDetail>(
@@ -398,6 +418,7 @@ export function externalActivitySummaryResult(
     transactionCount: number;
     statusCounts: Record<ExternalActivityTransactionStatus, number>;
     relationshipCounts: Record<ExternalActivityRelationship, number>;
+    relationshipObservationCounts: Record<ExternalActivityRelationship, number>;
     earliestTimestamp?: string | undefined;
     latestTimestamp?: string | undefined;
   }
@@ -405,7 +426,8 @@ export function externalActivitySummaryResult(
   const summary: ExternalActivitySummaryResult["summary"] = {
     transactionCount: stats.transactionCount,
     statusCounts: stats.statusCounts,
-    relationshipCounts: stats.relationshipCounts
+    relationshipCounts: stats.relationshipCounts,
+    relationshipObservationCounts: stats.relationshipObservationCounts
   };
   if (stats.earliestTimestamp !== undefined) {
     summary.earliestTimestamp = stats.earliestTimestamp;
@@ -428,6 +450,7 @@ export function emptyExternalActivitySummaryStats(): {
   transactionCount: number;
   statusCounts: Record<ExternalActivityTransactionStatus, number>;
   relationshipCounts: Record<ExternalActivityRelationship, number>;
+    relationshipObservationCounts: Record<ExternalActivityRelationship, number>;
 } {
   return {
     transactionCount: 0,
@@ -435,6 +458,7 @@ export function emptyExternalActivitySummaryStats(): {
       ExternalActivityTransactionStatus,
       number
     >,
+    relationshipObservationCounts: { affected: 0, sent: 0 },
     relationshipCounts: Object.fromEntries(EXTERNAL_ACTIVITY_RELATIONSHIPS.map((relationship) => [relationship, 0])) as Record<
       ExternalActivityRelationship,
       number
@@ -588,12 +612,7 @@ export function asReviewTransitionEvent(value: unknown) {
   throw new ActivityStoreError("Unexpected review transition event");
 }
 
-export function asAccountSource(value: unknown): AccountSource {
-  if (value === "wallet_connection" || value === "review_execution") {
-    return value;
-  }
-  throw new ActivityStoreError("Unexpected account source");
-}
+
 
 function asExternalActivityScanKind(value: unknown) {
   if (value === "digest_lookup" || value === "account_scan" || value === "function_scan") {

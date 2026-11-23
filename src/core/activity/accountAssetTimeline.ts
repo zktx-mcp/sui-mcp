@@ -1,9 +1,10 @@
+import { candleBucketStart } from "../read/deepbookCandleSource.js";
 import { parseSuiAddress } from "../suiAddress.js";
 import {
-  DEFAULT_DEEPBOOK_OFFICIAL_INDEXER_INTERVAL,
-  deepbookOfficialIndexerIntervalDurationMs,
-  type DeepbookOfficialIndexerInterval
-} from "../read/deepbookOfficialIndexerSource.js";
+  DEFAULT_DEEPBOOK_CANDLE_INTERVAL,
+  deepbookCandleIntervalDurationMs,
+  type DeepbookCandleInterval
+} from "../read/deepbookCandleSource.js";
 import type {
   ExternalActivityCoverageResult,
   ExternalActivityTransactionRecord
@@ -38,7 +39,7 @@ export type AccountAssetTimelineInput = {
   account: string;
   from: string;
   to: string;
-  interval?: DeepbookOfficialIndexerInterval | undefined;
+  interval?: DeepbookCandleInterval | undefined;
   coverage: ExternalActivityCoverageResult;
   transactions: ExternalActivityTransactionRecord[];
   transactionsTruncated?: boolean | undefined;
@@ -51,9 +52,9 @@ export type AccountAssetTimelineResult = {
     to: string;
   };
   bucket: {
-    interval: DeepbookOfficialIndexerInterval;
+    interval: DeepbookCandleInterval;
     durationMs: number;
-    alignment: "utc_epoch";
+    alignment: "utc_epoch" | "utc_monday";
   };
   status: AccountAssetTimelineStatus;
   balanceStatus: AccountAssetTimelineBalanceStatus;
@@ -61,6 +62,10 @@ export type AccountAssetTimelineResult = {
   sourceTransactionCount: number;
   analyzedTransactionCount: number;
   skippedTransactionCount: number;
+  completeFlowBars: AccountAssetTimelineNetFlowBar[];
+  completeTransactionCount: number;
+  incompleteBuckets: { start: string; transactionCount: number }[];
+  incompleteTransactionCount: number;
   netFlowBars: AccountAssetTimelineNetFlowBar[];
   balanceBars: [];
   quantitySemantics: {
@@ -100,7 +105,7 @@ export function buildAccountAssetTimeline(input: AccountAssetTimelineInput): Acc
   if (fromMs >= toMs) {
     throw new Error("Account asset timeline from must be before to");
   }
-  const interval = input.interval ?? DEFAULT_DEEPBOOK_OFFICIAL_INDEXER_INTERVAL;
+  const interval = input.interval ?? DEFAULT_DEEPBOOK_CANDLE_INTERVAL;
 
   const limitations = new Set<AccountAssetTimelineLimitation>(["no_balance_anchor"]);
   if (!input.coverage.accountKnown) {
@@ -113,8 +118,11 @@ export function buildAccountAssetTimeline(input: AccountAssetTimelineInput): Acc
     limitations.add("source_transactions_truncated");
   }
 
-  const bucketMs = deepbookOfficialIndexerIntervalDurationMs(interval);
+  const bucketMs = deepbookCandleIntervalDurationMs(interval);
   const bars = new Map<string, NetFlowAccumulator>();
+  const completeBars = new Map<string, NetFlowAccumulator>();
+  const incompleteBuckets = new Map<number, number>();
+  let completeTransactionCount = 0;
   let analyzedTransactionCount = 0;
   let skippedTransactionCount = 0;
 
@@ -148,28 +156,14 @@ export function buildAccountAssetTimeline(input: AccountAssetTimelineInput): Acc
     }
     analyzedTransactionCount += 1;
 
-    const bucketStartMs = Math.floor(timestampMs / bucketMs) * bucketMs;
+    const bucketStartMs = candleBucketStart(timestampMs, interval);
     const bucketEndMs = bucketStartMs + bucketMs;
+    const complete = effects.balanceChangeCompleteness === "complete";
+    if (complete) completeTransactionCount++;
+    else incompleteBuckets.set(bucketStartMs, (incompleteBuckets.get(bucketStartMs) ?? 0) + 1);
     for (const change of effects.balanceChanges) {
-      const amount = BigInt(change.amountRaw);
-      const key = `${bucketStartMs}\n${change.coinType}`;
-      const entry = bars.get(key) ?? {
-        bucketStartMs,
-        bucketEndMs,
-        coinType: change.coinType,
-        increaseRaw: 0n,
-        decreaseRaw: 0n,
-        netRaw: 0n,
-        digests: new Set<string>()
-      };
-      entry.netRaw += amount;
-      if (amount > 0n) {
-        entry.increaseRaw += amount;
-      } else if (amount < 0n) {
-        entry.decreaseRaw += -amount;
-      }
-      entry.digests.add(transaction.digest);
-      bars.set(key, entry);
+      accumulate(bars, bucketStartMs, bucketEndMs, transaction.digest, change);
+      if (complete) accumulate(completeBars, bucketStartMs, bucketEndMs, transaction.digest, change);
     }
   }
 
@@ -187,7 +181,7 @@ export function buildAccountAssetTimeline(input: AccountAssetTimelineInput): Acc
     bucket: {
       interval,
       durationMs: bucketMs,
-      alignment: "utc_epoch"
+      alignment: interval === "1w" ? "utc_monday" : "utc_epoch"
     },
     status: statusForCoverage(input.coverage),
     balanceStatus: "unavailable_no_balance_anchor",
@@ -196,6 +190,9 @@ export function buildAccountAssetTimeline(input: AccountAssetTimelineInput): Acc
     analyzedTransactionCount,
     skippedTransactionCount,
     netFlowBars,
+    completeFlowBars: [...completeBars.values()].map(netFlowBarFromAccumulator).sort(compareNetFlowBars),
+    incompleteBuckets: [...incompleteBuckets].sort(([a],[b]) => a-b).map(([start,transactionCount]) => ({start:new Date(start).toISOString(),transactionCount})),
+    completeTransactionCount, incompleteTransactionCount: analyzedTransactionCount - completeTransactionCount,
     balanceBars: [],
     quantitySemantics: {
       netFlowBars: "observed_account_scoped_raw_token_balance_changes",
@@ -213,6 +210,29 @@ function transactionRecordToActivityFact(record: ExternalActivityTransactionReco
     status: record.status,
     details: record.details
   };
+}
+
+function accumulate(bars: Map<string, NetFlowAccumulator>, bucketStartMs: number, bucketEndMs: number,
+  digest: string, change: { coinType: string; amountRaw: string }): void {
+  const amount = BigInt(change.amountRaw);
+  const key = `${bucketStartMs}\n${change.coinType}`;
+  const entry = bars.get(key) ?? {
+    bucketStartMs,
+    bucketEndMs,
+    coinType: change.coinType,
+    increaseRaw: 0n,
+    decreaseRaw: 0n,
+    netRaw: 0n,
+    digests: new Set<string>()
+  };
+  entry.netRaw += amount;
+  if (amount > 0n) {
+    entry.increaseRaw += amount;
+  } else if (amount < 0n) {
+    entry.decreaseRaw += -amount;
+  }
+  entry.digests.add(digest);
+  bars.set(key, entry);
 }
 
 function netFlowBarFromAccumulator(value: NetFlowAccumulator): AccountAssetTimelineNetFlowBar {

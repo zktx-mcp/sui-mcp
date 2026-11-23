@@ -250,6 +250,31 @@ describe("review-time simulation evidence", () => {
     });
   });
 
+  it.each([["guard", true], ["pool", true], ["different_digest", false], ["different_command", false]] as const)(
+    "qualifies the minimum failure against returned effects and bytes for %s", async (scenario, expected) => {
+    const materialStore = new InMemoryLocalTransactionMaterialStore(), now = new Date("2026-06-06T00:00:00.000Z");
+    const material = await recordTestTransactionMaterial({ materialStore, reviewSessionId: "review_1", planId: "plan_1", account, now, expiresAt: new Date(now.getTime() + 30000) });
+    const guard = { commandFailure: "InsufficientCoinBalance" as const, commandIndex: 3, transactionDigest: material.digest.transactionDigest,
+      protocolAbort: { commandIndex: 2, packageId: account, moduleOrigin: account, module: "pool", code: "12" } };
+    const source = createFailedReviewTimeSimulationClient();
+    const producer = createReviewTimeSimulationProducer({ materialStore, network: "mainnet", chainIdentifier, expectedChainIdentifier: chainIdentifier,
+      client: { transactionExecutionService: { async simulateTransaction(request) {
+        const result = await source.transactionExecutionService.simulateTransaction(request);
+        const tx = result.response.transaction!, effects = tx.effects!;
+        if (scenario === "different_digest") effects.transactionDigest = "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR";
+        tx.transaction = GrpcTypes.Transaction.create({ bcs: { value: request.transaction!.bcs!.value! } });
+        effects.status!.error = GrpcTypes.ExecutionError.create(scenario === "pool" ? {
+          command: 2n, kind: GrpcTypes.ExecutionError_ExecutionErrorKind.MOVE_ABORT,
+          errorDetails: { oneofKind: "abort", abort: { location: { package: account, module: "pool" }, abortCode: 12n } }
+        } : { command: scenario === "different_command" ? 1n : 3n, kind: GrpcTypes.ExecutionError_ExecutionErrorKind.INSUFFICIENT_COIN_BALANCE });
+        return result;
+      } } } });
+    const outcome = await producer({ transactionMaterial: material.handle, transactionMaterialDigest: material.digest, now,
+      minimumOutputGuard: guard });
+    expect(outcome.status).toBe(expected ? "refresh_required" : "blocked");
+    expect(outcome.checks[0]?.id).toBe(expected ? "minimum_output_not_met" : "review_time_simulation_result_failed");
+  });
+
   it("marks transport-level thrown simulation calls as transient refresh-required failures", async () => {
     const materialStore = new InMemoryLocalTransactionMaterialStore();
     const material = await recordTestTransactionMaterial({

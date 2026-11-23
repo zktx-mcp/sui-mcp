@@ -1,3 +1,4 @@
+import { activityPackageFamilies } from "../src/core/activity/transactionActivityLineages.js";
 import { describe, expect, it } from "vitest";
 import {
   SUI_DEFI_ACTIVITY_CLASSIFIER_VERSION,
@@ -16,6 +17,7 @@ const DEEPBOOK_DOCS_PACKAGE =
   "0x337f4f4f6567fcd778d5454f27c16c70e2f274cc6377ea6249ddf491482ef497";
 const DEEPTRADE_PACKAGE =
   "0xc10d536b6580d809711b9bb8eee3945d5e96f92a346c84d74ff7a0697e664695";
+const CETUS_TYPE_ORIGIN = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb";
 const CETUS_PACKAGE =
   "0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3";
 const CETUS_GLOBAL_CONFIG =
@@ -28,9 +30,6 @@ const AFTERMATH_EVENTS_PACKAGE =
   "0x7f6ce7ade63857c4fd16ef7783fed2dfc4d7fb7e40615abdb653030b76aef0c6";
 const AFTERMATH_AFSUI_PACKAGE =
   "0x1575034d2729907aefca1ac757d6ccfcd3fc7e9e77927523c06007d8353ad836";
-const KNOWN_PROTOCOL_RULE_LIMITATIONS = new Set([
-  "deepbook_package_conflict_open"
-]);
 const KNOWN_MATCH_LIMITATIONS = new Set([
   "deepbook_package_conflict_open",
   "event_details_truncated",
@@ -39,7 +38,8 @@ const KNOWN_MATCH_LIMITATIONS = new Set([
   "not_position_inventory_or_pnl_or_signing",
   "object_change_details_truncated",
   "shared_object_match_does_not_prove_wallet_position",
-  "transaction_activity_label_only"
+  "transaction_activity_label_only",
+  "declared_call_does_not_prove_fill_or_account_effect"
 ]);
 
 function detail(overrides: Partial<ExternalActivityTransactionDetail>): ExternalActivityTransactionDetail {
@@ -81,17 +81,16 @@ describe("Sui DeFi activity classifier", () => {
     for (const rule of SUI_DEFI_ACTIVITY_PROTOCOL_RULES) {
       expect(protocolIds.has(rule.protocolId)).toBe(false);
       protocolIds.add(rule.protocolId);
-      expect(Object.keys(rule.packages).length).toBeGreaterThan(0);
-
-      for (const [address, packageRule] of Object.entries(rule.packages)) {
-        expect(parseSuiAddress(address)).toBe(address);
-        expect(packageRule.source.trim().length).toBeGreaterThan(0);
-        if (/mvr/i.test(packageRule.source)) {
-          expect(packageRule.mvrName).toMatch(/^@[^/]+\/[^/]+$/);
-        }
-        if (packageRule.limitation !== undefined) {
-          expect(KNOWN_PROTOCOL_RULE_LIMITATIONS.has(packageRule.limitation)).toBe(true);
-        }
+      const family = activityPackageFamilies[rule.protocolId]!;
+      expect(family.versions.length).toBeGreaterThan(0);
+      for (const address of family.versions) expect(parseSuiAddress(address)).toBe(address);
+      for (const [address, name] of Object.entries(rule.namedPackages ?? {})) {
+        expect(family.versions).toContain(address);
+        expect(name).toMatch(/^@[^/]+\/[^/]+$/);
+      }
+      for (const [origin, types] of Object.entries(family.types)) {
+        expect(family.versions).toContain(origin);
+        expect(types.length).toBeGreaterThan(0);
       }
 
       for (const [address, label] of Object.entries(rule.sharedObjects)) {
@@ -128,7 +127,7 @@ describe("Sui DeFi activity classifier", () => {
     expect(matches[0]).toMatchObject({
       classifierVersion: SUI_DEFI_ACTIVITY_CLASSIFIER_VERSION,
       protocolId: "deeptrade-core",
-      primaryAction: "order",
+      declaredAction: "order",
       matchBasis: "direct_move_call",
       relatedProtocols: [
         {
@@ -139,13 +138,23 @@ describe("Sui DeFi activity classifier", () => {
     });
     expect(matches[0]?.evidence).toContainEqual(expect.objectContaining({
       kind: "moveCall",
-      packageSource: "mvr_current_mainnet_resolution_and_deeptrade_research_snapshot",
+      packageSource: "mainnet_direct_call_v1",
       mvrName: "@deeptrade/deeptrade-core"
     }));
     expect(matches[0]?.limitations).toContain("transaction_activity_label_only");
   });
 
-  it("marks the DeepBook docs package conflict when the research snapshot package matches", () => {
+  it("reports the verified outer type and retains independent direct-call evidence", () => {
+    const [match] = classifySuiDeFiActivity(detail({
+      moveCalls: [moveCall(CETUS_PACKAGE, "pool", "swap")],
+      events: [{ sequenceNumber: "0", eventType: `${CETUS_TYPE_ORIGIN}::pool::SwapEvent`, package: "0x2" }]
+    }));
+    expect(match?.matchBasis).toBe("event_type");
+    expect(match?.evidence.map(item => item.kind)).toContain("moveCall");
+    expect(match?.limitations).not.toContain("no_direct_move_call_match");
+  });
+
+  it("attributes an earlier directly called DeepBook version to its published package", () => {
     const matches = classifySuiDeFiActivity(detail({
       moveCalls: [
         moveCall(DEEPBOOK_DOCS_PACKAGE, "pool", "swap_exact_base_for_quote")
@@ -155,10 +164,10 @@ describe("Sui DeFi activity classifier", () => {
     expect(matches).toHaveLength(1);
     expect(matches[0]).toMatchObject({
       protocolId: "deepbook-v3",
-      primaryAction: "swap",
+      declaredAction: "swap",
       matchBasis: "direct_move_call"
     });
-    expect(matches[0]?.limitations).toContain("deepbook_package_conflict_open");
+    expect(matches[0]?.evidence[0]).toMatchObject({ packageSource: "mainnet_direct_call_v6" });
   });
 
   it("uses shared objects as shared_object evidence without inferring a position", () => {
@@ -176,7 +185,7 @@ describe("Sui DeFi activity classifier", () => {
     expect(matches[0]).toMatchObject({
       protocolId: "cetus-clmm",
       matchBasis: "shared_object",
-      primaryAction: "unknown",
+      declaredAction: "unknown",
       evidence: [
         {
           kind: "sharedObject",
@@ -188,13 +197,13 @@ describe("Sui DeFi activity classifier", () => {
     expect(matches[0]?.limitations).toContain("shared_object_match_does_not_prove_wallet_position");
   });
 
-  it("carries MVR evidence on event and object type package matches", () => {
+  it("identifies event and object types from their on-chain defining package", () => {
     const matches = classifySuiDeFiActivity(detail({
       events: [
         {
           sequenceNumber: "0",
           package: CETUS_PACKAGE,
-          eventType: `${CETUS_PACKAGE}::pool::SwapEvent`
+          eventType: `${CETUS_TYPE_ORIGIN}::pool::SwapEvent`
         }
       ],
       objectChanges: [
@@ -202,7 +211,7 @@ describe("Sui DeFi activity classifier", () => {
           index: 0,
           objectId: "0x1",
           changeKind: "mutated",
-          outputType: `${CETUS_PACKAGE}::position::Position`
+          outputType: `${CETUS_TYPE_ORIGIN}::position::Position`
         }
       ]
     }));
@@ -212,30 +221,34 @@ describe("Sui DeFi activity classifier", () => {
       evidence: expect.arrayContaining([
         expect.objectContaining({
           kind: "eventType",
-          packageSource: "mvr_current_mainnet_resolution_and_cetus_research_snapshot",
-          mvrName: "@cetuspackages/clmm"
+          packageSource: "mainnet_type_origin_v1"
         }),
         expect.objectContaining({
           kind: "objectType",
-          packageSource: "mvr_current_mainnet_resolution_and_cetus_research_snapshot",
-          mvrName: "@cetuspackages/clmm"
+          packageSource: "mainnet_type_origin_v1"
         })
       ])
     });
   });
 
+  it("requires the outer defining module and type, even when an emitter or type argument matches", () => {
+    expect(classifySuiDeFiActivity(detail({ events: [
+      { sequenceNumber: "0", package: CETUS_PACKAGE, eventType: `0x2::example::Wrapped<${CETUS_TYPE_ORIGIN}::pool::SwapEvent>` },
+      { sequenceNumber: "1", package: CETUS_PACKAGE, eventType: `${CETUS_TYPE_ORIGIN}::unknown::SwapEvent` }
+    ] }))).toEqual([]);
+  });
   it("deduplicates repeated structural evidence", () => {
     const matches = classifySuiDeFiActivity(detail({
       events: [
         {
           sequenceNumber: "0",
           package: CETUS_PACKAGE,
-          eventType: `${CETUS_PACKAGE}::pool::SwapEvent`
+          eventType: `${CETUS_TYPE_ORIGIN}::pool::SwapEvent`
         },
         {
           sequenceNumber: "0",
           package: CETUS_PACKAGE,
-          eventType: `${CETUS_PACKAGE}::pool::SwapEvent`
+          eventType: `${CETUS_TYPE_ORIGIN}::pool::SwapEvent`
         }
       ]
     }));
@@ -250,12 +263,12 @@ describe("Sui DeFi activity classifier", () => {
     }));
     expect(mvrSuilendMatches[0]).toMatchObject({
       protocolId: "suilend-lending",
-      primaryAction: "lending",
+      declaredAction: "lending",
       matchBasis: "direct_move_call",
       evidence: [
         expect.objectContaining({
           kind: "moveCall",
-          packageSource: "mvr_current_mainnet_resolution",
+          packageSource: "mainnet_direct_call_v21",
           mvrName: "@suilend/core"
         })
       ]
@@ -281,14 +294,14 @@ describe("Sui DeFi activity classifier", () => {
           index: 0,
           objectId: "0x2",
           changeKind: "mutated",
-          outputType: `${SUILEND_PACKAGE}::lending_market::Market`
+          outputType: `${SUILEND_PACKAGE}::lending_market::LendingMarket`
         }
       ]
     }));
     expect(objectTypeMatches[0]).toMatchObject({
       protocolId: "suilend-lending",
       matchBasis: "object_type",
-      primaryAction: "unknown"
+      declaredAction: "unknown"
     });
   });
 
@@ -298,7 +311,7 @@ describe("Sui DeFi activity classifier", () => {
         {
           sequenceNumber: "0",
           package: AFTERMATH_EVENTS_PACKAGE,
-          eventType: `${AFTERMATH_EVENTS_PACKAGE}::afsui::StakeEvent`
+          eventType: `${AFTERMATH_EVENTS_PACKAGE}::events::StakedEvent`
         }
       ],
       objectChanges: [
@@ -306,7 +319,7 @@ describe("Sui DeFi activity classifier", () => {
           index: 0,
           objectId: "0x3",
           changeKind: "mutated",
-          outputType: `${AFTERMATH_AFSUI_PACKAGE}::afsui::AFSUI`
+          outputType: `${AFTERMATH_EVENTS_PACKAGE}::staked_sui_vault::StakedSuiVault`
         }
       ]
     }));
@@ -314,7 +327,7 @@ describe("Sui DeFi activity classifier", () => {
     expect(matches[0]).toMatchObject({
       protocolId: "aftermath-afsui",
       matchBasis: "event_type",
-      primaryAction: "unknown"
+      declaredAction: "unknown"
     });
     expect(matches[0]?.evidence).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "eventType" }),
@@ -327,14 +340,14 @@ describe("Sui DeFi activity classifier", () => {
       moveCalls: [moveCall(CETUS_PACKAGE, "global_config", "set_fee_rate")]
     }))[0]).toMatchObject({
       protocolId: "cetus-clmm",
-      primaryAction: "admin_or_versioning"
+      declaredAction: "admin_or_versioning"
     });
 
     expect(classifySuiDeFiActivity(detail({
       moveCalls: [moveCall(SUILEND_MVR_CORE_PACKAGE, "reserve_config", "update_risk_parameters")]
     }))[0]).toMatchObject({
       protocolId: "suilend-lending",
-      primaryAction: "admin_or_versioning"
+      declaredAction: "admin_or_versioning"
     });
   });
 
@@ -346,7 +359,7 @@ describe("Sui DeFi activity classifier", () => {
       ]
     }))[0]).toMatchObject({
       protocolId: "deeptrade-core",
-      primaryAction: "swap"
+      declaredAction: "swap"
     });
 
     expect(classifySuiDeFiActivity(detail({
@@ -356,7 +369,7 @@ describe("Sui DeFi activity classifier", () => {
       ]
     }))[0]).toMatchObject({
       protocolId: "cetus-clmm",
-      primaryAction: "swap"
+      declaredAction: "swap"
     });
   });
 
@@ -365,7 +378,7 @@ describe("Sui DeFi activity classifier", () => {
       moveCalls: [moveCall(CETUS_PACKAGE, "pool", "reset_position")]
     }))[0]).toMatchObject({
       protocolId: "cetus-clmm",
-      primaryAction: "liquidity"
+      declaredAction: "liquidity"
     });
   });
 
@@ -376,7 +389,7 @@ describe("Sui DeFi activity classifier", () => {
       protocolMatches: [
         {
           protocolId: "cetus-clmm",
-          primaryAction: "swap"
+          declaredAction: "swap"
         }
       ]
     });
@@ -391,6 +404,12 @@ describe("Sui DeFi activity classifier", () => {
         }
       ]
     }))).not.toHaveProperty("protocolMatches");
+  });
+
+  it("keeps an unsuccessful swap call as declared activity with a failed chain outcome", () => {
+    const facts = compactExternalActivityTransactionDetails(detail({ moveCalls: [moveCall(CETUS_PACKAGE, "pool", "swap")] }), "failure");
+    expect(facts.protocolMatches?.[0]).toMatchObject({ declaredAction: "swap", transactionStatus: "failure" });
+    expect(facts.balanceChanges).toEqual([]);
   });
 
   it("aggregates repeated ownerless balance changes in compact facts", () => {
@@ -471,7 +490,7 @@ describe("Sui DeFi activity classifier", () => {
           {
             sequenceNumber: "0",
             package: CETUS_PACKAGE,
-            eventType: `${CETUS_PACKAGE}::pool::SwapEvent`
+            eventType: `${CETUS_TYPE_ORIGIN}::pool::SwapEvent`
           }
         ],
         objectChanges: [
@@ -479,7 +498,7 @@ describe("Sui DeFi activity classifier", () => {
             index: 0,
             objectId: "0x1",
             changeKind: "mutated",
-            outputType: `${CETUS_PACKAGE}::position::Position`
+            outputType: `${CETUS_TYPE_ORIGIN}::position::Position`
           }
         ]
       }),
@@ -491,7 +510,7 @@ describe("Sui DeFi activity classifier", () => {
           {
             sequenceNumber: "0",
             package: AFTERMATH_EVENTS_PACKAGE,
-            eventType: `${AFTERMATH_EVENTS_PACKAGE}::afsui::StakeEvent`
+            eventType: `${AFTERMATH_EVENTS_PACKAGE}::events::StakedEvent`
           }
         ],
         objectChanges: [
@@ -499,7 +518,7 @@ describe("Sui DeFi activity classifier", () => {
             index: 0,
             objectId: "0x3",
             changeKind: "mutated",
-            outputType: `${AFTERMATH_AFSUI_PACKAGE}::afsui::AFSUI`
+            outputType: `${AFTERMATH_EVENTS_PACKAGE}::staked_sui_vault::StakedSuiVault`
           }
         ]
       })

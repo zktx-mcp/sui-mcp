@@ -16,7 +16,7 @@ export function registerExecutionResultTools(server: McpServer, deps: McpServerD
     title: "Get transaction request result", description: "Read one review session's transaction request and any observed chain result.",
     inputSchema: z.object({ reviewSessionId: z.string().min(1) }),
     outputSchema: successOutputSchema({ ...reviewStatusResponseShape, userAnswerUse: userAnswerUseSchema }),
-    annotations: { readOnlyHint: false, openWorldHint: false }
+    annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
   }, async ({ reviewSessionId }) => {
     try {
       const state = await readCurrentReview(deps, reviewSessionId, true);
@@ -29,10 +29,10 @@ export function registerExecutionResultTools(server: McpServer, deps: McpServerD
     title: "Wait for transaction request result", description: "Wait briefly for one admitted request or required user action.",
     inputSchema: waitExecutionInputSchema(),
     outputSchema: successOutputSchema({ waitOutcome: z.enum(WAIT_OUTCOMES), ...reviewStatusResponseShape, userAnswerUse: userAnswerUseSchema }),
-    annotations: { readOnlyHint: false, openWorldHint: false }
+    annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
   }, async ({ reviewSessionId, timeoutMs }, extra) => {
     try {
-      const result = await waitForExecutionResult((id) => readCurrentReview(deps, id), reviewSessionId, { timeoutMs, signal: extra.mcpReq.signal });
+      const result = await waitForExecutionResult((id, _now, attemptId) => readCurrentReview(deps, id, false, attemptId), reviewSessionId, { timeoutMs, signal: extra.mcpReq.signal });
       return okToolResult({ waitOutcome: result.waitOutcome, ...reviewStatusResponse(result),
         userAnswerUse: executionResultUserAnswerUse({ reconciliationRequired: !!result.connectionReconciliationRequired, hasRequest: !!result.request, hasExecutionResult: !!result.request?.execution, hasWaitOutcome: true }) });
     } catch (error) { return sessionStoreToolError(error, deps.logger); }

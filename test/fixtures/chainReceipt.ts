@@ -11,7 +11,7 @@ export const chainReceiptDigest = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
 export const otherChainReceiptDigest = "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR";
 
 export function chainReceiptFixture(
-  overrides: Partial<SuiChainReceiptEvidence> = {}
+  overrides: Partial<Extract<SuiChainReceiptEvidence, { kind: "sui_chain_receipt_v1" }>> = {}
 ): SuiChainReceiptEvidence {
   const txDigest = overrides.txDigest ?? chainReceiptDigest;
   return {

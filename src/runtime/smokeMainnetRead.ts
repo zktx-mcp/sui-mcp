@@ -1,3 +1,4 @@
+import { verifyInstalledMinimum } from "../adapters/reviewAdapters.js";
 import { createRuntimeReviewDependencies } from "./reviewDependencies.js";
 import { computeSmokeReview, SmokeReviewConfigError } from "./smokeReview.js";
 import { parseSuiAddress } from "../core/suiAddress.js";
@@ -11,7 +12,7 @@ import { validateSupportedAdapterLifecycle } from "../adapters/adapterLifecycleV
 import { SqliteActivityStore } from "../core/activity/sqliteActivityStore.js";
 import { TransactionActivityService } from "../core/activity/transactionActivityService.js";
 import { createSuiReadService } from "../core/read/readService.js";
-import { DeepbookOfficialIndexerSource } from "../core/read/deepbookOfficialIndexerSource.js";
+import { ChainCandleSource } from "../core/read/chainCandleSource.js";
 import { LocalSessionStore } from "../core/session/sessionStore.js";
 import { createMcpServer } from "../mcp/server.js";
 import { TOOL_NAMES } from "../mcp/toolNames.js";
@@ -126,10 +127,10 @@ async function main(): Promise<void> {
       network: config.network,
       chainIdentifier,
       coinMetadataCache: activityStore.createCoinMetadataCache(),
-      deepbookOfficialIndexerSource: new DeepbookOfficialIndexerSource()
+      deepbookCandleSource: new ChainCandleSource()
     });
     const transactionMaterialStore = activityStore.createTransactionMaterialStore();
-    const sessions = new LocalSessionStore({
+    const sessions = new LocalSessionStore({ verifySwapMinimum: verifyInstalledMinimum,
       activityStore,
       logger,
       validateAdapterLifecycle: validateSupportedAdapterLifecycle,
@@ -140,7 +141,7 @@ async function main(): Promise<void> {
       expectedChainIdentifier: config.expectedChainIdentifier, materialStore: transactionMaterialStore, readService });
     // Known-account history in this utility's temporary DB for optional review computation. This does not
     // create a live wallet session or prove address ownership.
-    await activityStore.upsertAccount(smokeAddress, "review_execution");
+    await activityStore.upsertAccount(smokeAddress, "review_record");
     server = createMcpServer({
       sessions,
       activityStore,

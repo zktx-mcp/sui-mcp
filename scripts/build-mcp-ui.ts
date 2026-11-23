@@ -16,6 +16,7 @@ const chartNotice = {
   sha256: "f76c6afab94884448f0426e30d6e9d555ca7247894cd3484e477d2f87513036e"
 };
 
+const noticeSections = new Map<string, string>();
 async function notices(moduleIds: string[]): Promise<string> {
   const packages = new Set<string>();
   for (const moduleId of moduleIds) {
@@ -28,6 +29,8 @@ async function notices(moduleIds: string[]): Promise<string> {
   }
   const sections: string[] = [];
   for (const directory of [...packages].sort()) {
+    const cached = noticeSections.get(directory);
+    if (cached !== undefined) { sections.push(cached); continue; }
     const pkg = JSON.parse(await readFile(join(directory, "package.json"), "utf8")) as { name: string; version: string; license?: unknown };
     const entries = (await readdir(directory, { withFileTypes: true })).filter((entry) => entry.isFile() && /^(licen[cs]e|notice|copying)(\.|$)/i.test(entry.name));
     const texts = await Promise.all(entries.map((entry) => readFile(join(directory, entry.name), "utf8")));
@@ -48,7 +51,9 @@ async function notices(moduleIds: string[]): Promise<string> {
       }
       texts.push(notice);
     }
-    sections.push(`${pkg.name} ${pkg.version}\n${texts.join("\n")}\n`);
+    const section = `${pkg.name} ${pkg.version}\n${texts.join("\n")}\n`;
+    noticeSections.set(directory, section);
+    sections.push(section);
   }
   return sections.join("\n---\n\n");
 }

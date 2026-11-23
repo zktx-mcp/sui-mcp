@@ -1,16 +1,18 @@
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { SuiGraphQLClient } from "@mysten/sui/graphql";
 import {
+  SUI_MAINNET_CHAIN_IDENTIFIER,
   MAX_SUI_GRAPHQL_URL_LENGTH,
   MAX_SUI_GRPC_URL_LENGTH,
   SuiEndpointError,
+  withRpcDeadline, isEndpointAccessDenied,
   parseGraphqlUrl,
   parseGrpcUrl
 } from "../core/suiEndpoint.js";
 export { MAX_SUI_GRAPHQL_URL_LENGTH, MAX_SUI_GRPC_URL_LENGTH, SuiEndpointError, parseGraphqlUrl, parseGrpcUrl };
 export type { SuiEndpointErrorKind } from "../core/suiEndpoint.js";
 
-export const SUI_MAINNET_CHAIN_IDENTIFIER = "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S";
+export { SUI_MAINNET_CHAIN_IDENTIFIER };
 export const DEFAULT_SUI_GRPC_URL = "https://fullnode.mainnet.sui.io:443";
 export const DEFAULT_SUI_GRAPHQL_URL = "https://graphql.mainnet.sui.io/graphql";
 export const DEFAULT_SUI_GRPC_ENDPOINT_VERIFY_TIMEOUT_MS = 10_000;
@@ -20,6 +22,7 @@ export type VerifyMainnetGrpcEndpointInput = {
   url: string;
   expectedChainIdentifier?: string | undefined;
   timeoutMs?: number | undefined;
+  signal?: AbortSignal | undefined;
 };
 
 export type VerifiedMainnetGrpcEndpoint = {
@@ -31,6 +34,7 @@ export type VerifyMainnetGraphqlEndpointInput = {
   url: string;
   expectedChainIdentifier?: string | undefined;
   timeoutMs?: number | undefined;
+  signal?: AbortSignal | undefined;
   fetch?: typeof fetch | undefined;
 };
 
@@ -50,22 +54,11 @@ export async function verifyMainnetGrpcEndpoint(
     network: "mainnet"
   });
 
-  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    const chainIdentifier = await Promise.race([
-      client.core.getChainIdentifier().then((result) => result.chainIdentifier),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => {
-          reject(
-            new SuiEndpointError(
-              "endpoint_timeout",
-              `Sui gRPC endpoint verification timed out after ${timeoutMs}ms`,
-              { timeoutMs, url }
-            )
-          );
-        }, timeoutMs);
-      })
-    ]);
+    const chainIdentifier = await withRpcDeadline(timeoutMs, async signal => {
+      const response = await client.ledgerService.getServiceInfo({}, { abort: signal, timeout: timeoutMs }).response;
+      return response.chainId;
+    }, input.signal);
 
     if (chainIdentifier !== expectedChainIdentifier) {
       throw new SuiEndpointError(
@@ -77,6 +70,18 @@ export async function verifyMainnetGrpcEndpoint(
 
     return { client, chainIdentifier };
   } catch (error) {
+    input.signal?.throwIfAborted();
+    if (error instanceof Error && error.name === "TimeoutError" ||
+        typeof error === "object" && error !== null && "code" in error && error.code === "DEADLINE_EXCEEDED") {
+      throw new SuiEndpointError("endpoint_timeout", "Sui endpoint verification timed out.", { timeoutMs, url });
+    }
+    if (isEndpointAccessDenied(error)) {
+      throw new SuiEndpointError("endpoint_access_denied", "The configured Sui endpoint denied access.", { url });
+    }
+    if (typeof error === "object" && error !== null && "code" in error &&
+        ["INVALID_ARGUMENT", "UNIMPLEMENTED", "NOT_FOUND", 3, 5, 12].includes(error.code as string | number)) {
+      throw new SuiEndpointError("endpoint_invalid_response", "The configured endpoint does not support the Sui chain identity request.", { url });
+    }
     if (error instanceof SuiEndpointError) {
       throw error;
     }
@@ -88,10 +93,7 @@ export async function verifyMainnetGrpcEndpoint(
         url
       }
     );
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
+
   }
 }
 
@@ -104,36 +106,37 @@ export async function verifyMainnetGraphqlEndpoint(
   const client = new SuiGraphQLClient({
     url,
     network: "mainnet",
-    ...(input.fetch ? { fetch: input.fetch } : {})
+    fetch: async (...args) => {
+      const response = await (input.fetch ?? fetch)(...args);
+      if (response.status === 401 || response.status === 403) throw new SuiEndpointError("endpoint_access_denied",
+        "The configured GraphQL endpoint denied access.", { url });
+      if (response.status >= 400 && response.status < 500 && ![408, 429].includes(response.status))
+        throw new SuiEndpointError("endpoint_invalid_response", "The configured GraphQL endpoint rejected the request.", { url });
+      return response;
+    }
   });
 
-  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    const chainIdentifier = await Promise.race([
-      client.query<{ chainIdentifier: string }>({
-        query: "query SuiMcpChainIdentifier { chainIdentifier }",
-        variables: {}
-      }).then((result) => {
-        const value = result.data?.chainIdentifier;
-        if (typeof value !== "string" || value.length === 0) {
-          throw new SuiEndpointError("endpoint_unreachable", "Sui GraphQL endpoint did not return chainIdentifier", {
-            url
-          });
-        }
-        return value;
-      }),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => {
-          reject(
-            new SuiEndpointError(
-              "endpoint_timeout",
-              `Sui GraphQL endpoint verification timed out after ${timeoutMs}ms`,
-              { timeoutMs, url }
-            )
-          );
-        }, timeoutMs);
-      })
-    ]);
+    const result = await withRpcDeadline(timeoutMs, signal => client.query<{ chainIdentifier: string }>({
+      query: "query SuiMcpChainIdentifier { chainIdentifier }", variables: {}, signal
+    }), input.signal);
+    // A GraphQL server may report a failed execution in an HTTP 200 response.
+    // Only a definitive rejection of this fixed query identifies an incompatible endpoint.
+    if (result.errors?.length) {
+      const codes = result.errors.map(error => {
+        const ext = "extensions" in error ? error.extensions : undefined;
+        return ext && typeof ext === "object" && "code" in ext ? ext.code : undefined;
+      });
+      if (codes.some(code => code === "FORBIDDEN" || code === "UNAUTHENTICATED")) {
+        throw new SuiEndpointError("endpoint_access_denied", "The configured GraphQL endpoint denied access.", { url });
+      }
+      if (codes.every(code => code === "GRAPHQL_VALIDATION_FAILED" || code === "GRAPHQL_PARSE_FAILED")) {
+        throw new SuiEndpointError("endpoint_invalid_response", "The configured endpoint rejected the Sui chain identity query.", { url });
+      }
+      throw new SuiEndpointError("endpoint_unreachable", "The GraphQL service could not complete the Sui chain identity check.", { url });
+    }
+    const chainIdentifier = result.data?.chainIdentifier;
+    if (!chainIdentifier) throw new SuiEndpointError("endpoint_invalid_response", "Sui GraphQL endpoint did not return chainIdentifier", { url });
 
     if (chainIdentifier !== expectedChainIdentifier) {
       throw new SuiEndpointError(
@@ -145,6 +148,11 @@ export async function verifyMainnetGraphqlEndpoint(
 
     return { client, chainIdentifier };
   } catch (error) {
+    input.signal?.throwIfAborted();
+    if (error instanceof Error && error.name === "TimeoutError" ||
+        typeof error === "object" && error !== null && "code" in error && error.code === "DEADLINE_EXCEEDED") {
+      throw new SuiEndpointError("endpoint_timeout", "Sui endpoint verification timed out.", { timeoutMs, url });
+    }
     if (error instanceof SuiEndpointError) {
       throw error;
     }
@@ -156,9 +164,6 @@ export async function verifyMainnetGraphqlEndpoint(
         url
       }
     );
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
+
   }
 }

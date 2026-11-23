@@ -1,3 +1,5 @@
+import { verifyDeepbookMinimum } from "./deepbook/deepbookSwapCommands.js";
+import type { VerifySwapMinimum } from "../core/action/swapQuotePolicyEvidence.js";
 import {
   computeDeepbookSwapReviewEvidence,
   type DeepbookPtbVisualizationProducer,
@@ -30,6 +32,7 @@ import type {
 
 export type DeepbookReviewAdapterWiring = {
   deepbookQuoteSource: DeepbookSwapReviewQuoteSource;
+  gasFeePolicySource?: import("./deepbook/deepbookReviewEvidence.js").DeepbookSwapReviewEvidenceInput["gasFeePolicySource"];
   deepbookDeepBalanceSource?: ((account: string) => Promise<string>) | undefined;
   deepbookTransactionMaterialProducer?: DeepbookSwapTransactionMaterialProducer | undefined;
   deepbookTransactionMaterialDigestProducer?: DeepbookSwapTransactionMaterialDigestProducer | undefined;
@@ -52,7 +55,22 @@ export type SupportedReviewAdapterWiring = {
  * evidence claims, commitment equality, digest-gated handoff); a descriptor
  * supplies only protocol-specific plan creation and evidence computation.
  */
+const deepbookIdentity = {
+  adapterId: DEEPBOOK_SWAP_ADAPTER_ID, protocol: DEEPBOOK_SWAP_PROTOCOL,
+  actionKind: DEEPBOOK_SWAP_ACTION_KIND, stageCatalogId: DEEPBOOK_SWAP_REVIEW_LIFECYCLE_STAGE_CATALOG_ID,
+  verifyMinimum: verifyDeepbookMinimum
+};
+
+const installedSwapIdentities = [deepbookIdentity] as const;
+
+export const verifyInstalledMinimum: VerifySwapMinimum = (data, quote) => {
+  const adapter = installedSwapIdentities.find(item => item.adapterId === quote.adapterId && item.protocol === quote.protocol && item.actionKind === quote.actionKind);
+  if (!adapter) throw Error("No registered verifier for this transaction minimum");
+  adapter.verifyMinimum(data, quote);
+};
+
 export type ReviewAdapterDescriptor = {
+  verifyMinimum: VerifySwapMinimum;
   adapterId: string;
   protocol: string;
   actionKind: string;
@@ -65,10 +83,7 @@ export function buildSupportedReviewAdapterDescriptors(
 ): ReviewAdapterDescriptor[] {
   const descriptors: ReviewAdapterDescriptor[] = [
     {
-      adapterId: DEEPBOOK_SWAP_ADAPTER_ID,
-      protocol: DEEPBOOK_SWAP_PROTOCOL,
-      actionKind: DEEPBOOK_SWAP_ACTION_KIND,
-      stageCatalogId: DEEPBOOK_SWAP_REVIEW_LIFECYCLE_STAGE_CATALOG_ID,
+      ...deepbookIdentity,
       computeReview: deepbookSwapEvidenceComputer(wiring.deepbook)
     }
   ];
@@ -83,12 +98,15 @@ function deepbookSwapEvidenceComputer(wiring: DeepbookReviewAdapterWiring): Revi
       };
     }
     return computeDeepbookSwapReviewEvidence({
+      preparationId: input.preparationId,
       reviewSessionId: input.reviewSessionId,
       plan: input.plan,
       account: input.account,
       now: input.now,
+      clock: input.clock,
       quoteSource: wiring.deepbookQuoteSource,
       deepBalanceSource: wiring.deepbookDeepBalanceSource,
+      gasFeePolicySource: wiring.gasFeePolicySource,
       transactionMaterialProducer: wiring.deepbookTransactionMaterialProducer,
       transactionMaterialDigestProducer: wiring.deepbookTransactionMaterialDigestProducer,
       transactionObjectOwnershipProducer: wiring.transactionObjectOwnershipProducer,

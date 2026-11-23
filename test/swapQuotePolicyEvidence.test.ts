@@ -69,7 +69,8 @@ function buildEvidence() {
       raw: policy.minOutRaw,
       asset: quoteAmount(quote.rawQuote.directionalOutput).asset
     },
-    protocolFee: quoteAmount(quote.rawQuote.deepRequired),
+    inputFlow: quote.inputFlow,
+    separateFeeBudgetRaw: quote.rawQuote.deepRequired.raw,
     derivedAt: now
   });
 
@@ -92,7 +93,7 @@ describe("swap quote policy evidence", () => {
         poolKey: "SUI_USDC"
       },
       minimumOutput: {
-        raw: "122839505"
+        raw: "122839506"
       }
     });
 
@@ -101,19 +102,29 @@ describe("swap quote policy evidence", () => {
       status: "mapped",
       rawQuantities: expect.arrayContaining([
         expect.objectContaining({ role: "expected_output", rawAmount: "123456789" }),
-        expect.objectContaining({ role: "minimum_output", rawAmount: "122839505" })
+        expect.objectContaining({ role: "minimum_output", rawAmount: "122839506" })
       ]),
       evidenceClaims: expect.arrayContaining([
-        expect.objectContaining({ factKind: "quote_min_out", minOutRaw: "122839505" }),
+        expect.objectContaining({ factKind: "quote_min_out", minOutRaw: "122839506" }),
         expect.objectContaining({
           factKind: "slippage_policy",
           policySource: "adapter_policy_from_quote_evidence",
           maxSlippageBps: 50,
-          minOutRaw: "122839505"
+          minOutRaw: "122839506"
         })
       ])
     });
     expect(JSON.stringify(mapping)).not.toContain("transactionBytes");
+  });
+
+  it("rejects the earlier policy version and inconsistent input conservation", () => {
+    const { evidence, materialHandle, now } = buildEvidence();
+    const verify = (candidate: unknown) => verifySwapQuotePolicyEvidence({
+      transactionMaterial: materialHandle, evidence: candidate as typeof evidence, now
+    });
+    expect(() => verify({ ...evidence, evidenceVersion: "swap-quote-policy-v1" })).toThrow();
+    expect(() => verify({ ...evidence, inputFlow: { ...evidence.inputFlow, expectedReturnRaw: "1" } })).toThrow(/principal/);
+    expect(() => verify({ ...evidence, separateFeeBudgetRaw: "24999" })).toThrow(/fee budget/);
   });
 
   it("rejects quote evidence whose min-out no longer matches the quote policy formula", () => {

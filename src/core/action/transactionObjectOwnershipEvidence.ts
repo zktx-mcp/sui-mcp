@@ -1,3 +1,4 @@
+import type { verifyLocalTransactionMaterialArtifacts } from "../session/transactionMaterialStore.js";
 import { Transaction } from "@mysten/sui/transactions";
 import { transactionFundingEvidenceSchema, describeTransactionFunding, assertTransactionFundingMatches } from "./transactionFunding.js";
 import { z } from "zod";
@@ -158,11 +159,10 @@ export function verifyTransactionObjectOwnershipEvidence(input: {
   transactionMaterial: LocalTransactionMaterialHandle;
   transactionMaterialDigest: LocalTransactionMaterialDigestCommitment;
   evidence: TransactionObjectOwnershipEvidence;
-  transactionBytes: Uint8Array;
   now?: Date | undefined;
-}): TransactionObjectOwnershipEvidence {
+} & ({ transactionBytes: Uint8Array } | { verifiedMaterial: Awaited<ReturnType<typeof verifyLocalTransactionMaterialArtifacts>> })): TransactionObjectOwnershipEvidence {
   const evidence = parseTransactionObjectOwnershipEvidence(input.evidence);
-  assertTransactionFundingMatches(describeTransactionFunding(Transaction.from(input.transactionBytes).getData(), input.transactionMaterial.account, evidence.funding.chainIdentifier), evidence.funding);
+  assertTransactionFundingMatches(describeTransactionFunding("verifiedMaterial" in input ? input.verifiedMaterial.transactionData : Transaction.from(input.transactionBytes).getData(), input.transactionMaterial.account, evidence.funding.chainIdentifier), evidence.funding);
   const now = input.now ?? new Date();
   const nowMs = now.getTime();
   if (!Number.isFinite(nowMs)) {

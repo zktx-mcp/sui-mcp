@@ -20,11 +20,11 @@ type CoinFlowAccumulator = {
 
 export function attachRequestedAccountEffects<T extends SuiTransactionActivityFact>(
   transactions: T[],
-  account: string
+  account: string, providerAffected = false
 ): Array<T & { accountEffects: SuiTransactionAccountEffects }> {
   return transactions.map((transaction) => ({
     ...transaction,
-    accountEffects: requestedAccountEffectsForTransaction(transaction, account)
+    accountEffects: requestedAccountEffectsForTransaction(transaction, account, providerAffected)
   }));
 }
 
@@ -37,16 +37,16 @@ export function buildRequestedAccountActivity(
 ): SuiRequestedAccountActivity {
   const coinFlows = new Map<string, CoinFlowAccumulator>();
   let sentCount = 0;
-  let affectedOnlyCount = 0;
+  let affectedOnlyCount = 0, unconfirmedCount = 0;
   let completeness: SuiAccountBalanceChangeCompleteness = "complete";
 
   for (const transaction of input.transactions) {
     const effects = transaction.accountEffects ?? requestedAccountEffectsForTransaction(transaction, input.account);
     if (effects.sentByAccount) {
       sentCount += 1;
-    } else {
-      affectedOnlyCount += 1;
-    }
+    } else if (effects.role === "affected_only") {
+      affectedOnlyCount++;
+    } else unconfirmedCount++;
     completeness = mergeCompleteness(completeness, effects.balanceChangeCompleteness);
 
     for (const change of effects.balanceChanges) {
@@ -72,7 +72,7 @@ export function buildRequestedAccountActivity(
     account: input.account,
     relationship: input.relationship,
     sentCount,
-    affectedOnlyCount,
+    affectedOnlyCount, unconfirmedCount,
     balanceChangeCompleteness: completeness,
     coinFlows: [...coinFlows.entries()]
       .map(([coinType, value]) => ({
@@ -88,14 +88,14 @@ export function buildRequestedAccountActivity(
 
 export function requestedAccountEffectsForTransaction(
   transaction: SuiTransactionActivityFact,
-  account: string
+  account: string, providerAffected = false
 ): SuiTransactionAccountEffects {
   const sentByAccount = addressMatches(transaction.sender, account);
   if (transaction.details === undefined) {
     return {
       account,
       scope: "requested_account",
-      role: sentByAccount ? "sender" : "affected_only",
+      role: sentByAccount ? "sender" : providerAffected ? "affected_only" : "unconfirmed",
       sentByAccount,
       balanceChangeEvidence: "account_balance_changes_unavailable",
       accountBalanceChangeInferencePolicy: "do_not_infer_from_transaction_context",
@@ -114,13 +114,14 @@ export function requestedAccountEffectsForTransaction(
       amountRaw: change.amountRaw,
       direction: change.direction
     }));
-  const balanceChangeCompleteness = transaction.details.truncation.balanceChanges ? "truncated" : "complete";
+  const balanceChangeCompleteness = transaction.details.partialReasons?.balanceChanges === "not_returned" ? "unavailable"
+    : transaction.details.truncation.balanceChanges ? "truncated" : "complete";
   const balanceChangeEvidence = balanceChangeEvidenceFor(balanceChangeCompleteness, balanceChanges);
 
   return {
     account,
     scope: "requested_account",
-    role: sentByAccount ? "sender" : "affected_only",
+    role: sentByAccount ? "sender" : providerAffected || balanceChanges.length ? "affected_only" : "unconfirmed",
     sentByAccount,
     balanceChangeEvidence,
     accountBalanceChangeInferencePolicy: accountBalanceChangeInferencePolicyFor(

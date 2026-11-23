@@ -1,3 +1,4 @@
+import type { SwapQuoteInputFlow } from "../action/swapQuoteAmounts.js";
 import type {
   AccountBalances,
   AccountInfo,
@@ -7,13 +8,13 @@ import { formatRawAmount, normalizeCoinType, parseDisplayAmountToRaw } from "./c
 import { MAX_RAW_U64, parseRawU64 } from "../numeric/rawU64.js";
 import { parseSuiAddress } from "../suiAddress.js";
 import {
-  DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE,
-  DEEPBOOK_OFFICIAL_INDEXER_PRICE_CONVENTION,
-  type DeepbookOfficialIndexerPool
-} from "./deepbookOfficialIndexerSource.js";
+  DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
+  DEEPBOOK_CANDLE_PRICE_CONVENTION,
+  type DeepbookCandlePool
+} from "./deepbookCandleSource.js";
 import {
-  DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE,
-  DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT,
+  DEEPBOOK_CANDLE_CANDLE_USE,
+  DEEPBOOK_CANDLE_RESPONSE_TEXT,
   DEEPBOOK_SDK_SIMULATION_SOURCE_BASE
 } from "./deepbookSourceOwners.js";
 import {
@@ -32,8 +33,8 @@ import {
   type DeepbookMidPriceSemantics,
   type DeepbookDisplayQuote,
   type DeepbookRawQuoteReturnValues,
-  type DeepbookQuoteQuantitySemantics,
-  type QuoteDirection
+  type DeepbookRawQuoteEvidence,
+  type DeepbookQuoteQuantitySemantics
 } from "./readServiceTypes.js";
 
 export const MAX_DEEPBOOK_QUOTE_RAW_AMOUNT = MAX_RAW_U64;
@@ -154,7 +155,7 @@ export function deepbookQuoteQuantitySemantics(
 export function deepbookUsdcPriceHistoryQuantitySemantics(): DeepbookUsdcPriceHistoryQuantitySemantics {
   return {
     kind: DEEPBOOK_USDC_PRICE_HISTORY_QUANTITY_KIND,
-    ...DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE,
+    ...DEEPBOOK_CANDLE_CANDLE_USE,
     liveQuoteAvailable: false,
     historicalMidPriceAvailable: false,
     globalMarketPriceAvailable: false,
@@ -184,16 +185,16 @@ export function deepbookUsdcPriceHistoryQuantitySemantics(): DeepbookUsdcPriceHi
 export function deepbookUsdcPriceHistoryResponseSummary(): DeepbookUsdcPriceHistoryResponseSummary {
   return {
     questionKind: "deepbook_usdc_price_history",
-    evidenceKind: "official_deepbook_indexer_candles",
-    sourceStatement: DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.sourceStatement,
-    usdcDisclaimer: DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.usdcDisclaimer,
-    candleMeaning: "Each candle is returned by the DeepBookV3 official Indexer for the requested interval.",
+    evidenceKind: "deepbook_pool_fill_candles",
+    sourceStatement: DEEPBOOK_CANDLE_RESPONSE_TEXT.sourceStatement,
+    usdcDisclaimer: DEEPBOOK_CANDLE_RESPONSE_TEXT.usdcDisclaimer,
+    candleMeaning: "Each candle aggregates finalized DeepBook fills for the identified Sui mainnet pool and UTC interval.",
     excludedFromConclusion: [...DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS]
   };
 }
 
-export function deepbookUsdcPriceHistoryPairFromOfficialPool(
-  pool: DeepbookOfficialIndexerPool
+export function deepbookUsdcPriceHistoryPairFromPool(
+  pool: DeepbookCandlePool
 ): DeepbookUsdcPriceHistoryPair {
   return {
     poolName: pool.pool_name,
@@ -205,10 +206,10 @@ export function deepbookUsdcPriceHistoryPairFromOfficialPool(
     },
     quoteAsset: {
       symbol: "USDC",
-      coinType: normalizeCoinType(DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE),
+      coinType: normalizeCoinType(DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE),
       decimals: pool.quote_asset_decimals
     },
-    priceConvention: DEEPBOOK_OFFICIAL_INDEXER_PRICE_CONVENTION
+    priceConvention: DEEPBOOK_CANDLE_PRICE_CONVENTION
   };
 }
 
@@ -334,21 +335,36 @@ export function assertValidDeepbookMidPrice(poolKey: string, midPrice: number): 
   return midPrice;
 }
 
-export function assertValidDeepbookQuote(
-  poolKey: string,
-  direction: QuoteDirection,
-  quote: DeepbookDisplayQuote
-): DeepbookDisplayQuote {
-  for (const [field, value] of Object.entries(quote)) {
-    if (typeof value !== "string" || !/^\d+(?:\.\d+)?$/.test(value)) {
-      throw new ReadServiceInputError("quote_unavailable", "DeepBook quote display amount is unavailable", {
-        poolKey,
-        direction,
-        field
-      });
-    }
+export const deepbookQuoteGetters = {
+  base_to_quote: {
+    deep: { method: "getQuoteQuantityOut", move: "pool::get_quote_quantity_out" },
+    input_coin: { method: "getQuoteQuantityOutInputFee", move: "pool::get_quote_quantity_out_input_fee" }
+  },
+  quote_to_base: {
+    deep: { method: "getBaseQuantityOut", move: "pool::get_base_quantity_out" },
+    input_coin: { method: "getBaseQuantityOutInputFee", move: "pool::get_base_quantity_out_input_fee" }
   }
-  return quote;
+} as const;
+
+export function deepbookQuoteInputFlow(quote: DeepbookRawQuoteEvidence): SwapQuoteInputFlow {
+  const sellBase = quote.sourceMoveFunction.startsWith("pool::get_quote_quantity_out");
+  const returned = sellBase ? quote.baseOut : quote.quoteOut;
+  const principal = parseDeepbookRawU64(quote.inputAmount.raw, "inputAmount", { positive: true });
+  const remainder = parseDeepbookRawU64(returned.raw, "expected input return");
+  const { raw, ...asset } = quote.deepRequired;
+  const included = quote.sourceMoveFunction.endsWith("_input_fee");
+  if (remainder > principal || (included && raw !== "0")) {
+    throw new ReadServiceInputError("quote_unavailable", "DeepBook quote returned inconsistent input or fee amounts", { sourceMoveFunction: quote.sourceMoveFunction });
+  }
+  return {
+    expectedSpendRaw: (principal - remainder).toString(),
+    expectedReturnRaw: returned.raw,
+    fee: quote.poolTerms?.whitelisted && quote.poolTerms.takerFeeRaw === "0" && raw === "0"
+      ? { kind: "base_fee_waived", quotedRaw: "0", source: "pool_whitelist_and_zero_taker_rate" }
+      : included
+      ? { kind: "included_in_input", amountUnavailableReason: "not_itemized_by_quote" }
+      : { kind: "separate_coin", amount: { raw, asset } }
+  };
 }
 
 export function toDeepbookDisplayQuoteFromRaw(
@@ -391,6 +407,7 @@ function assertDeepbookDisplayNumber(value: number, field: string): void {
 
 function rawToDeepbookDisplayAmount(raw: string, decimals: number): string {
   try {
+    parseRawU64(raw, "quote return value");
     return formatRawAmount(raw, decimals);
   } catch (error) {
     throw new ReadServiceInputError("quote_unavailable", "DeepBook raw quote return value cannot be displayed", {
@@ -399,4 +416,24 @@ function rawToDeepbookDisplayAmount(raw: string, decimals: number): string {
       reason: error instanceof Error ? error.message : "unknown"
     });
   }
+}
+
+export function deepbookMinimumBaseRaw(terms: NonNullable<DeepbookRawQuoteEvidence["poolTerms"]>): bigint {
+  const lot = parseRawU64(terms.lotSizeRaw, "lot size", { positive: true });
+  const min = parseRawU64(terms.minBaseRaw, "minimum base", { positive: true });
+  return (min + lot - 1n) / lot * lot;
+}
+
+// DeepBook book::get_quantity_out applies the input-fee divisor before lot rounding.
+export function deepbookMinimumInputRaw(quote: DeepbookRawQuoteEvidence): bigint | undefined {
+  const terms = quote.poolTerms;
+  if (!terms) return undefined;
+  if (!quote.sourceMoveFunction.startsWith("pool::get_quote_quantity_out")) {
+    return terms.minimumBuyQuoteRaw == null ? undefined : parseRawU64(terms.minimumBuyQuoteRaw, "quote needed for minimum base");
+  }
+  const base = deepbookMinimumBaseRaw(terms);
+  if (!quote.sourceMoveFunction.endsWith("_input_fee")) return base;
+  const scale = 1_000_000_000n;
+  const rate = parseRawU64(terms.takerFeeRaw, "taker fee") * 1_250_000_000n / scale;
+  return (base * (scale + rate) + scale - 1n) / scale;
 }

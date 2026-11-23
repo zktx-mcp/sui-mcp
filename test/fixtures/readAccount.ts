@@ -1,14 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { ActivityStore, ActiveAccountRecord } from "../../src/core/activity/activityStore.js";
 import { SqliteActivityStore } from "../../src/core/activity/sqliteActivityStore.js";
-import { InMemoryActivityStore } from "./inMemoryActivityStore.js";
 import { walletConnectionSchema } from "../../src/core/session/walletConnection.js";
 import { initialGrantRevisions } from "../../src/core/session/chainAccounts.js";
 
 // External setup for read/history unit tests only. The record is disconnected,
 // has no SDK topic or grant, and cannot prove wallet admission or signing.
 export async function seedCurrentReadAccount(store: ActivityStore, address: string, at = new Date(), wallet?: { name?: string | undefined; connectionId?: string | undefined }): Promise<ActiveAccountRecord> {
-  if (store instanceof InMemoryActivityStore) return store.seedReadAccount(address, at);
   if (!(store instanceof SqliteActivityStore)) throw new Error("A concrete read fixture store is required.");
   const account = await store.upsertAccount(address, "wallet_connection", at);
   const db = store.createSettingsWorkflowStore("read-fixture").db;
@@ -27,7 +25,6 @@ export async function seedCurrentReadAccount(store: ActivityStore, address: stri
 
 // State setup for read/display tests; full permission/admission is tested through Settings.
 export async function seedReadAddressCleared(store: ActivityStore): Promise<void> {
-  if (store instanceof InMemoryActivityStore) { await store.clearReadFixture(); return; }
   if (!(store instanceof SqliteActivityStore)) throw new Error("A concrete read fixture store is required.");
   const current = await store.getActiveAccount();
   if (!current?.connectionId) throw new Error("A current stored read address is required.");

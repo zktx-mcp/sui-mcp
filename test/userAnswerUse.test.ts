@@ -324,7 +324,7 @@ describe("userAnswerUse field references", () => {
       },
       {
         label: "stored activity",
-        userAnswerUse: storedSuiActivityUserAnswerUse("all"),
+        userAnswerUse: storedSuiActivityUserAnswerUse("all", { completeTransactions: 1, incompleteTransactions: 0, rowsTruncated: false }),
         expected: {
           canAnswer: "stored_local_normalized_activity_summary_for_the_selected_account",
           cannotAnswer: "profit_or_pnl",
@@ -404,7 +404,8 @@ describe("userAnswerUse field references", () => {
               sourceSymbol: "WUSDT",
               targetSymbol: "USDC",
               sourceDisplayAmount: "2",
-              status: "quoted"
+              status: "quoted",
+              quote: { quoteOutcome: "input_returned", inputFlow: { expectedSpendRaw: "1800000", expectedReturnRaw: "200000" } }
             }
           ],
           requiredUserChoices: []
@@ -451,7 +452,9 @@ describe("userAnswerUse field references", () => {
           direction: "base_to_quote",
           amountRaw: "1000",
           quote: { baseOut: "0", quoteOut: "1", deepRequired: "0" },
-          rawQuote: { directionalOutput: {}, returnValueOrder: [], boundary: {} },
+          quoteOutcome: "full_input_spend",
+          inputFlow: { expectedSpendRaw: "10", expectedReturnRaw: "0", fee: {} },
+          rawQuote: { inputAmount: {}, directionalOutput: {}, returnValueOrder: [], boundary: {} },
           fetchedAt: "2026-05-11T00:00:00.000Z",
           source: {},
           quantitySemantics: quoteQuantitySemanticsShape
@@ -465,7 +468,9 @@ describe("userAnswerUse field references", () => {
           direction: "base_to_quote",
           inputAmount: {},
           quote: { baseOut: "0", quoteOut: "1", deepRequired: "0" },
-          rawQuote: { directionalOutput: {}, returnValueOrder: [], boundary: {} },
+          quoteOutcome: "full_input_spend",
+          inputFlow: { expectedSpendRaw: "10", expectedReturnRaw: "0", fee: {} },
+          rawQuote: { inputAmount: {}, directionalOutput: {}, returnValueOrder: [], boundary: {} },
           fetchedAt: "2026-05-11T00:00:00.000Z",
           source: {},
           quantitySemantics: quoteQuantitySemanticsShape
@@ -732,8 +737,9 @@ describe("userAnswerUse field references", () => {
       },
       {
         name: "stored Sui activity",
-        userAnswerUse: storedSuiActivityUserAnswerUse("all"),
+        userAnswerUse: storedSuiActivityUserAnswerUse("all", { completeTransactions: 1, incompleteTransactions: 0, rowsTruncated: false }),
         sourceShape: {
+          accountCoinFlows: { rows: [], rowsTruncated: false, completeTransactions: 1, incompleteTransactions: 0 },
           summary: {},
           analysis: {},
           transactionDetailAvailability: {
@@ -940,7 +946,7 @@ describe("userAnswerUse field references", () => {
     );
     expect(liveActivity.answerFields).not.toEqual(expect.arrayContaining(["transactions[].transactionContext"]));
 
-    const storedActivity = storedSuiActivityUserAnswerUse("none");
+    const storedActivity = storedSuiActivityUserAnswerUse("none", { completeTransactions: 0, incompleteTransactions: 1, rowsTruncated: false });
     expect(storedActivity.canAnswer).not.toEqual(
       expect.arrayContaining(["stored_transaction_context_for_all_returned_rows"])
     );
@@ -962,7 +968,7 @@ describe("userAnswerUse field references", () => {
       allReturnedTransactionsHaveDetails: false
     });
 
-    const storedActivity = storedSuiActivityUserAnswerUse(availability);
+    const storedActivity = storedSuiActivityUserAnswerUse(availability, { completeTransactions: 1, incompleteTransactions: 1, rowsTruncated: true });
     expect(storedActivity.canAnswer).toEqual(
       expect.arrayContaining(["stored_transaction_context_for_some_returned_rows"])
     );
@@ -970,13 +976,14 @@ describe("userAnswerUse field references", () => {
       expect.arrayContaining(["stored_transaction_context_for_all_returned_rows"])
     );
     expect(storedActivity.cannotAnswer).toEqual(
-      expect.arrayContaining(["stored_transaction_context_for_all_returned_rows_without_all_details"])
+      expect.arrayContaining(["stored_transaction_context_for_all_returned_rows_without_all_details",
+        "complete_asset_list_or_zero_flow_for_an_unlisted_asset", "account_amounts_for_transactions_with_incomplete_balances"])
     );
     expect(storedActivity.answerFields).toEqual(expect.arrayContaining(["transactionDetailAvailability"]));
     expect(storedActivity.answerFields).not.toEqual(
       expect.arrayContaining(["transactions[].compact", "transactions[].details"])
     );
-    expect(storedActivity.conclusionRuleFields).toEqual(expect.arrayContaining(["transactionDetailAvailability"]));
+    expect(storedActivity.conclusionRuleFields).toEqual(expect.arrayContaining(["transactionDetailAvailability", "accountCoinFlows.rowsTruncated", "accountCoinFlows.incompleteTransactions"]));
 
     const liveActivity = liveSuiActivityUserAnswerUse({
       includeAnalysis: true,

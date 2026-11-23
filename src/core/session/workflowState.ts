@@ -164,7 +164,7 @@ export function workflowEligibility(facts: WorkflowEligibilityFacts) {
   if (session && inputAvailable && record?.scope === "review" && session.status !== "expired" && Date.parse(session.expiresAt) > at && !session.preparationId) {
     allowedActions.push("cancel");
     if (walletAvailability.status === "available" && reviewConnection && !session.plans[0]?.reviewModel) {
-      if (!facts.busyForAccount) allowedActions.push("prepare_review");
+      if (!facts.busyForAccount && session.reviewState?.blockedReason !== "below_minimum_order") allowedActions.push("prepare_review");
       if (!facts.busyForAccount && connectionHasSuiSigningScope(reviewConnection, targetAccount!) && session.status === "ready_for_wallet_review" && session.reviewState?.transactionReviewData &&
           (!request || request.reviewRevision !== session.reviewRevision)) allowedActions.push("request_signature");
     }

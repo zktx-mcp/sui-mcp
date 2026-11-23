@@ -4,6 +4,8 @@ import { readStoredTransactionRequest } from "./sqliteTransactionRequest.js";
 import type { EventLogRecord } from "../eventlog/sink.js";
 import { type WalletSnapshot } from "./walletRuntime.js";
 import { materialStillMatches, type ValidatedReviewMaterial } from "./reviewValidity.js";
+import { interruptedReviewStatus } from "./reviewTransitions.js";
+import type { InternalSessionStatus } from "../action/types.js";
 import type { LocalTransactionMaterialStore } from "./transactionMaterialStore.js";
 import { SqliteSessionRecordStore, SqlitePrivateReviewArtifactStore } from "./sqliteSessionStore.js";
 import { fixedReviewTarget, workflowEligibility, walletActionDecision, type ConnectionFacts, type ReviewReadTarget, type WorkflowEvaluationInput, type EvaluatedWorkflowState, type WorkflowAction } from "./workflowState.js";
@@ -16,14 +18,14 @@ import { initialGrantRevisions, fixedChainAccount, approvedChainResults, type Wa
 import { isDeepStrictEqual } from "node:util";
 import type { SqliteDatabase } from "../activity/sqliteActivityStoreTypes.js";
 import { assertNoForbiddenMcpFields } from "../action/forbiddenFields.js";
-import { reviewStateOutputSchema } from "../action/schemas.js";
+import { parseReviewStateStructuralInvariants } from "../action/reviewStateValidation.js";
 import { LIVE_REVIEW_SESSION_WRITE_CONTRACT_VERSION } from "./liveReviewSessionContract.js";
 import { SqliteCardRecordStore } from "./sqliteCardStore.js";
 import { receiptDisplaySchema, type CardRecord, type ReceiptDisplay } from "./cardSession.js";
-import { isOwnedConnectedWallet, usableWalletConnection, connectionHasSuiSigningScope, walletConnectionEligibility, walletConnectionSchema, walletRecoveryImpactSchema, SUI_MAINNET_WALLET_CHAIN,
+import { isManagedConnectedWallet, usableWalletConnection, connectionHasSuiSigningScope, walletConnectionEligibility, walletConnectionSchema, walletRecoveryImpactSchema, SUI_MAINNET_WALLET_CHAIN,
   type WalletConnection, type WalletConnectionRecord, type WalletSession, type WalletConnectionPresence, type WalletRecoveryImpact } from "./walletConnection.js";
 import { SIGNATURE_WAIT_MS, CHAIN_RECEIPT_LOOKUP_MAX_AGE_MS, INITIAL_CHAIN_OBSERVATION_STATUSES, isInitialChainObservation,
-  transactionExecutionSummarySchema, requestTransitions, type TransactionRequest,
+  receiptObservationMessages, type ReceiptObservationKind, transactionExecutionSummarySchema, canTransitionRequest, type TransactionRequest,
   type TransactionRequestStatus, type TransactionExecutionSummary } from "./transactionRequest.js";
 
 export class WorkflowConflict extends Error {
@@ -36,7 +38,7 @@ export type RequestAuthority = {
   can_submit: number; sdk_pending: number; submit_pending: number; lookup_pending: number;
   signature_deadline: string; lookup_deadline: string | null; observation_stopped: number;
 };
-type ReviewRow = { id: string; status: string; account: string | null; expires_at: string;
+type ReviewRow = { id: string; status: InternalSessionStatus; account: string | null; expires_at: string;
   review_revision: number; preparation_id: string | null; preparation_error: string | null;
   current_attempt_id: string | null; wallet_connection_id: string | null; wallet_grant_revision: number | null; review_state_json: string | null };
 const interruptionReasons = {
@@ -56,6 +58,14 @@ const preparationInterruptionReasons = {
 
 /** Purpose-specific mutations on the activity owner's connection. Each method
  * commits card, request and public history together; no network work runs here. */
+// Both opening writers call this inside the transaction that appends the event.
+// SQLite stores canonical UTC timestamps, so their lexical order is chronological.
+export function claimFirstReviewOpening(db: SqliteDatabase, reviewId: string, observedAt: string) {
+  return db.prepare(`UPDATE review_sessions SET opened_at=max(created_at, ?)
+    WHERE id=? AND opened_at IS NULL RETURNING opened_at, current_status, account_id`)
+    .get(observedAt, reviewId) as { opened_at: string; current_status: string; account_id: number | null } | undefined;
+}
+
 export class SqliteWalletWorkflowStore {
   private readonly cards: SqliteCardRecordStore;
   private runId: string | undefined;
@@ -109,6 +119,16 @@ export class SqliteWalletWorkflowStore {
         !isDeepStrictEqual(current.state.input, expected.state.input)) throw new SessionStoreError("input_invalid", "Card access is unavailable.");
     return current;
   }
+  pendingReviewIds(now: Date): string[] {
+    const rows = this.db.prepare(`SELECT id FROM live_review_sessions WHERE owner_id=? AND preparation_id IS NOT NULL
+      UNION SELECT json_extract(input_json,'$.reviewSessionId') FROM live_read_cards
+        WHERE owner_id=? AND scope='review' AND state='ready' AND accepted_input_json IS NULL AND expires_at>?
+      UNION SELECT r.review_session_id FROM review_requests r JOIN live_request_authority a ON a.attempt_id=r.attempt_id
+        JOIN review_sessions s ON s.id=r.review_session_id AND s.current_attempt_id=r.attempt_id
+        WHERE r.request_status IN ('awaiting_signature','submitting','awaiting_chain_result') OR a.lookup_pending=1`)
+      .all(this.ownerId, this.ownerId, now.toISOString()) as {id:string}[];
+    return rows.map((r) => r.id);
+  }
   reviewReadTarget(reviewSessionId: string, expectedCard?: CardRecord): ReviewReadTarget {
     const card = expectedCard && this.currentCard(expectedCard);
     if (card && (card.state.kind !== "review" || card.state.input.reviewSessionId !== reviewSessionId)) {
@@ -119,7 +139,7 @@ export class SqliteWalletWorkflowStore {
     if (exactId && !request || request && request.reviewSessionId !== reviewSessionId) {
       throw new SessionStoreError("session_mismatch", "The request identity does not match this review.");
     }
-    const liveReview = new SqliteSessionRecordStore(this.db).get(reviewSessionId);
+    const liveReview = this.db.prepare("SELECT status, expires_at AS expiresAt FROM live_review_sessions WHERE id=?").get(reviewSessionId) as { status:string; expiresAt:string } | undefined;
     const at = this.clock().getTime();
     return { reviewSessionId, attemptId: request?.attemptId, walletDependent: !request || request.requestStatus === "awaiting_signature" ||
       !!(card?.scope === "review" && card.state.state === "ready" && !card.operationId && Date.parse(card.state.expiresAt) > at &&
@@ -341,9 +361,18 @@ export class SqliteWalletWorkflowStore {
       { current_attempt_id: string | null } | undefined;
     return row?.current_attempt_id ? this.request(row.current_attempt_id) : undefined;
   }
+  reviewedOutputGuard(digest: string, sender: string) {
+    const attempts = this.db.prepare(`SELECT r.attempt_id FROM review_requests r
+      JOIN live_request_authority a ON a.attempt_id=r.attempt_id
+      JOIN accounts w ON w.id=r.account_id AND w.chain_id='sui:mainnet'
+      WHERE r.transaction_digest=? AND w.address=? AND a.owner_id=?`).all(digest, sender, this.ownerId) as { attempt_id: string }[];
+    const guards = attempts.map(row => this.requestReview(row.attempt_id)?.transactionReviewData?.slippageOrMinOut.enforcement);
+    const guard = guards[0];
+    return guard?.transactionDigest === digest && guards.every(item => isDeepStrictEqual(guard, item)) ? guard : undefined;
+  }
   requestReview(id: string) {
     const row = this.db.prepare("SELECT review_state_json FROM review_requests WHERE attempt_id=?").get(id) as { review_state_json: string } | undefined;
-    return row ? reviewStateOutputSchema.parse(JSON.parse(row.review_state_json)) : undefined;
+    return row ? parseReviewStateStructuralInvariants(JSON.parse(row.review_state_json)) : undefined;
   }
   authority(id: string): RequestAuthority | undefined {
     return this.db.prepare("SELECT * FROM live_request_authority WHERE attempt_id=?").get(id) as RequestAuthority | undefined;
@@ -407,7 +436,9 @@ export class SqliteWalletWorkflowStore {
   }
   expireConnections(now: Date, operationId?: string): void {
     const connectionId = operationId ? this.operation(operationId)?.connectionId : undefined;
-    const records = operationId ? connectionId ? this.connectionRows(connectionId) : [] : this.connections();
+    const records = operationId ? connectionId ? this.connectionRows(connectionId) : [] :
+      (this.db.prepare("SELECT id FROM live_wallet_connections WHERE owner_id=? AND status='awaiting_approval'")
+        .all(this.ownerId) as {id:string}[]).flatMap((row) => this.connectionRows(row.id));
     for (const record of records) if (record.ownerId === this.ownerId && record.connection.status === "awaiting_approval" &&
       Date.parse(record.connection.expiresAt) <= now.getTime()) {
       this.updateConnection(record.connection.connectionId, { status: "expired", reason: "The time to approve this connection has ended." }, now);
@@ -415,6 +446,21 @@ export class SqliteWalletWorkflowStore {
         .all(record.connection.connectionId) as { operation_id: string }[];
       for (const row of rows) this.finishConnectionOperation(row.operation_id, "stopped", "The connection request expired.", now, "expired", this.operation(row.operation_id)?.settlementPending ? "approval_response" : undefined);
     }
+  }
+  recordObservation(id: string, kind: ReceiptObservationKind, now: Date): void {
+    this.db.transaction(() => {
+      const request = this.request(id), authority = this.authority(id);
+      if (!request || !authority || authority.owner_id !== this.ownerId || !authority.lookup_pending ||
+          request.execution || authority.observation_stopped) return;
+      const observedAt = new Date(Math.max(now.getTime(), Date.parse(request.updatedAt))).toISOString();
+      this.db.prepare("UPDATE review_requests SET observation_json=? WHERE attempt_id=?")
+        .run(JSON.stringify({ kind, observedAt }), id);
+      if (request.requestStatus !== "outcome_unknown" && (kind === "access_denied" || kind === "wrong_chain" || kind === "verification_failed")) {
+        this.transitionRequest(id, "outcome_unknown", now, { reason: receiptObservationMessages[kind] });
+      } else if (request.lastObservation?.kind !== kind) {
+        this.publish(id, false);
+      }
+    }).immediate();
   }
   beginObservation(id: string, explicit: boolean): TransactionRequest | undefined {
     return this.db.transaction(() => {
@@ -739,6 +785,8 @@ export class SqliteWalletWorkflowStore {
     reviewConnection: WalletConnection, walletRunId: string): { request: TransactionRequest; created: boolean } {
     const result = this.db.transaction(() => {
       const now = this.clock();
+      if (material.review.reviewState?.transactionReviewData?.slippageOrMinOut.status === "required_and_verified" &&
+        !material.artifacts.swapQuotePolicy?.enforcement) throw new WorkflowConflict("Refresh the review to verify the transaction minimum.");
       this.assertWalletInputAllowed();
       const binding = { reviewSessionId: material.reviewSessionId, planId: material.planId, account: material.account,
         reviewRevision: material.reviewRevision, transactionDigest: material.reviewedTransactionDigest,
@@ -766,7 +814,7 @@ export class SqliteWalletWorkflowStore {
           review.wallet_connection_id !== binding.connectionId || review.wallet_grant_revision !== binding.grantRevision ||
           review.review_revision !== binding.reviewRevision || state?.planId !== binding.planId ||
           data?.reviewedTransactionDigest !== binding.transactionDigest || Date.parse(review.expires_at) <= now.getTime() ||
-          !this.isUsableConnection(binding.connectionId, now) || !isOwnedConnectedWallet(connection, this.ownerId, !!this.pendingDisconnect(binding.connectionId)) ||
+          !this.isUsableConnection(binding.connectionId, now) || !isManagedConnectedWallet(connection, this.ownerId, !!this.pendingDisconnect(binding.connectionId)) ||
           connection.connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== binding.grantRevision || Date.parse(connection.connection.expiresAt) <= now.getTime() ||
           !connectionHasSuiSigningScope(connection.connection, binding.account)) {
         throw new WorkflowConflict("The account, wallet connection or transaction changed since this review was prepared.");
@@ -836,16 +884,19 @@ export class SqliteWalletWorkflowStore {
         request.requestStatus, account.id, request.reason ?? null, now.toISOString());
   }
   transitionRequest(id: string, next: TransactionRequestStatus, now: Date, options: {
-    reason?: string; execution?: TransactionExecutionSummary; signatureVerified?: boolean; excludedCardId?: string;
+    reason?: string; execution?: Omit<TransactionExecutionSummary, "recordedAt">; signatureVerified?: boolean; excludedCardId?: string;
     details?: { data: unknown; receiptDisplay?: ReceiptDisplay };
   } = {}): TransactionRequest | undefined {
+
     return this.db.transaction(() => {
       const old = this.request(id), authority = this.authority(id);
       if (!old || !authority || authority.owner_id !== this.ownerId) return undefined;
       if (old.requestStatus === next && (!options.signatureVerified || old.signatureVerifiedAt !== undefined)) return old;
-      if (old.requestStatus !== next && !requestTransitions[old.requestStatus].includes(next)) return old;
+      if (old.requestStatus !== next && !canTransitionRequest(old.requestStatus, next)) return old;
+      const recorded = new Date(Math.max(now.getTime(), Date.parse(old.updatedAt)));
       if (next === "completed") {
-        const execution = transactionExecutionSummarySchema.parse(options.execution);
+        this.db.prepare("UPDATE review_requests SET observation_json=NULL WHERE attempt_id=?").run(id);
+        const execution = transactionExecutionSummarySchema.parse({ ...options.execution, recordedAt: recorded.toISOString() });
         if (execution.attemptId !== id || execution.reviewSessionId !== old.reviewSessionId || execution.planId !== old.planId ||
             execution.txDigest !== old.transactionDigest || execution.chainReceipt.sender !== old.account) {
           throw new WorkflowConflict("Chain result does not match the admitted transaction.");
@@ -854,7 +905,7 @@ export class SqliteWalletWorkflowStore {
         this.db.prepare(`INSERT INTO review_executions
           (attempt_id,review_session_id,plan_id,account_id,status,tx_digest,failure_reason,result_json,recorded_at,updated_at)
           VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, old.reviewSessionId, old.planId, account.id, execution.status, execution.txDigest,
-            execution.failureReason ?? null, JSON.stringify(execution), now.toISOString(), now.toISOString());
+            execution.failureReason ?? null, JSON.stringify(execution), recorded.toISOString(), recorded.toISOString());
         if (options.details) {
           assertNoForbiddenMcpFields(options.details.data);
           const display = options.details.receiptDisplay ? receiptDisplaySchema.parse(options.details.receiptDisplay) : undefined;
@@ -864,13 +915,13 @@ export class SqliteWalletWorkflowStore {
         }
       }
       this.db.prepare(`UPDATE review_requests SET request_status=?, reason=?, revision=revision+1, updated_at=?,
-        signature_verified_at=COALESCE(signature_verified_at,?), submitted_at=COALESCE(submitted_at,?) WHERE attempt_id=? AND revision=?`)
-        .run(next, options.reason ?? old.reason ?? null, now.toISOString(), options.signatureVerified ? now.toISOString() : null,
-          next === "submitting" ? now.toISOString() : null, id, old.revision);
+        signature_verified_at=COALESCE(signature_verified_at,?), submission_admitted_at=COALESCE(submission_admitted_at,?) WHERE attempt_id=? AND revision=?`)
+        .run(next, next === "completed" ? null : options.reason ?? null, recorded.toISOString(), options.signatureVerified ? recorded.toISOString() : null,
+          next === "submitting" ? recorded.toISOString() : null, id, old.revision);
       if (next !== "awaiting_signature") this.db.prepare("UPDATE live_request_authority SET can_submit=0 WHERE attempt_id=?").run(id);
       const result = this.request(id)!;
-      this.recordRequestEvent(result, options.signatureVerified ? "signature_verified" : next === "completed" ? "chain_result_recorded" : "request_status_changed", old.requestStatus, now);
-      this.db.prepare("UPDATE review_sessions SET updated_at=? WHERE id=?").run(now.toISOString(), old.reviewSessionId);
+      this.recordRequestEvent(result, options.signatureVerified ? "signature_verified" : next === "completed" ? "chain_result_recorded" : "request_status_changed", old.requestStatus, recorded);
+      this.db.prepare("UPDATE review_sessions SET updated_at=? WHERE id=?").run(recorded.toISOString(), old.reviewSessionId);
       this.publish(id, !["awaiting_signature", "submitting", "awaiting_chain_result"].includes(next), options.excludedCardId);
       if (["stopped", "request_failed", "outcome_unknown", "completed"].includes(next)) {
         // A historical attempt may finish while a newer review is preparing.
@@ -893,7 +944,7 @@ export class SqliteWalletWorkflowStore {
           request.requestStatus !== "awaiting_signature" || Date.parse(authority.signature_deadline) <= now.getTime()) return false;
       const connection = this.connection(authority.connection_id);
       if (!this.isUsableConnection(authority.connection_id, now, SUI_MAINNET_WALLET_CHAIN, request.account) ||
-          !isOwnedConnectedWallet(connection, this.ownerId, !!this.pendingDisconnect(authority.connection_id)) ||
+          !isManagedConnectedWallet(connection, this.ownerId, !!this.pendingDisconnect(authority.connection_id)) ||
           connection.connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== authority.grant_revision ||
           !connectionHasSuiSigningScope(connection.connection, request.account) || Date.parse(connection.connection.expiresAt) <= now.getTime()) return false;
       this.db.prepare("UPDATE live_request_authority SET can_submit=0, submit_pending=1, lookup_deadline=? WHERE attempt_id=?")
@@ -953,7 +1004,7 @@ export class SqliteWalletWorkflowStore {
           delete state.transactionReviewData; delete state.blockedReason;
           state.status = "refresh_required"; state.refreshReason = "wallet_connection_changed";
         }
-        const status = state ? "refresh_required" : row.status;
+        const status = interruptedReviewStatus(row.status, !!state);
         this.db.prepare(`UPDATE live_review_sessions SET status=?,preparation_id=NULL,preparation_error=?,review_state_json=?,
           revision=revision+1,write_contract_version=? WHERE id=?`).run(status,
           preparationInterruptionReasons[cause],
@@ -993,7 +1044,7 @@ export class SqliteWalletWorkflowStore {
       const currentConnection = this.connection(connection.connectionId);
       if (!review || review.preparation_id !== null || review.review_revision !== reviewRevision ||
           review.status === "expired" || Date.parse(review.expires_at) <= now.getTime() ||
-          !this.isUsableConnection(connection.connectionId, now) || !isOwnedConnectedWallet(currentConnection, this.ownerId, !!this.pendingDisconnect(connection.connectionId)) ||
+          !this.isUsableConnection(connection.connectionId, now) || !isManagedConnectedWallet(currentConnection, this.ownerId, !!this.pendingDisconnect(connection.connectionId)) ||
           currentConnection.connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] || Date.parse(currentConnection.connection.expiresAt) <= now.getTime()) throw new WorkflowConflict("The review could not be updated with the current wallet and account.");
       if (review.wallet_connection_id && review.wallet_connection_id !== connection.connectionId) {
         throw new WorkflowConflict("This review remains bound to its original wallet connection.");
@@ -1021,12 +1072,14 @@ export class SqliteWalletWorkflowStore {
       const row = this.db.prepare("SELECT * FROM live_review_sessions WHERE id=? AND preparation_id=? AND owner_id=?")
         .get(id, preparationId, this.ownerId) as ReviewRow | undefined;
       if (!row) return;
+      this.db.prepare("DELETE FROM live_transaction_materials WHERE review_session_id=? AND preparation_id=?")
+        .run(id, preparationId);
       const prior = row.review_state_json ? JSON.parse(row.review_state_json) as Record<string, unknown> : undefined;
       if (prior && row.status !== "expired") {
         delete prior.transactionReviewData; delete prior.blockedReason;
         prior.status = "refresh_required"; prior.refreshReason = "review_update_failed";
       }
-      const status = prior && row.status !== "expired" ? "refresh_required" : row.status;
+      const status = interruptedReviewStatus(row.status, !!prior);
       this.db.prepare(`UPDATE live_review_sessions SET preparation_id=NULL,preparation_error=?,status=?,review_state_json=?,revision=revision+1,write_contract_version=? WHERE id=?`)
         .run(row.status === "expired" ? "The review expired while it was being updated." : "The review update could not be completed.",
           status, prior ? JSON.stringify(prior) : null, LIVE_REVIEW_SESSION_WRITE_CONTRACT_VERSION, id);
@@ -1038,11 +1091,10 @@ export class SqliteWalletWorkflowStore {
   }
   markReviewOpened(reviewSessionId: string, now: Date): void {
     this.db.transaction(() => {
-      const changed = this.db.prepare("UPDATE review_sessions SET opened_at=? WHERE id=? AND opened_at IS NULL").run(now.toISOString(), reviewSessionId);
-      if (!changed.changes) return;
-      const row = this.db.prepare("SELECT current_status,account_id FROM review_sessions WHERE id=?").get(reviewSessionId) as { current_status: string; account_id: number | null };
+      const row = claimFirstReviewOpening(this.db, reviewSessionId, now.toISOString());
+      if (!row) return;
       this.db.prepare(`INSERT INTO review_status_transitions(review_session_id,event,from_status,to_status,account_id,transitioned_at)
-        VALUES (?,'opened',?,?,?,?)`).run(reviewSessionId, row.current_status, row.current_status, row.account_id, now.toISOString());
+        VALUES (?,'opened',?,?,?,?)`).run(reviewSessionId, row.current_status, row.current_status, row.account_id, row.opened_at);
     }).immediate();
   }
   recover(now: Date): void {
@@ -1098,6 +1150,8 @@ export function hasUnsettledWalletWork(db: SqliteDatabase, now = new Date()): bo
   return !!db.prepare("SELECT 1 FROM wallet_connection_operations WHERE sdk_pending=1 OR status='running' LIMIT 1").get() ||
     !!db.prepare(`SELECT 1 FROM live_request_authority l JOIN review_requests r ON r.attempt_id=l.attempt_id
     WHERE l.sdk_pending=1 OR l.submit_pending=1 OR l.lookup_pending=1
-      OR (r.request_status IN (SELECT value FROM json_each(?)) AND (l.lookup_deadline IS NULL OR l.lookup_deadline>?)) LIMIT 1`)
+      OR ((r.request_status IN (SELECT value FROM json_each(?))
+        OR (r.request_status='outcome_unknown' AND l.lookup_deadline IS NOT NULL))
+        AND (l.lookup_deadline IS NULL OR l.lookup_deadline>?)) LIMIT 1`)
     .get(JSON.stringify(INITIAL_CHAIN_OBSERVATION_STATUSES), now.toISOString());
 }

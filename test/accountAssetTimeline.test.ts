@@ -1,3 +1,4 @@
+import { activityIndexGenesis } from "./fixtures/sqliteActivity.js";
 import { describe, expect, it } from "vitest";
 import { buildAccountAssetTimeline } from "../src/core/activity/accountAssetTimeline.js";
 import {
@@ -12,10 +13,9 @@ import { buildExternalActivityCoverageResult } from "../src/core/activity/extern
 import type { DeepbookUsdcPriceHistorySummary } from "../src/core/read/readServiceTypes.js";
 import { deepbookUsdcPriceHistoryQuantitySemantics, deepbookUsdcPriceHistoryResponseSummary } from "../src/core/read/deepbookReadHelpers.js";
 import {
-  DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE
+  DEEPBOOK_CANDLE_RESPONSE_TEXT,
+  DEEPBOOK_CANDLE_SOURCE_BASE
 } from "../src/core/read/deepbookSourceOwners.js";
-import { deepbookUsdcPriceHistoryUserAnswerUse } from "../src/core/read/readResponseGuidance.js";
 import type { ExternalActivityTransactionDetail } from "../src/core/activity/transactionActivityDetails.js";
 
 const account = `0x${"a".repeat(64)}`;
@@ -224,7 +224,7 @@ describe("account asset timeline builder", () => {
     expect(withReferences.usdcReferences.usdcIsFiatUsd).toBe(false);
     expect(withReferences.usdcReferences.usdPegGuaranteeAvailable).toBe(false);
     expect(withReferences.usdcReferences.responseSummary.usdcDisclaimer).toBe(
-      DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.usdcDisclaimer
+      DEEPBOOK_CANDLE_RESPONSE_TEXT.usdcDisclaimer
     );
     expect(withReferences.usdcReferences.coinReferences).toEqual([
       expect.objectContaining({
@@ -247,6 +247,22 @@ describe("account asset timeline builder", () => {
     ]);
   });
 
+  it("reads only occupied runs across a range exceeding the public history limit", async () => {
+    const from = "2026-05-11T00:00:00.000Z", to = "2026-05-13T00:00:00.000Z";
+    const timeline = buildAccountAssetTimeline({account, from, to, interval:"1m", coverage:completeCoverage(),
+      transactions:[from, "2026-05-12T23:59:01.000Z"].map((timestamp,i) => transaction({
+        digest:String(i+2).repeat(44), timestamp, changes:[{coinType:"0x2::sui::SUI",amountRaw:"7"}]
+      }))});
+    const windows: string[][] = [];
+    const result = await attachDeepbookUsdcReferencesToTimeline({timeline, getPriceHistory:async input => {
+      windows.push([input.start, input.end]);
+      return okHistory([]);
+    }});
+    expect(windows).toEqual([[from,"2026-05-11T00:01:00.000Z"],["2026-05-12T23:59:00.000Z",to]]);
+    expect(result.netFlowBars.map(bar => bar.netRaw)).toEqual(["7","7"]);
+    expect(result.usdcReferences.status).toBe("unavailable");
+  });
+
   it("keeps unsupported and unavailable DeepBook USDC references separate from net-flow bars", async () => {
     const timeline = buildAccountAssetTimeline({
       account,
@@ -260,22 +276,29 @@ describe("account asset timeline builder", () => {
           timestamp: "2026-05-11T00:05:00.000Z",
           changes: [
             { coinType: "0xunsupported::coin::COIN", amountRaw: "1" },
-            { coinType: "0xsource::coin::DOWN", amountRaw: "1" }
+            { coinType: "0xsource::coin::DOWN", amountRaw: "1" },
+            { coinType: "0xoffline::coin::OFF", amountRaw: "7" }
           ]
         })
       ]
     });
-    const reader: AccountAssetTimelineUsdcPriceHistoryReader = async (input) =>
-      input.coinType === "0xunsupported::coin::COIN"
-        ? unsupportedPairHistory()
-        : sourceUnavailableHistory();
-
+    const reader: AccountAssetTimelineUsdcPriceHistoryReader = async (input) => {
+      if (input.coinType === "0xoffline::coin::OFF") throw new Error("Price read interrupted");
+      return input.coinType === "0xunsupported::coin::COIN" ? unsupportedPairHistory() : sourceUnavailableHistory();
+    };
     const withReferences = await attachDeepbookUsdcReferencesToTimeline({ timeline, getPriceHistory: reader });
 
-    expect(withReferences.netFlowBars).toHaveLength(2);
+    expect(withReferences.netFlowBars).toEqual(timeline.netFlowBars);
     expect(withReferences.usdcReferences.status).toBe("unavailable");
     expect(withReferences.usdcReferences.coinReferences).toEqual([
       {
+        coinType: "0xoffline::coin::OFF",
+        range: { start: "2026-05-11T00:00:00.000Z", end: "2026-05-11T00:15:00.000Z" },
+        status: "source_unavailable",
+        reason: "chain_candle_source_unavailable"
+      },
+      {
+        range: { start:"2026-05-11T00:00:00.000Z", end:"2026-05-11T00:15:00.000Z" },
         coinType: "0xsource::coin::DOWN",
         status: "source_unavailable",
         reason: "candle_fetch_failed",
@@ -283,9 +306,10 @@ describe("account asset timeline builder", () => {
         source: undefined
       },
       {
+        range: { start:"2026-05-11T00:00:00.000Z", end:"2026-05-11T00:15:00.000Z" },
         coinType: "0xunsupported::coin::COIN",
         status: "unsupported_asset",
-        reason: "selector_not_in_official_indexer",
+        reason: "market_not_in_mainnet_pool_catalog",
         matchingPoolNames: [],
         availablePoolNames: ["SUI_USDC"]
       }
@@ -341,7 +365,7 @@ function scan(input: {
   incompleteReason?: "limit_reached" | undefined;
 }): ExternalActivityScanRecord {
   return {
-    scanId: input.scanId,
+    scanId: input.scanId, continuity: { sourceLower: activityIndexGenesis, rootScanId: input.scanId },
     kind: "account_scan",
     accountId: 1,
     account,
@@ -349,6 +373,7 @@ function scan(input: {
     fromTimestamp: "2026-05-11T00:00:00.000Z",
     toTimestamp: "2026-05-11T01:00:00.000Z",
     limit: 100,
+    sourceUpperTimestamp: "2026-12-01T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
     endpointHost: "graphql.mainnet.sui.io",
     chainIdentifier: "mainnet-chain",
     fetchedAt: "2026-05-11T01:00:01.000Z",
@@ -450,14 +475,15 @@ function okHistory(bars: Extract<DeepbookUsdcPriceHistorySummary, { status: "ok"
     barCount: bars.length,
     bars,
     source: {
-      kind: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind,
+      kind: DEEPBOOK_CANDLE_SOURCE_BASE.kind,
       baseUrl: "https://deepbook-indexer.mainnet.mystenlabs.com",
-      sourceStatement: DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.sourceStatement,
+      sourceStatement: DEEPBOOK_CANDLE_RESPONSE_TEXT.sourceStatement,
       poolList: {
         url: "https://deepbook-indexer.mainnet.mystenlabs.com/get_pools",
         fetchedAt: "2026-05-11T00:20:01.000Z"
       },
       candles: {
+        poolId: `0x${"1".repeat(64)}`,
         url: "https://deepbook-indexer.mainnet.mystenlabs.com/ohclv/SUI_USDC?interval=15m",
         fetchedAt: "2026-05-11T00:20:01.000Z",
         poolName: "SUI_USDC",
@@ -466,9 +492,9 @@ function okHistory(bars: Extract<DeepbookUsdcPriceHistorySummary, { status: "ok"
         endTimeMs: Date.parse("2026-05-11T00:30:00.000Z"),
         limit: 1008
       },
-      chainRecomputedBySuiMcp: false
+      chainRecomputedBySuiMcp: true
     },
-    userAnswerUse: deepbookUsdcPriceHistoryUserAnswerUse(),
+    userAnswerUse: { canAnswer: [], cannotAnswer: [], answerFields: [] },
     quantitySemantics: deepbookUsdcPriceHistoryQuantitySemantics(),
     responseSummary: deepbookUsdcPriceHistoryResponseSummary(),
     unsupportedClaims: [...deepbookUsdcPriceHistoryResponseSummary().excludedFromConclusion]
@@ -480,10 +506,10 @@ function unsupportedPairHistory(): DeepbookUsdcPriceHistorySummary {
     status: "unsupported_pair",
     fetchedAt: "2026-05-11T00:20:01.000Z",
     requested: okHistory([]).requested,
-    reason: "selector_not_in_official_indexer",
+    reason: "market_not_in_mainnet_pool_catalog",
     matchingPoolNames: [],
     availablePoolNames: ["SUI_USDC"],
-    userAnswerUse: deepbookUsdcPriceHistoryUserAnswerUse(),
+    userAnswerUse: { canAnswer: [], cannotAnswer: [], answerFields: [] },
     quantitySemantics: deepbookUsdcPriceHistoryQuantitySemantics(),
     responseSummary: deepbookUsdcPriceHistoryResponseSummary(),
     unsupportedClaims: [...deepbookUsdcPriceHistoryResponseSummary().excludedFromConclusion]
@@ -496,7 +522,7 @@ function sourceUnavailableHistory(): DeepbookUsdcPriceHistorySummary {
     fetchedAt: "2026-05-11T00:20:01.000Z",
     requested: okHistory([]).requested,
     reason: "candle_fetch_failed",
-    userAnswerUse: deepbookUsdcPriceHistoryUserAnswerUse(),
+    userAnswerUse: { canAnswer: [], cannotAnswer: [], answerFields: [] },
     quantitySemantics: deepbookUsdcPriceHistoryQuantitySemantics(),
     responseSummary: deepbookUsdcPriceHistoryResponseSummary(),
     unsupportedClaims: [...deepbookUsdcPriceHistoryResponseSummary().excludedFromConclusion]

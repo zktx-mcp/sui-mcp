@@ -129,6 +129,7 @@ export type SettingsOperation = {
   supersedesOperationId?: string; supersededByOperationId?: string;
 };
 export type SettingsFile = {
+  blockHashes?: string[] | undefined;
   fileId: string; operationId: string; role: "upload" | "export";
   relativePath: string; displayName: string; totalSize: number; receivedSize: number;
   sha256: string; sealed: boolean; invalidated: boolean;
@@ -173,8 +174,11 @@ export const endpointPreparationSchema = z.object({ endpoint: z.enum(["grpc", "g
 const count = z.number().int().nonnegative().safe();
 const localDataCounts = z.object({ accounts: count, reviewSessions: count, reviewStateSnapshots: count, reviewStatusTransitions: count,
   reviewExecutions: count, reviewRequests: count, outcomeUnknownRequests: count, externalActivityScans: count,
-  externalActivityTransactions: count, localSettings: count }).strict();
+  externalActivityObservations: count, externalActivityTransactions: count, localSettings: count }).strict();
+const storedSettingsValues = z.object({ suiGrpcUrl: z.string().nullable(), suiGraphqlUrl: z.string().nullable(),
+  walletConnectionChains: z.array(z.string()).nullable() }).strict();
 const importPreview = z.object({ status: z.literal("valid"), format: z.literal(LOCAL_DATA_EXPORT_FORMAT), network: z.literal("mainnet"),
+  currentSettings: storedSettingsValues.optional(), incomingSettings: storedSettingsValues.optional(),
   exportedAt: z.string().datetime(), currentCounts: localDataCounts, incomingCounts: localDataCounts, willReplace: z.literal(true),
   restartRequiredAfterImport: z.boolean() }).strict();
 export const settingsViewSchema = z.object({

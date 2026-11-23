@@ -1,3 +1,4 @@
+import { confirmLocalRecords } from "./fixtures/settingsWorkflow.js";
 import { suiGrants } from "./fixtures/walletGrants.js";
 import { FixtureWalletRuntime } from "./fixtures/walletRuntime.js";
 import { afterEach, expect, it, vi } from "vitest";
@@ -63,7 +64,7 @@ it.each(["topicless", "cancelled_retained", "cleanup_failed", "unusable"] as con
     } finally { db.close(); }
     observation = kind === "topicless" ? undefined : kind === "unusable"
       ? { topic: session.topic, status: "unusable" } : { topic: session.topic, status: "present", session };
-    source = { restore: vi.fn(async () => []), inspectAll: vi.fn(() => observation ? [observation] : []),
+    source = { cleanupPairings: vi.fn(async () => {}), inspectAll: vi.fn(() => observation ? [observation] : []),
       inspect: vi.fn((topic: string): WalletSessionInspection => observation && observation.topic === topic ? observation : { topic, status: "absent" }),
       session: (topic) => observation?.topic === topic && observation.status === "present" ? observation.session : undefined,
       connect: vi.fn(async () => ({ uri: "wc:synthetic-new-pairing", expiresAt: session.expiresAt, approval: approval.promise })),
@@ -155,7 +156,7 @@ it("keeps the real parent verification pending after child loss until it actuall
   f.runtime.fail("wallet_state_unavailable");
   expect(f.runtime.availability().status).toBe("unavailable");
   expect(f.run(() => f.records.authority(request.attemptId))).toMatchObject({ can_submit: 0, sdk_pending: 1 });
-  await expect(f.run(() => f.localData.resetLocalData())).rejects.toThrow("unsettled");
+  expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow("unsettled");
   const nextReview = await f.run(() => f.sessions.createReviewSession([f.plan], f.now()));
   const nextCard = await f.run(() => f.cards.create("review", { reviewSessionId: nextReview.session.id, connectionId: connection.connectionId, account: f.account }));
   expect(nextCard.snapshot.data).toMatchObject({ allowedActions: ["cancel"], review: { accountRequestPending: true } });
@@ -239,7 +240,7 @@ it.each(["completed", "submitting"] as const)("keeps %s transaction facts indepe
     expect(f.sign).toHaveBeenCalledOnce(); expect(f.submit).toHaveBeenCalledOnce();
     if (status === "submitting") {
       expect(f.run(() => f.records.authority(request.attemptId))).toMatchObject({ sdk_pending: 1, submit_pending: 1 });
-      await expect(f.run(() => f.localData.resetLocalData())).rejects.toThrow("unsettled");
+      expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow("unsettled");
     }
     db.exec("DROP TRIGGER reject_failure");
     expect((await f.read(card)).snapshot.data).toMatchObject({ walletAvailability: { status: "unavailable" } });
@@ -261,7 +262,7 @@ it("requires only its own lookup repair before admitting a new same-digest obser
     await expect(f.run(() => f.workflow.readReview(review.session.id, true))).rejects.toThrow("own lookup refused");
     expect(f.chainRead).toHaveBeenCalledTimes(calls);
     expect(f.run(() => f.records.authority(request.attemptId)?.lookup_pending)).toBe(1);
-    await expect(f.run(() => f.localData.resetLocalData())).rejects.toThrow();
+    await expect(f.run(() => confirmLocalRecords(f, f.localData))).rejects.toThrow();
     db.exec("DROP TRIGGER refuse_lookup"); f.chainRead.mockImplementation(chain);
     expect((await f.run(() => f.workflow.readReview(review.session.id, true)))?.request?.requestStatus).toBe("completed");
     expect(f.submit).toHaveBeenCalledOnce();

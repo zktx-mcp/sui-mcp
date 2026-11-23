@@ -11,7 +11,7 @@ import type {
 import type { ExternalActivityTransactionDetail } from "./transactionActivityDetails.js";
 import type { WalletChainId } from "../session/chainAccounts.js";
 
-export type AccountSource = "wallet_connection" | "review_execution";
+export type AccountSource = "wallet_connection" | "review_record";
 export type ReviewTransitionEvent =
   | "created"
   | "opened"
@@ -63,12 +63,23 @@ export type ExternalActivityIncompleteReason =
   | "cursor_invalid"
   | "provider_error";
 
+export type ScanCheckpoint = { checkpoint: string; timestamp: string };
+export type ScanSourceRange = { first: ScanCheckpoint; last: ScanCheckpoint };
+
+export type ScanContinuity = import("./transactionActivityScanPolicy.js").ScanPageProof;
+export type ScanContinuationQuery = Pick<ExternalActivityScanInput,
+  "kind" | "relationship" | "functionTarget" | "fromCheckpoint" | "toCheckpoint" | "fromTimestamp" | "toTimestamp" | "chainIdentifier" | "endpointHost"> &
+  { accountId: number; scanId: string };
 export type ExternalActivityScanInput = {
   scanId: string;
   kind: ExternalActivityScanKind;
   account: string;
   relationship: ExternalActivityRelationship;
   inputDigest?: string | undefined;
+  functionTarget?: string | undefined;
+  continuity?: ScanContinuity | undefined;
+  sourceUpperTimestamp?: string | undefined;
+  sourceUpperCheckpoint?: string | undefined;
   fromCheckpoint?: string | undefined;
   toCheckpoint?: string | undefined;
   fromTimestamp?: string | undefined;
@@ -82,7 +93,8 @@ export type ExternalActivityScanInput = {
   hasMore: boolean;
   windowComplete: boolean | null;
   incompleteReason?: ExternalActivityIncompleteReason | undefined;
-  skippedCount?: number | undefined;
+  outsideFilterCount?: number | undefined;
+  unconfirmedRelationCount?: number | undefined;
   transactions: ExternalActivityTransactionInput[];
 };
 
@@ -103,6 +115,10 @@ export type ExternalActivityScanRecord = {
   account: string;
   relationship: ExternalActivityRelationship;
   inputDigest?: string | undefined;
+  functionTarget?: string | undefined;
+  continuity?: ScanContinuity | undefined;
+  sourceUpperTimestamp?: string | undefined;
+  sourceUpperCheckpoint?: string | undefined;
   fromCheckpoint?: string | undefined;
   toCheckpoint?: string | undefined;
   fromTimestamp?: string | undefined;
@@ -115,12 +131,17 @@ export type ExternalActivityScanRecord = {
   fetchedAt: string;
   storedCount: number;
   skippedCount: number;
+  skippedReasons?: { outsideFilter: number; unconfirmedRelation: number; repeatedDigest: number };
   hasMore: boolean;
   windowComplete: boolean | null;
   incompleteReason?: ExternalActivityIncompleteReason | undefined;
 };
 
 export type ExternalActivityTransactionRecord = {
+  conflictingMetadata?: ("checkpoint" | "timestamp" | "knownSender")[];
+  lastObservationDetail?: "available" | "missing" | "size_limit";
+  observationCount?: number;
+  compact?: import("./transactionActivityDetails.js").ExternalActivityTransactionCompactFacts | undefined;
   accountId: number;
   account: string;
   digest: string;
@@ -183,6 +204,7 @@ export type ExternalActivityCoverageResult = {
   returnedScanCount: number;
   scansTruncated: boolean;
   storedTransactionCount: number;
+  transactionsWithoutTime?: number;
   storedTransactionRange?: {
     earliestTimestamp?: string | undefined;
     latestTimestamp?: string | undefined;
@@ -208,6 +230,7 @@ export type ExternalActivitySummaryResult = {
     transactionCount: number;
     statusCounts: Record<ExternalActivityTransactionStatus, number>;
     relationshipCounts: Record<ExternalActivityRelationship, number>;
+    relationshipObservationCounts: Record<ExternalActivityRelationship, number>;
     earliestTimestamp?: string | undefined;
     latestTimestamp?: string | undefined;
   };
@@ -379,12 +402,25 @@ export type ReviewStateSnapshotInput = {
   recordedAt: string;
 };
 
+export type FirstReviewCard = {
+  record: import("../session/cardSession.js").CardRecord;
+  assertTarget(): void;
+  terminalProjection?: (record: import("../session/cardSession.js").CardRecord) => import("../session/cardSession.js").CardRecord;
+};
 export type LiveReviewSessionMutation = {
+  firstCard?: FirstReviewCard;
   publication?: { material: { artifacts: PrivateReviewArtifacts; transactionBytes: Uint8Array }; clock: () => Date };
   expected?: ReviewSession | undefined;
   next: ReviewSession;
   privateArtifactsJson?: string | null | undefined;
   deleteTransactionMaterials?: boolean | undefined;
+};
+
+export type ActivityWindowBinding = {
+  account: string;
+  revision: number;
+  // Materialize synchronously within the account/revision's SQLite read transaction.
+  load(): { coverage: ExternalActivityCoverageResult; activityTransactions: ExternalActivityTransactionStreamResult };
 };
 
 export interface ActivityStore {
@@ -401,7 +437,9 @@ export interface ActivityStore {
   listReviewActivity(filter: ReviewActivityListFilter): Promise<ReviewActivityListResult>;
   summarizeReviewFunnel(filter: ReviewActivityFilter): Promise<ReviewFunnelSummaryResult>;
   getReviewSessionDetail(input: ReviewSessionDetailInput): Promise<ReviewSessionDetailResult>;
+  findScanPredecessor?(query: ScanContinuationQuery): ExternalActivityScanRecord | undefined;
   recordExternalActivityScan(input: ExternalActivityScanInput): Promise<ExternalActivityScanRecord>;
+  withActivityWindow<T>(filter: ExternalActivityTransactionStreamFilter, bind: (window: ActivityWindowBinding) => T): T;
   getExternalActivityCoverage(filter: ExternalActivityCoverageFilter): Promise<ExternalActivityCoverageResult>;
   listExternalActivityEffectTransactions(filter: ExternalActivityTransactionStreamFilter): Promise<ExternalActivityTransactionStreamResult>;
   summarizeExternalActivity(filter: ExternalActivitySummaryFilter): Promise<ExternalActivitySummaryResult>;

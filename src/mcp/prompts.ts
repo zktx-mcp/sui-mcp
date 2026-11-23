@@ -26,6 +26,7 @@ export const MCP_PROMPTS = [
       "Prepare a reviewable Sui action only through Sui MCP's review-session flow.",
       "Use action_create_proposal_review when the input is a structured external payment or Sui action proposal.",
       "External proposals get read-only local review and never become signing material. Use action_start_review for a natural-language swap intent; after a wallet account is connected, account-bound review can reach ready_for_wallet_review, where an explicit Review card action can request approval in the user’s wallet through the backend.",
+      "For swaps, obtain the maximum slippage from the user before starting the review. Ask for the limit when it is missing.",
       "Present the internal Review card and summarize the returned review checks. This MCP response never contains signing data, transaction bytes, or signing readiness; only an explicit UI action and wallet approval authorize the backend request; request status is separate from server-verified chain execution facts."
     ].join("\n")
   }
@@ -43,6 +44,7 @@ function surfacePromptText(surface: AdapterPromptSurface, intent: string): strin
   return [
     `Prepare a reviewable Sui mainnet ${surface.action} for this intent: "${intent}".`,
     `Parse the source amount, source symbol, and target symbol from the intent (any language) and call ${surface.toolName} with them and intent.protocol set to "${surface.protocolSlug}".`,
+    ...(surface.action === "swap" ? ["Use the user's maximum slippage. Ask for it if the intent omits it."] : []),
     ...PLATFORM_PROMPT_BOUNDARY_LINES
   ].join("\n");
 }
@@ -142,6 +144,7 @@ export function bareActionPromptText(
     `The user's intent: "${intent}".`,
     "List these protocol options to the user and ask which one to use. Do not pick a protocol on your own.",
     "Once the user names a protocol, parse the source amount, source symbol, and target symbol from the intent (any language) and call that protocol's tool with them and intent.protocol set to the chosen slug.",
+    ...(action === "swap" ? ["Use the user's maximum slippage. Ask for it if the intent omits it."] : []),
     ...PLATFORM_PROMPT_BOUNDARY_LINES
   ].join("\n");
 }

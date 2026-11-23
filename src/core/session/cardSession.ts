@@ -65,6 +65,7 @@ export type CardPreparation =
   | { status: "completed"; data?: unknown };
 
 export interface CardRecordStore {
+  getClosedState?(id: string): CardRecord["state"] | undefined;
   get(id: string): CardRecord | undefined;
   evaluate(expected: CardRecord, clock: () => Date): { record: CardRecord; evaluatedAt: string };
   admit(expected: CardRecord, input: Record<string, unknown>, ownerId: string, clock: () => Date): CardRecord | undefined;

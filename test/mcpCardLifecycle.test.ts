@@ -1,9 +1,14 @@
+import { createDeepbookSwapActionPlan } from "../src/adapters/deepbook/deepbookSwapIntent.js";
+import { bcs } from "@mysten/sui/bcs";
+import { quotePoolCommandResults } from "./fixtures/deepbookQuote.js";
+import { SuiReadService } from "../src/core/read/readService.js";
+import { MemoryCoinMetadataCache } from "./fixtures/memoryCoinMetadataCache.js";
 import { seedReadAddressCleared } from "./fixtures/readAccount.js";
 import { WalletUserRejectedError } from "../src/core/session/walletConnection.js";
 import { suiGrants } from "./fixtures/walletGrants.js";
 import { LIVE_REVIEW_SESSION_WRITE_CONTRACT_VERSION } from "../src/core/session/liveReviewSessionContract.js";
 import Database from "better-sqlite3";
-import { DeepbookOfficialIndexerSourceError } from "../src/core/read/deepbookOfficialIndexerSource.js";
+import { DeepbookCandleSourceError } from "../src/core/read/deepbookCandleSource.js";
 import { projectReadCardResult } from "../src/core/read/readCardResult.js";
 import { receiptForCard } from "../src/mcp-ui/view/receiptData.js";
 import { accountRenderer } from "../src/mcp-ui/view/account.js";
@@ -20,12 +25,12 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { errorToolResult } from "../src/mcp/result.js";
-import { cardToolResult, createWorkflowCard, registerReadCards } from "../src/mcp-ui/tools.js";
-import { createReadCardStore } from "../src/mcp-ui/readCards.js";
+import { cardToolResult, createWorkflowCard, registerCardTools } from "../src/mcp-ui/tools.js";
+import { createCardStore } from "../src/mcp-ui/readCards.js";
 import { SqliteActivityStore } from "../src/core/activity/sqliteActivityStore.js";
 import { validateSupportedAdapterLifecycle } from "../src/adapters/adapterLifecycleValidators.js";
-import { createDeepbookUsdcChartService } from "../src/core/read/deepbookUsdcChartService.js";
-import { DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE, DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT } from "../src/core/read/deepbookOfficialIndexerSource.js";
+import { prepareChartRead, createDeepbookUsdcChartService } from "../src/core/read/deepbookUsdcChartService.js";
+import { DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE, DEEPBOOK_CANDLE_SOURCE_STATEMENT } from "../src/core/read/deepbookCandleSource.js";
 import { chartRenderer } from "../src/mcp-ui/view/chart.js";
 import { reviewRenderer } from "../src/mcp-ui/view/review.js";
 import { externalProposalSchema } from "../src/core/proposal/schemas.js";
@@ -480,28 +485,78 @@ it("stops after a lost-submit recovery read fails and retries only an explicit s
   expect(app.callServerTool.mock.calls.map(([call]) => call.name)).toEqual([CARD_TOOLS.read, CARD_TOOLS.submit, CARD_TOOLS.read, CARD_TOOLS.read]);
 });
 
+it.each([false, true])("submits the shortcut instant and changes only a manually edited end (edit=%s)", (editEnd) => {
+  vi.setSystemTime(new Date("2030-01-02T12:34:45.678Z"));
+  const poolId = `0x${"1".repeat(64)}`;
+  const submit = vi.fn();
+  const form = chartRenderer.controls(state("chart", {
+    input: { startTimeMs: Date.parse("2030-01-01T12:34:01.234Z"), endTimeMs: Date.parse("2030-01-02T12:34:01.234Z") },
+    data: { status: "ok", pools: [{ poolId, poolName: "SUI_USDC", baseAsset: { symbol: "SUI" } }],
+      intervals: ["15m"], defaultInterval: "15m", defaultLimit: 500, maxCandles: 10000 }
+  }), submit).node as unknown as Element;
+
+  form.querySelectorAll("button").find(button => button.textContent === "Last 24h")!.click();
+  expect(submit).not.toHaveBeenCalled();
+  if (editEnd) {
+    const end = form.querySelectorAll("input")[1]!;
+    end.value = "2030-01-02T12:34";
+    end.dispatchEvent(new Event("input"));
+  }
+  const pair = form.querySelectorAll("select")[0]!;
+  pair.value = poolId;
+  pair.dispatchEvent(new Event("change"));
+  expect(submit).toHaveBeenCalledExactlyOnceWith({
+    poolId, interval: "15m", limit: 10000,
+    startTimeMs: Date.parse("2030-01-01T12:34:45.678Z"),
+    endTimeMs: Date.parse(editEnd ? "2030-01-02T12:34:00.000Z" : "2030-01-02T12:34:45.678Z"),
+    ...(editEnd ? {} : { endMode: "latest_indexed" })
+  });
+});
+
+it("lets the user correct a timestamp outside the calendar range before choosing a Chart pair", () => {
+  const poolId = `0x${"1".repeat(64)}`;
+  const submit = vi.fn();
+  const form = chartRenderer.controls(state("chart", {
+    input: { endTimeMs: Number.MAX_SAFE_INTEGER },
+    data: { status: "ok", pools: [{ poolId, poolName: "SUI_USDC", baseAsset: { symbol: "SUI" } }],
+      intervals: ["15m"], defaultInterval: "15m", defaultLimit: 500, maxCandles: 10000 }
+  }), submit).node as unknown as Element;
+  const end = form.querySelectorAll("input")[1]!;
+  expect(end.value).toBe("9007199254740991");
+  expect(form.textContent).toContain("9007199254740991 milliseconds since 1970");
+  const correctedEnd = Date.parse("2026-06-27T06:30:45.678Z");
+  end.value = String(correctedEnd);
+  end.dispatchEvent(new Event("input"));
+  end.dispatchEvent(new Event("change"));
+  const pair = form.querySelectorAll("select")[0]!;
+  pair.value = poolId;
+  pair.dispatchEvent(new Event("change"));
+  expect(submit).toHaveBeenCalledExactlyOnceWith({ poolId, interval: "15m", limit: 500, endTimeMs: correctedEnd });
+});
+
 it("consumes real MCP/SQLite chart preparation failures and valid choices in the actual Chart view", async () => {
   let unavailable = true, poolCalls = 0, candleCalls = 0;
-  const metadata = { baseUrl: "https://example.invalid", endpoint: "get_pools" as const,
-    url: "https://example.invalid/get_pools", fetchedAt: "2026-09-22T00:00:00.000Z", sourceStatement: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT } as const;
+  const exactReads: string[] = [];
+  const metadata = { baseUrl: "https://example.invalid", endpoint: "pool_registry" as const,
+    url: "https://example.invalid/get_pools", fetchedAt: "2026-09-22T00:00:00.000Z", sourceStatement: DEEPBOOK_CANDLE_SOURCE_STATEMENT } as const;
   const chart = createDeepbookUsdcChartService({ source: {
-    fetchPools: async () => {
-      poolCalls++;
+    fetchPools: async (poolId) => {
+      if (poolId) exactReads.push(poolId); else poolCalls++;
       if (unavailable) throw new Error("fixture Indexer outage");
       return { source: metadata, pools: [{ pool_name: "SUI_USDC", pool_id: `0x${"1".repeat(64)}`,
         base_asset_id: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI", base_asset_symbol: "SUI", base_asset_decimals: 9,
-        quote_asset_id: DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE, quote_asset_symbol: "USDC", quote_asset_decimals: 6 }] };
+        quote_asset_id: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE, quote_asset_symbol: "USDC", quote_asset_decimals: 6 }] };
     },
-    fetchCandles: async () => { candleCalls++; return { candles: [], source: { ...metadata, endpoint: "ohclv" as const } }; }
+    fetchCandles: async () => { candleCalls++; return { candles: [], source: { ...metadata, poolId: `0x${"1".repeat(64)}`, endpoint: "order_fills" as const } }; }
   } });
   const database = new SqliteActivityStore({ databasePath: ":memory:", validateAdapterLifecycle: validateSupportedAdapterLifecycle });
   const records = database.createCardRecordStore();
-  const cards = createReadCardStore({ records, ownerId: "fixture-owner", chart,
+  const cards = createCardStore({ records, ownerId: "fixture-owner", chart,
     readService: { summarizeAccountInventory: async () => { throw new Error("Unexpected account call"); } },
     publicChainReceiptReader: async () => { throw new Error("Unexpected receipt call"); }
   });
   const server = new McpServer({ name: "chart-fixture", version: "1" });
-  registerReadCards(server, { activityStore: database, cards: { store: cards }, logger: { error: vi.fn() } });
+  registerCardTools(server, { activityStore: database, cards: { store: cards }, logger: { error: vi.fn() } });
   const client = new Client({ name: "chart-test", version: "1" }, { capabilities: { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport); await client.connect(clientTransport);
@@ -521,15 +576,34 @@ it("consumes real MCP/SQLite chart preparation failures and valid choices in the
     }
     expect(failedControls).not.toHaveBeenCalled(); expect(poolCalls).toBe(1); expect(candleCalls).toBe(0);
     unavailable = false;
-    const ready = await dispatch({ name: CARD_TOOLS.chart, arguments: {} });
+    const endTimeMs = Date.parse("2026-06-27T00:00:32.456Z");
+    const ready = await dispatch({ name: CARD_TOOLS.chart, arguments: { endTimeMs } });
+    const reference = cardReferenceSchema.parse(ready._meta?.[CARD_METADATA_KEY]);
+    const wrong = await dispatch({ name: CARD_TOOLS.submit, arguments: { ...reference, revision: 0,
+      input: { poolId: `0x${"b".repeat(64)}` } } });
+    expect(wrong.isError).toBe(true);
+    const future = await dispatch({ name: CARD_TOOLS.submit, arguments: { ...reference, revision: 0,
+      input: { poolId: `0x${"1".repeat(64)}`, endTimeMs: Date.now() + 60_000 } } });
+    expect(future.isError).toBe(true);
+    const error = JSON.parse((future.content[0] as { text: string }).text).error;
+    expect(error.details).toMatchObject({ code: "invalid_card_input", snapshot: { cardId: reference.cardId, state: "ready", revision: 0 } });
+    expect(records.get(reference.cardId)).toMatchObject({ state: { state: "ready", revision: 0 } });
+    expect(records.get(reference.cardId)?.acceptedInput).toBeUndefined();
+    expect(exactReads).toEqual([]);
+    expect(candleCalls).toBe(0);
     const app = host(dispatch); startCard("chart", chartRenderer); app.ontoolresult!(ready);
     await vi.waitFor(() => expect(root.querySelector("form")).toBeDefined());
     expect(root.textContent).toContain("SUI / USDC");
     expect(root.textContent).toContain("Set the time range and interval before choosing a pair, if needed.");
     expect(root.querySelector("summary")!.textContent).toBe("Time range & interval");
-    root.querySelectorAll("select")[0]!.value = "SUI_USDC";
+    root.querySelectorAll("select")[0]!.value = `0x${"1".repeat(64)}`;
     const [start, end] = root.querySelectorAll("input");
-    start!.value = "2026-06-27T01:00"; end!.value = "2026-06-27T00:00";
+    expect(end!.value).toBe("2026-06-27T00:00");
+    start!.value = "2026-02-31T00:00";
+    start!.dispatchEvent(new Event("change"));
+    expect(root.textContent).toContain("UTC timestamp is invalid");
+    expect(candleCalls).toBe(0);
+    start!.value = "2026-06-27T01:00";
     root.querySelectorAll("select")[0]!.dispatchEvent(new Event("change"));
     expect(root.textContent).toContain("Start must precede end");
     expect(candleCalls).toBe(0);
@@ -537,10 +611,22 @@ it("consumes real MCP/SQLite chart preparation failures and valid choices in the
     start!.dispatchEvent(new Event("change"));
     await vi.waitFor(() => expect(root.textContent).toContain("No candles returned for this range"));
     expect(root.textContent).not.toContain("Saved result");
-    expect(poolCalls).toBe(2); expect(candleCalls).toBe(1);
+    expect(poolCalls).toBe(2); expect(exactReads).toEqual([`0x${"1".repeat(64)}`]); expect(candleCalls).toBe(1);
+    expect(app.callServerTool.mock.calls.at(-1)?.[0].arguments).toMatchObject({ input: { endTimeMs } });
     expect(app.callServerTool.mock.calls.map(([call]) => call.name)).toEqual([CARD_TOOLS.read, CARD_TOOLS.submit]);
     await app.onteardown!();
   } finally { await client.close(); await server.close(); cards.stop(); database.close(); }
+});
+
+it("shows the connection decision when a Disconnect request has no card to reopen", async () => {
+  const app = host(async () => { throw Error("No saved card should be fetched"); });
+  startCard("disconnect", disconnectRenderer);
+  app.ontoolresult!({ isError: true, content: [{ type: "text", text: JSON.stringify({
+    ok: false, error: { kind: "input_invalid", details: { reason: "no_current_connection", message: "There is no current wallet connection to disconnect." } }
+  }) }] });
+  await vi.waitFor(() => expect(root.textContent).toContain("There is no current wallet connection to disconnect."));
+  expect(app.callServerTool).not.toHaveBeenCalled();
+  await app.onteardown!();
 });
 
 it.each(["success", "failure"] as const)("observes a one-purpose Disconnect through authenticated MCP and frame recreation: %s", async (outcome) => {
@@ -572,6 +658,108 @@ it.each(["success", "failure"] as const)("observes a one-purpose Disconnect thro
   } finally { held.resolve(); await mcp.close(); f.close(); }
 });
 
+it("requotes the same principal after the account can fund its DEEP fee", async () => {
+  let deepBalance = "0";
+  const service = new SuiReadService({
+    network: "mainnet", chainIdentifier: "4c78adac", coinMetadataCache: new MemoryCoinMetadataCache(), now: () => f.now(),
+    client: { core: {
+      async simulateTransaction({ transaction }: { transaction: { getData(): { commands: {MoveCall:{function:string}}[] } } }) {
+        const inputFee = transaction.getData().commands[0]!.MoveCall.function.endsWith("_input_fee");
+        const results = quotePoolCommandResults(inputFee ? [1_000_000_000n,0n,0n] : [0n,123_456_789n,25_000n]);
+        const raw = (n: bigint) => ({bcs:bcs.U64.serialize(n).toBytes()});
+        results[1] = { returnValues: [1n,100_000_000n,1_000_000_000n].map(raw) };
+        results[2] = { returnValues: [200_000n,0n,0n].map(raw) };
+        return { $kind:"Transaction", commandResults:results };
+      },
+      getDynamicField: async () => ({dynamicField:{value:{
+        type:"0x00c1a56ec8c4c623a848b2ed2f03d23a25d17570b670c22106f336eb933785cc::ewma::EWMAState",bcs:new Uint8Array(49)
+      }}})
+    }} as unknown as ConstructorParameters<typeof SuiReadService>[0]["client"]
+  });
+  const f = await walletWorkflowFixture({ quoteSource: service, get availableDeepRaw() { return deepBalance; } });
+  try {
+    const { connection } = await f.approve();
+    const { session } = await f.run(() => f.sessions.createReviewSession([f.plan], f.now()));
+    let card = await f.run(() => f.cards.create("review", {reviewSessionId:session.id, account:f.account, connectionId:connection.connectionId}));
+    const prepare = (revision: number) => f.act(card,{action:"prepare_review",account:f.account,connectionId:connection.connectionId,reviewRevision:revision});
+    expect((await prepare(0)).error).toBeUndefined();
+    await vi.waitFor(async () => {
+      card = await f.read(card);
+      const view = reviewViewSchema.parse(card.snapshot.data);
+      expect(view.review?.state?.checks.some(check => check.message.includes("1000250000 raw"))).toBe(true);
+      expect(view.allowedActions).toContain("prepare_review");
+      expect(view.allowedActions).not.toContain("request_signature");
+    });
+    deepBalance = "25000";
+    expect((await prepare(reviewViewSchema.parse(card.snapshot.data).review!.reviewRevision)).error).toBeUndefined();
+    await vi.waitFor(async () => expect(reviewViewSchema.parse((await f.read(card)).snapshot.data).allowedActions).toContain("request_signature"));
+    expect(f.sign).not.toHaveBeenCalled();
+  } finally { f.close(); }
+});
+
+it.each([
+  { from: "SUI", to: "USDC", mode: "deep", balance: "25000", quotedFee: 25000n },
+  { from: "SUI", to: "USDC", mode: "input_coin", balance: "24999", quotedFee: 25000n },
+  { from: "USDC", to: "SUI", mode: "deep", balance: "25000", quotedFee: 25000n },
+  { from: "USDC", to: "SUI", mode: "input_coin", balance: "25000", quotedFee: 0n },
+  { from: "DEEP", to: "USDC", mode: "input_coin", balance: "1024999", quotedFee: 25000n }
+])("carries a delayed $from to $to $mode quote through SQLite to the saved Review and its renderer", async ({ from, to, mode, balance, quotedFee }) => {
+  const sell = from !== "USDC";
+  const principal = from === "SUI" ? 1_000_000_000n : 1_000_000n;
+  const getter = sell ? "get_quote_quantity_out" : "get_base_quantity_out";
+  const getters: string[] = [];
+  const simulateTransaction = vi.fn(async ({ transaction }) => {
+    const call = transaction.getData().commands[0].MoveCall.function as string;
+    getters.push(call);
+    f.advance(6_000);
+    const included = call.endsWith("_input_fee");
+    const returned = principal / (included ? 20n : 100n);
+    const output = included ? 90_000_001n : 100_000_001n;
+    const amounts = [...(sell ? [returned, output] : [output, returned]), included ? 0n : quotedFee];
+    return { $kind: "Transaction", commandResults: quotePoolCommandResults(amounts, !sell) };
+  });
+  const service = new SuiReadService({
+    network: "mainnet", chainIdentifier: "4c78adac", coinMetadataCache: new MemoryCoinMetadataCache(),
+    now: () => f.now(), client: { core: { simulateTransaction, getDynamicField: async () => ({
+      dynamicField: { value: { type: "0x00c1a56ec8c4c623a848b2ed2f03d23a25d17570b670c22106f336eb933785cc::ewma::EWMAState", bcs: new Uint8Array(49) } }
+    }) } } as unknown as ConstructorParameters<typeof SuiReadService>[0]["client"]
+  });
+  const f = await walletWorkflowFixture({ quoteSource: service, availableDeepRaw: balance });
+  try {
+    const { connection } = await f.approve();
+    Object.assign(f.plan, createDeepbookSwapActionPlan({
+      type: "swap", from: { symbol: from, amount: "1" }, to: { symbol: to }, maxSlippageBps: 50
+    }, f.now()));
+    const started = f.now().getTime();
+    const { card, session } = await f.prepare(connection.connectionId);
+    const saved = await f.read(card);
+    const view = reviewViewSchema.parse(saved.snapshot.data);
+    const human = view.review!.state!.humanReadableReview!;
+    const included = mode === "input_coin";
+    expect(getters).toEqual(included ? [getter, getter + "_input_fee"] : [getter]);
+    const quotedAt = started + getters.length * 6_000;
+    expect(human.freshness).toMatchObject({ quotedAt: new Date(quotedAt).toISOString(), expiresAt: new Date(quotedAt + 30_000).toISOString() });
+    const returned = principal / (included ? 20n : 100n);
+    expect(human.assetFlow).toMatchObject({
+      outgoing: [{ rawAmount: principal.toString(), symbol: from }],
+      expectedIncoming: [{ rawAmount: included ? "90000001" : "100000001", symbol: to }],
+      minimumIncoming: [{ rawAmount: included ? "89550001" : "99500001" }],
+      inputFlow: { expectedSpendRaw: (principal - returned).toString(), expectedReturnRaw: returned.toString() },
+      separateFeeBudgetRaw: included ? null : "25000"
+    });
+    expect(human.assetFlow.fees).toHaveLength(included ? 0 : 1);
+    expect(session.reviewState?.humanReadableReview).toEqual(human);
+    view.review!.state!.ptbVisualization = undefined;
+    const rendered = reviewRenderer.result({ ...saved.snapshot, data: view }, undefined, undefined);
+    expect(rendered.node.textContent).toContain(`Expected input returned${included ? "0.05" : "0.01"} ${from}`);
+    expect(rendered.node.textContent).toContain(included ? `Included in ${from} spend` : "Allocated for trading fees0.025 DEEP");
+    if (included) expect(rendered.node.textContent).not.toContain("trading fee0 DEEP");
+    expect(f.sign).not.toHaveBeenCalled();
+    expect(f.submit).not.toHaveBeenCalled();
+    rendered.dispose?.();
+  } finally { f.close(); }
+});
+
 it("renders verified review conditions before decisions and preserves the exact approval selection", async () => {
   const f = await walletWorkflowFixture();
   try {
@@ -585,11 +773,10 @@ it("renders verified review conditions before decisions and preserves the exact 
     const node = rendered.node as unknown as Element;
     const primary = node.children.find((item) => item.className === "ui-section")!;
     const text = primary.textContent;
-    // Fixture source: 123456789 raw USDC (6 decimals); 50 bps policy floors
-    // 123456789 * 9950 / 10000 to 122839505. These are not renderer outputs.
+    // 123456789 raw USDC minus the maximum whole-unit loss at 50 bps.
     expect(text).toContain("You send, up to1 SUI");
     expect(text).toContain("Expected to receive123.456789 USDC");
-    expect(text).toContain("Minimum received on success122.839505 USDC");
+    expect(text).toContain("Minimum received on success122.839506 USDC");
     expect(text).toContain("Estimated trading fee0.025 DEEP");
     expect(text).toContain("Estimated network fee0.00000013 SUI · Network fee limit (gas budget): 0.000001 SUI");
     expect(text.indexOf("Send and receive account")).toBeLessThan(text.indexOf("You send, up to"));
@@ -1173,7 +1360,7 @@ it("coalesces public retries, preserves displayed facts after failure and ignore
 async function savedWorkflowMcp(f: Awaited<ReturnType<typeof walletWorkflowFixture>>) {
   const server = new McpServer({ name: "saved-workflow-fixture", version: "1" });
   const deps = { cards: { store: f.cards }, activityStore: f.activity, workflow: f.workflow, logger: f.logger };
-  registerReadCards(server, deps);
+  registerCardTools(server, deps);
   const client = new Client({ name: "saved-card-view", version: "1" }, { capabilities: { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport); await client.connect(clientTransport);
@@ -1673,7 +1860,7 @@ it("retains verified conditions and actions when the top graph cannot initialize
     vi.mocked(mermaid.initialize).mockImplementationOnce(() => { throw new Error("Fixture drawing failure"); });
     const view = reviewRenderer.result(card.snapshot, undefined, vi.fn());
     expect(view.node.textContent).toContain("The transaction graph could not be displayed");
-    expect(view.node.textContent).toContain("Minimum received on success122.839505 USDC");
+    expect(view.node.textContent).toContain("Minimum received on success122.839506 USDC");
     expect(view.node.textContent).toContain("Ready for your review");
     expect([...view.node.querySelectorAll<HTMLButtonElement>('[data-card-action]')].map((item) => item.dataset.cardAction)).toEqual(["request_signature", "cancel"]);
     expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
@@ -2211,10 +2398,10 @@ it("does not carry Retry consent to a target changed during its state read", asy
 it.each(['before_result','after_result'] as const)('keeps the admitted Chart result when a preselection read arrives %s',async(order)=>{
  const visibility=new EventTarget();document.addEventListener=visibility.addEventListener.bind(visibility);document.removeEventListener=visibility.removeEventListener.bind(visibility);
  Object.defineProperty(document,'visibilityState',{value:'visible',writable:true});
- const metadata={baseUrl:'https://example.invalid',endpoint:'get_pools' as const,url:'https://example.invalid/get_pools',fetchedAt:new Date().toISOString(),sourceStatement:DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT} as const;
- const chart=createDeepbookUsdcChartService({source:{fetchPools:async()=>({source:metadata,pools:[{pool_name:'SUI_USDC',pool_id:`0x${'1'.repeat(64)}`,base_asset_id:'0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI',base_asset_symbol:'SUI',base_asset_decimals:9,quote_asset_id:DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE,quote_asset_symbol:'USDC',quote_asset_decimals:6}]}),fetchCandles:async()=>{sources++;await finishSource.promise;return{candles:[],source:{...metadata,endpoint:'ohclv' as const}};}}});
+ const metadata={baseUrl:'https://example.invalid',endpoint:'pool_registry' as const,url:'https://example.invalid/get_pools',fetchedAt:new Date().toISOString(),sourceStatement:DEEPBOOK_CANDLE_SOURCE_STATEMENT} as const;
+ const chart=createDeepbookUsdcChartService({source:{fetchPools:async()=>({source:metadata,pools:[{pool_name:'SUI_USDC',pool_id:`0x${'1'.repeat(64)}`,base_asset_id:'0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI',base_asset_symbol:'SUI',base_asset_decimals:9,quote_asset_id:DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,quote_asset_symbol:'USDC',quote_asset_decimals:6}]}),fetchCandles:async()=>{sources++;await finishSource.promise;return{candles:[],source:{...metadata,poolId:`0x${'1'.repeat(64)}`,endpoint:'order_fills' as const}};}}});
  const db=new SqliteActivityStore({databasePath:':memory:',validateAdapterLifecycle:validateSupportedAdapterLifecycle}),records=db.createCardRecordStore();
- const cards=createReadCardStore({records,ownerId:'fixture-owner',chart,readService:{summarizeAccountInventory:async()=>{throw Error('Unused');}},publicChainReceiptReader:async()=>{throw Error('Unused');}});
+ const cards=createCardStore({records,ownerId:'fixture-owner',chart,readService:{summarizeAccountInventory:async()=>{throw Error('Unused');}},publicChainReceiptReader:async()=>{throw Error('Unused');}});
  let sources=0,reads=0;const finishSource=deferred<void>(),releaseRead=deferred<void>();let oldRead:CardSnapshot|undefined;
  try{
   const card=await cards.create('chart',{}),reference={cardId:card.snapshot.cardId,permission:card.permission};
@@ -2227,11 +2414,11 @@ it.each(['before_result','after_result'] as const)('keeps the admitted Chart res
   for(const value of ['hidden','visible']){Object.defineProperty(document,'visibilityState',{value,writable:true});visibility.dispatchEvent(new Event('visibilitychange'));}
   await vi.waitFor(()=>expect(oldRead?.state).toBe('ready'));
   expect(root.querySelectorAll('select')[0]!.disabled).toBe(false);
-  root.querySelectorAll('select')[0]!.value='SUI_USDC';root.querySelectorAll('select')[0]!.dispatchEvent(new Event('change'));
+  root.querySelectorAll('select')[0]!.value=`0x${"1".repeat(64)}`;root.querySelectorAll('select')[0]!.dispatchEvent(new Event('change'));
   await vi.waitFor(()=>expect(sources).toBe(1));
   if(order==='before_result'){releaseRead.resolve();await vi.advanceTimersByTimeAsync(0);}
   finishSource.resolve();await vi.waitFor(()=>expect(root.textContent).toContain('No candles returned for this range'));
-  const saved=await cards.read(reference);expect(saved.snapshot).toMatchObject({state:'closed',reason:'completed',input:{poolName:'SUI_USDC'}});
+  const saved=await cards.read(reference);expect(saved.snapshot).toMatchObject({state:'closed',reason:'completed',input:{poolId:`0x${'1'.repeat(64)}`}});
   if(order==='after_result'){releaseRead.resolve();await vi.advanceTimersByTimeAsync(0);}
   expect(root.textContent).not.toContain('Card unavailable');
   expect(root.textContent).not.toContain('The returned information does not match this card');
@@ -2623,7 +2810,7 @@ it.each([false,true])('separates result-read authority expiry from admitted work
  try{
   const {connection}=await f.approve(),{card:initialCard,session}=await f.prepare(connection.connectionId);
   const originalRead=f.chainRead.getMockImplementation()!;
-  f.chainRead.mockRejectedValueOnce(new Error('Fixture initial chain read unavailable'));
+  f.chainRead.mockRejectedValueOnce(Object.assign(new Error('Endpoint access denied'), {code:'PERMISSION_DENIED'}));
   expect((await f.act(initialCard,{action:'request_signature',connectionId:connection.connectionId,account:f.account,reviewRevision:session.reviewRevision})).error).toBeUndefined();
   await vi.waitFor(()=>expect(f.run(()=>f.records.currentRequest(session.id))?.requestStatus).toBe('outcome_unknown'));
   const attempt=f.run(()=>f.records.currentRequest(session.id))!;
@@ -2881,13 +3068,15 @@ it("quotes an earlier stored update message without treating its old instruction
 });
 
 it.each([
-  { input: "poolName=SUI_USDC&interval=1d&limit=7", reason: "source_timeout", expected: "The chart data source did not respond in time.", calls: 1 },
-  { input: "poolName=SUI_USDC&startTimeMs=20&endTimeMs=10", reason: "invalid_timestamp_window", expected: "The start time must be before the end time.", calls: 0 }
-])("explains the chart source's $reason without exposing its code as the primary message", async ({ input, reason, expected, calls }) => {
-  const fetchPools = vi.fn(async () => { throw new DeepbookOfficialIndexerSourceError("source_timeout", "Fixture source timeout"); });
+  { reason: "source_timeout", expected: "The chart data source did not respond in time.", calls: 1 },
+  { reason: "invalid_timestamp", expected: "Choose a valid UTC time at or before the current time.", calls: 0 }
+])("explains the chart source's $reason without exposing its code as the primary message", async ({ reason, expected, calls }) => {
+  const fetchPools = vi.fn(async () => { throw new DeepbookCandleSourceError("source_timeout", "Fixture source timeout"); });
   const fetchCandles = vi.fn(async () => { throw new Error("No candle query should start"); });
-  const chart = createDeepbookUsdcChartService({ source: { fetchPools, fetchCandles } });
-  const data = await chart.getCandles(new URLSearchParams(input));
+  const now = new Date("2026-06-27T00:00:00Z");
+  const chart = createDeepbookUsdcChartService({ source: { fetchPools, fetchCandles }, now: () => now });
+  const data = await chart.readCandles(prepareChartRead({ poolName: "SUI_USDC", interval: "1d", limit: 7,
+    ...(reason === "invalid_timestamp" ? { endMode: "latest_indexed", endTimeMs: now.getTime() + 1 } : {}) }, now));
   expect(data).toMatchObject({ reason });
   const view = chartRenderer.result(state("chart", { state: "closed", reason: "completed", data }));
   const node = view.node as unknown as Element;
@@ -2980,12 +3169,12 @@ it.each(["ended", "unavailable"] as const)("uses confirmed connection facts for 
 });
 
 async function storedReadCardFixture() {
-  const metadata = { baseUrl: "https://example.invalid", endpoint: "get_pools" as const, url: "https://example.invalid/get_pools",
-    fetchedAt: new Date().toISOString(), sourceStatement: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT } as const;
-  const candles = vi.fn(async () => ({ candles: [], source: { ...metadata, endpoint: "ohclv" as const } }));
+  const metadata = { baseUrl: "https://example.invalid", endpoint: "pool_registry" as const, url: "https://example.invalid/get_pools",
+    fetchedAt: new Date().toISOString(), sourceStatement: DEEPBOOK_CANDLE_SOURCE_STATEMENT } as const;
+  const candles = vi.fn(async () => ({ candles: [], source: { ...metadata, poolId: `0x${"1".repeat(64)}`, endpoint: "order_fills" as const } }));
   const chart = createDeepbookUsdcChartService({ source: { fetchPools: async () => ({ source: metadata, pools: [{
     pool_name: "SUI_USDC", pool_id: `0x${"1".repeat(64)}`, base_asset_id: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
-    base_asset_symbol: "SUI", base_asset_decimals: 9, quote_asset_id: DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE,
+    base_asset_symbol: "SUI", base_asset_decimals: 9, quote_asset_id: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
     quote_asset_symbol: "USDC", quote_asset_decimals: 6
   }] }), fetchCandles: candles } });
   const receipt = await readPublicChainReceipt({ network: "mainnet", expectedChainIdentifier: "mainnet-chain", client: { core: {
@@ -2996,7 +3185,7 @@ async function storedReadCardFixture() {
   const accounts = vi.fn(async ({ account }: { account: string }) => ({ status: "ok" as const, account, name: null,
     balances: [], nfts: [], objectGroups: [], scannedObjects: 0, objectsTruncated: false, fetchedAt: new Date().toISOString() }));
   const db = new SqliteActivityStore({ databasePath: ":memory:", validateAdapterLifecycle: validateSupportedAdapterLifecycle });
-  const cards = createReadCardStore({ records: db.createCardRecordStore(), ownerId: "display-fixture", chart,
+  const cards = createCardStore({ records: db.createCardRecordStore(), ownerId: "display-fixture", chart,
     readService: { summarizeAccountInventory: accounts }, publicChainReceiptReader: receipts });
   return { cards, candles, accounts, receipts, close() { cards.stop(); db.close(); } };
 }
@@ -3025,7 +3214,7 @@ it.each(["not_admitted", "admitted"] as const)("offers one Chart retry only for 
     await vi.waitFor(() => expect(root.querySelector("form")).toBeDefined());
     expect(visibleGuidance()).toBe("");
     expect(recoveryButton("Retry chart")).toBeUndefined();
-    const pair = root.querySelectorAll("select")[0]!; pair.value = "SUI_USDC"; pair.dispatchEvent(new Event("change"));
+    const pair = root.querySelectorAll("select")[0]!; pair.value = `0x${"1".repeat(64)}`; pair.dispatchEvent(new Event("change"));
     await vi.waitFor(() => expect(reads).toBe(2));
     expect(recoveryButton("Retry chart")).toBeUndefined();
     expect(app.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.submit)).toHaveLength(1);
@@ -3033,7 +3222,7 @@ it.each(["not_admitted", "admitted"] as const)("offers one Chart retry only for 
     if (delivery === "not_admitted") {
       await vi.waitFor(() => expect(recoveryButton("Retry chart")?.disabled).toBe(false));
       expect(visibleGuidance()).toContain("Use Retry chart");
-      expect(pair.disabled).toBe(false); expect(pair.value).toBe("SUI_USDC");
+      expect(pair.disabled).toBe(false); expect(pair.value).toBe(`0x${"1".repeat(64)}`);
       expect(visibleGuidance()).not.toContain("new chart");
       expect(f.candles).not.toHaveBeenCalled();
       refuse = false; recoveryButton("Retry chart")!.click();
@@ -3048,7 +3237,7 @@ it.each(["not_admitted", "admitted"] as const)("offers one Chart retry only for 
     await vi.waitFor(() => expect(root.textContent).toContain("No candles returned"));
     expect(f.candles).toHaveBeenCalledOnce(); expect(root.querySelector("form")).toBeUndefined();
     expect(recoveryButton("Retry chart")).toBeUndefined();
-    expect(await f.cards.readSaved(card.snapshot.cardId)).toMatchObject({ state: "closed", input: { poolName: "SUI_USDC", interval: "1d", limit: 7 } });
+    expect(await f.cards.readSaved(card.snapshot.cardId)).toMatchObject({ state: "closed", input: { poolId: `0x${"1".repeat(64)}`, interval: "1d", limit: 7 } });
     await app.onteardown!();
     // The same public/unsubmitted shape has no editable form or implied access.
     const publicCard = await f.cards.create("chart", { interval: "1d", limit: 7 });
@@ -3832,7 +4021,7 @@ it("shows actual receiving and check-request progress in the uploading frame wit
   try {
     // A complete current-format backup, naturally larger than one MCP chunk.
     // These synthetic addresses are saved records, not wallet approvals.
-    for (let index = 1; index <= 700; index++) await w.run(() => w.activity.upsertAccount(`0x${BigInt(index).toString(16).padStart(64, "0")}`, "review_execution", w.now()));
+    for (let index = 1; index <= 700; index++) await w.run(() => w.activity.upsertAccount(`0x${BigInt(index).toString(16).padStart(64, "0")}`, "review_record", w.now()));
     const raw = Buffer.from(JSON.stringify(await w.run(() => f.localData.exportLocalData())));
     expect(raw.length).toBeGreaterThan(65536);
     const app = host(async (request) => {
@@ -4594,7 +4783,7 @@ it("automatically checks an uploaded backup and rechecks it only after Back and 
   let operationId = "";
   try {
     const original = `0x${"a".repeat(64)}`, changed = `0x${"b".repeat(64)}`;
-    await f.wallet.run(() => f.wallet.activity.upsertAccount(original, "review_execution", f.wallet.now()));
+    await f.wallet.run(() => f.wallet.activity.upsertAccount(original, "review_record", f.wallet.now()));
     const bytes = Buffer.from(JSON.stringify(await f.wallet.run(() => f.localData.exportLocalData())));
     const expectedHash = createHash("sha256").update(bytes).digest("hex"), applied = vi.spyOn(f.localData, "applyValidatedReplacement");
     const creating = await mcp.create("settings", {}), snapshot = (creating.structuredContent as { data: CardSnapshot }).data;
@@ -5264,7 +5453,7 @@ it.each(["completed", "request_failed", "outcome_unknown", "recovered"] as const
   try {
     const { connection } = await f.approve(), ready = await f.prepare(connection.connectionId);
     if (outcome === "request_failed") f.sign.mockRejectedValueOnce(new Error("Synthetic wallet transport failure"));
-    if (outcome === "outcome_unknown" || outcome === "recovered") f.chainRead.mockRejectedValueOnce(new Error("Synthetic chain result unavailable"));
+    if (outcome === "outcome_unknown" || outcome === "recovered") f.chainRead.mockRejectedValueOnce(Object.assign(new Error("Endpoint access denied"), { code: "PERMISSION_DENIED" }));
     await f.act(ready.card, { action: "request_signature", connectionId: connection.connectionId, account: f.account, reviewRevision: ready.session.reviewRevision });
     await vi.waitFor(() => expect(f.run(() => f.records.currentRequest(ready.session.id)?.requestStatus)).toBe(outcome === "recovered" ? "outcome_unknown" : outcome));
     let card = ready.card;
@@ -5283,8 +5472,11 @@ it.each(["completed", "request_failed", "outcome_unknown", "recovered"] as const
       expect(node.textContent).toContain("Transaction succeeded on Sui");
       expect(node.textContent).toContain("Additional amount and fee details are unavailable");
       if (outcome === "recovered") {
-        expect(request.reason).toBe("The chain result could not be verified for this request.");
-        expect(node.textContent).not.toContain(request.reason);
+        const denied = "The node denied access. Restore endpoint access, then check the same digest.";
+        expect(request.reason).toBeUndefined();
+        expect(node.textContent).not.toContain(denied);
+        const history = f.run(() => f.localData.exportLocalDataSync(f.now())).data.reviewStatusTransitions;
+        expect(history).toContainEqual(expect.objectContaining({attempt_id:request.attemptId, to_status:"outcome_unknown", reason:denied}));
       }
     } else {
       expect(node.textContent).not.toContain("Transaction succeeded on Sui");

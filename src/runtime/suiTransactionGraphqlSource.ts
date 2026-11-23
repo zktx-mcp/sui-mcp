@@ -1,5 +1,6 @@
+import { compareActivityFactsDescending, isMonotonicActivityOrder } from "../core/activity/transactionActivityScanPolicy.js";
 import type { SuiGraphQLClient } from "@mysten/sui/graphql";
-import { type ExternalActivityRelationship } from "../core/activity/activityStore.js";
+import { type ExternalActivityRelationship, type ScanSourceRange } from "../core/activity/activityStore.js";
 import {
   TransactionActivitySourceError,
   type SuiTransactionActivityFact,
@@ -164,13 +165,17 @@ export class GraphqlSuiTransactionActivitySource implements SuiTransactionActivi
     const { client, limits } = await this.runtime();
     const transactions: SuiTransactionActivityFact[] = [];
     let cursor = input.cursor;
-    let hasMore = false;
+    let hasMore = false, orderingVerified = true;
+    let range: ScanSourceRange | undefined;
+    let rangeVerified = true;
+    const cursors = new Set<string>();
     do {
       const pageLimit = Math.min(input.limit - transactions.length, limits.transactionPageLimit);
       const result = await queryScanAccountTransactions(client, {
         last: pageLimit,
         before: cursor,
-        filter: input.filter,
+        filter: range && (input.filter.beforeCheckpoint === undefined || Number(input.filter.beforeCheckpoint) > Number(range.last.checkpoint) + 1)
+          ? { ...input.filter, beforeCheckpoint: graphQlBeforeCheckpointForInclusiveUpperBound(range.last.checkpoint) } : input.filter,
         limits
       });
       const connection = result.transactions;
@@ -183,13 +188,41 @@ export class GraphqlSuiTransactionActivitySource implements SuiTransactionActivi
           "Sui GraphQL transaction scan reported another page without returning transactions"
         );
       }
-      transactions.push(...connection.nodes.map(transactionFactFromNode));
+      const rows = connection.nodes.map(transactionFactFromNode);
+      const available = result.serviceConfig?.availableRange;
+      if (available?.first && available.last) {
+        const { first, last } = available;
+        if (!Number.isSafeInteger(first.sequenceNumber) || !Number.isSafeInteger(last.sequenceNumber) ||
+            first.sequenceNumber < 0 || first.sequenceNumber > last.sequenceNumber ||
+            !Number.isFinite(Date.parse(first.timestamp)) || !(Date.parse(last.timestamp) >= Date.parse(first.timestamp))) {
+          throw new TransactionActivitySourceError("provider_error", "Invalid transaction index range.");
+        }
+        const lower = { checkpoint: String(first.sequenceNumber), timestamp: new Date(first.timestamp).toISOString() };
+        const upper = { checkpoint: String(last.sequenceNumber), timestamp: new Date(last.timestamp).toISOString() };
+        if (rows.some(row => !row.checkpoint || !row.timestamp ||
+            BigInt(row.checkpoint) < BigInt(first.sequenceNumber) || BigInt(row.checkpoint) > BigInt(last.sequenceNumber) ||
+            row.timestamp < lower.timestamp || row.timestamp > upper.timestamp)) rangeVerified = false;
+        if (!range) range = { first: lower, last: upper };
+        else {
+          if (last.sequenceNumber < Number(range.last.checkpoint) || upper.timestamp < range.last.timestamp) rangeVerified = false;
+          if (first.sequenceNumber > Number(range.first.checkpoint)) range.first = lower;
+        }
+      } else rangeVerified = false;
+      if (!isMonotonicActivityOrder(rows)) orderingVerified = false;
+      rows.sort(compareActivityFactsDescending);
+      const last = transactions.at(-1), first = rows[0];
+      if (last && first && (last.checkpoint === undefined || first.checkpoint === undefined ||
+          BigInt(first.checkpoint) > BigInt(last.checkpoint))) orderingVerified = false;
+      transactions.push(...rows);
       hasMore = connection.pageInfo.hasPreviousPage === true;
+      if (cursor) cursors.add(cursor);
       cursor = cursorFromPageInfo(connection.pageInfo);
+      if (hasMore && (!cursor || cursors.has(cursor))) throw new TransactionActivitySourceError("provider_error", "Scan cursor did not advance.");
     } while (hasMore && transactions.length < input.limit);
 
     return {
-      transactions,
+      transactions, orderingVerified,
+      sourceRange: rangeVerified ? range : undefined,
       hasMore,
       cursor
     };

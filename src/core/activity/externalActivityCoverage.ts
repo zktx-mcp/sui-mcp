@@ -18,10 +18,12 @@ export function buildExternalActivityCoverageResult(input: {
   scans: ExternalActivityScanRecord[];
   scanCount: number;
   storedTransactionCount: number;
+  transactionsWithoutTime?: number;
   storedTransactionRange?: ExternalActivityCoverageResult["storedTransactionRange"] | undefined;
   scansTruncated?: boolean | undefined;
+  proofIds?: string[];
 }): ExternalActivityCoverageResult {
-  const completeAffectedAccountScanIds = input.scans
+  const completeAffectedAccountScanIds = input.proofIds ?? input.scans
     .filter((scan) => scanCompletesAffectedAccountRange(scan, input.from, input.to))
     .map((scan) => scan.scanId);
   const incompleteScanIds = input.scans
@@ -74,6 +76,7 @@ export function buildExternalActivityCoverageResult(input: {
     returnedScanCount: input.scans.length,
     scansTruncated,
     storedTransactionCount: input.storedTransactionCount,
+    transactionsWithoutTime: input.transactionsWithoutTime ?? 0,
     ...(input.storedTransactionRange === undefined ? {} : { storedTransactionRange: input.storedTransactionRange }),
     coverageEvidence: {
       completeAffectedAccountScanIds,
@@ -85,15 +88,10 @@ export function buildExternalActivityCoverageResult(input: {
   };
 }
 
-export function scanOverlapsRequestedRange(scan: ExternalActivityScanRecord, from: string, to: string): boolean {
-  return (scan.fromTimestamp === undefined || scan.fromTimestamp < to) &&
-    (scan.toTimestamp === undefined || scan.toTimestamp > from);
-}
-
-function scanCompletesAffectedAccountRange(scan: ExternalActivityScanRecord, from: string, to: string): boolean {
+export function scanCompletesAffectedAccountRange(scan: ExternalActivityScanRecord, from: string, to: string): boolean {
   return scan.kind === "account_scan" &&
     scan.relationship === "affected" &&
-    scan.windowComplete === true &&
+    scan.windowComplete === true && scan.fromCheckpoint === undefined && scan.toCheckpoint === undefined &&
     scan.incompleteReason === undefined &&
     scan.fromTimestamp !== undefined &&
     scan.toTimestamp !== undefined &&

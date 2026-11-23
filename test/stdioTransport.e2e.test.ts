@@ -35,6 +35,25 @@ describe("stdio MCP transport e2e", () => {
           protocolsTool: TOOL_NAMES.readListSupportedProtocols
         }
       });
+      for (const direction of ["base_to_quote", "quote_to_base"] as const) {
+        const amountRaw = direction === "base_to_quote" ? "1000000000" : "1000000";
+        for (const feeMode of ["deep", "input_coin"] as const) {
+          for (const [name, amount] of [
+            [TOOL_NAMES.readQuoteDeepbookAction, { amountRaw }],
+            [TOOL_NAMES.readQuoteDeepbookDisplayAmount, { amountDisplay: "1" }]
+          ] as const) {
+            const response = await client.callTool({ name, arguments: { poolKey: "SUI_USDC", direction, feeMode, ...amount } });
+            expect(response.isError).not.toBe(true);
+            const { data } = response.structuredContent as { data: Record<string, unknown> };
+            expect(data).toMatchObject({
+              direction, fetchedAt: expect.any(String), quoteOutcome: "full_input_spend",
+              rawQuote: { inputAmount: { raw: amountRaw }, directionalOutput: { symbol: direction === "base_to_quote" ? "USDC" : "SUI" } },
+              inputFlow: { expectedSpendRaw: amountRaw, expectedReturnRaw: "0", fee: { kind: feeMode === "deep" ? "separate_coin" : "included_in_input" } }
+            });
+            for (const key of ["expiresAt", "minOutRaw", "separateFeeBudgetRaw"]) expect(data).not.toHaveProperty(key);
+          }
+        }
+      }
     } finally {
       await client.close();
     }

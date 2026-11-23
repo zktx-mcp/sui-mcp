@@ -51,7 +51,7 @@ When the user requests a Sui transaction digest lookup or account activity scan,
 
 A returned scan row is tied to a known local account only when the sender or a returned balance-change owner matches that account.
 
-Other provider-returned rows can be used for the current response but are counted as skipped for storage.
+An affected-address filter can establish the live relationship. Rows lacking sender or balance-owner evidence remain in the live response and count as skipped for storage. A completed scan describes the provider window. Stored flow totals use only the returned stored transactions with complete account balance changes. Earlier unpublished rc.6 builds could retain rows based on the affected-address filter alone. Existing records and restored snapshots preserve those observations.
 
 Stored scan rows include:
 
@@ -131,9 +131,11 @@ If `requestedAccount.balanceChangeCompleteness` or a row-level `requestedAccount
 
 Inspect responses and stored-summary rows can expose a derived `compact` view when full or stored details are available.
 
+Stored `transactionCount` counts distinct digests per account. `relationshipCounts` counts distinct digests within each relationship. `relationshipObservationCounts` counts scan observations, including repeated reads of the same digest. A transaction observed as both sent and affected is one transaction and contributes once to each relationship. Conflicting checkpoint, timestamp or sender observations leave that field unconfirmed across subsequent reads and backup replacement.
+
 Activity summary responses expose `transactionDetailAvailability` for the returned `transactions` rows. `transactions[].transactionContext`, `transactions[].compact`, and `transactions[].details` are listed in `userAnswerUse.answerFields` only when every returned transaction row has details. Mixed rows must be described from `transactionDetailAvailability` and row-specific fields, not as an all-row detail guarantee.
 
-`compact.factScope: "transaction"` and `compact.requestedAccountScoped: false` mean compact balance, object, event, and gas fields summarize the transaction, not the requested wallet.
+`compact.factScope: "transaction"` and `compact.requestedAccountScoped: false` describe the record as a whole. Calls, objects, events, and gas describe the transaction. For balances, read `compact.balanceChangeScope`: a live inspect row covers the transaction, while a stored row contains only changes for `compact.balanceChangesAccount`.
 
 Repeated identical compact balance-change facts can be aggregated with `count`.
 
@@ -183,9 +185,9 @@ It first checks stored scan coverage for the requested account and UTC range. If
 
 Timeline output uses account-scoped raw balance-change facts only. `netFlowBars` are observed inflow/outflow bars, not held balances. The storage model does not store balance snapshots or balance anchors. The timeline response returns `balanceStatus: "unavailable_no_balance_anchor"` and empty `balanceBars`.
 
-Optional `usdcReferences` read DeepBookV3 official Indexer USDC candle evidence for supported USDC-quoted assets. Those references are token-denominated USDC evidence only. They are not fiat USD value, a USDC/USD peg guarantee, P&L, tax, cost basis, route advice, transaction-building input, signing data, or signing readiness.
+Optional `usdcReferences` read pool-bound DeepBook USDC candle evidence for supported USDC-quoted assets. Those references are token-denominated USDC evidence only. They are not fiat USD value, a USDC/USD peg guarantee, P&L, tax, cost basis, route advice, transaction-building input, signing data, or signing readiness.
 
-Provider retention and rate-limit behavior are endpoint/operator properties, not guarantees made by Sui MCP.
+Scan completion uses the GraphQL transaction filter’s retained checkpoint range and the linked pages. Stored observations from earlier candidates that lack the retention boundary cannot establish complete coverage. Local fetch times describe observations and do not order pages. Provider retention and rate limits depend on the endpoint.
 
 Empty pages, bounded pages, and stored local summaries must not be treated as complete history.
 
@@ -196,3 +198,5 @@ Inspect responses can include live GraphQL detail fields for the current respons
 Live scan and live-summary rows point to that digest path through `detailLookup` instead of returning full `details`.
 
 Stored summaries return sanitized normalized details only, omit non-known party account addresses, and may include `lastScanIncompleteReason` when the last scan that touched a row had incomplete or unverified coverage.
+
+The activity classifier reports the action declared by a recognized Move call in `declaredAction` alongside `transactionStatus`. Protocol summary counts measure distinct matching transactions and include success, failure and unknown counts. Use independently observed account balance changes for amounts. Stored `accountCoinFlows.rows` includes amounts from complete returned transactions. The transaction counts describe detail completeness. `accountCoinFlows.rowsTruncated` indicates whether additional asset types were omitted from these amounts. Live scan `analysis.coinFlows` describes transaction-wide changes.

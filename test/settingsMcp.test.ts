@@ -9,7 +9,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { SuiEndpointError } from "../src/core/suiEndpoint.js";
-import { registerReadCards } from "../src/mcp-ui/tools.js";
+import { registerCardTools } from "../src/mcp-ui/tools.js";
 import { registerSettingsTools } from "../src/mcp/tools/settings/index.js";
 import { CARD_METADATA_KEY, CARD_RESOURCE_PREFIX, CARD_TOOLS, SETTINGS_FILE_METADATA_KEY, cardSnapshotSchema } from "../src/mcp-ui/contracts.js";
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
@@ -26,7 +26,7 @@ async function fixture(ui = true, options: Parameters<typeof settingsWorkflowFix
   const server = new McpServer({ name: "settings-fixture", version: "1" });
   const deps = { cards: { store: f.cards }, activityStore: f.wallet.activity, workflow: f.wallet.workflow,
     localSettings: f.localSettings, sessions: f.wallet.sessions, logger: f.wallet.logger };
-  registerReadCards(server, deps);
+  registerCardTools(server, deps);
   registerSettingsTools(server, deps);
   const client = new Client({ name: clientOptions?.name ?? "settings-ui-fixture", version: "1" }, { capabilities: clientOptions?.capabilities ?? (ui ? { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } : {}) });
   const [transport, peer] = InMemoryTransport.createLinkedPair();

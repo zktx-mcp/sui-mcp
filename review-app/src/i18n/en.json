@@ -56,7 +56,7 @@
   "chart": {
     "boundaryUsdc": "Prices are in USDC, not USD; dollar parity is not guaranteed.",
     "boundaryScope": "Historical prices, not live quotes.",
-    "source": "Source: DeepBookV3 Indexer.",
+    "source": "Source: DeepBook fills on Sui mainnet.",
     "renderedWith": "Rendered with",
     "library": "TradingView Lightweight Charts"
   },

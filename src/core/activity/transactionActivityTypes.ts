@@ -10,6 +10,7 @@ import type { SuiActivityAnalysis } from "./transactionActivityAnalysis.js";
 import type { ExternalActivityTransactionDetail } from "./transactionActivityDetails.js";
 
 export type SuiTransactionActivityFact = {
+  compact?: import("./transactionActivityDetails.js").ExternalActivityTransactionCompactFacts | undefined;
   digest: string;
   checkpoint?: string | undefined;
   timestamp?: string | undefined;
@@ -29,7 +30,7 @@ export type SuiAccountBalanceChangeInferencePolicy =
   | "use_returned_account_balance_changes"
   | "no_account_balance_changes_in_complete_details"
   | "do_not_infer_from_transaction_context";
-export type SuiTransactionAccountRole = "sender" | "affected_only";
+export type SuiTransactionAccountRole = "sender" | "affected_only" | "unconfirmed";
 export type SuiTransactionAccountEffectLimitation =
   | "provider_balance_changes_truncated"
   | "transaction_details_unavailable";
@@ -64,6 +65,7 @@ export type SuiRequestedAccountActivity = {
   relationship: ExternalActivityRelationship;
   sentCount: number;
   affectedOnlyCount: number;
+  unconfirmedCount: number;
   balanceChangeCompleteness: SuiAccountBalanceChangeCompleteness;
   coinFlows: Array<{
     coinType: string;
@@ -75,6 +77,8 @@ export type SuiRequestedAccountActivity = {
 };
 
 export type SuiTransactionActivityPage = {
+  sourceRange?: import("./activityStore.js").ScanSourceRange | undefined;
+  orderingVerified?: boolean;
   transactions: SuiTransactionActivityFact[];
   hasMore: boolean;
   cursor?: string | undefined;
@@ -210,7 +214,9 @@ export type SummarizeSuiFunctionActivityScanResult = ScanSuiFunctionActivityResu
 
 export type SummarizeSuiAccountActivityResult = ExternalActivitySummaryResult & {
   status: "ok";
-  analysis: SuiActivityAnalysis;
+  analysis: Omit<SuiActivityAnalysis, "coinFlows">;
+  accountCoinFlows: { scope: "complete_stored_balance_changes_in_returned_transactions"; completeTransactions: number;
+    incompleteTransactions: number; rowsTruncated: boolean; rows: SuiActivityAnalysis["coinFlows"] };
 };
 
 export class TransactionActivityError extends Error {

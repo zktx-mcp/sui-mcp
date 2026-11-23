@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createChart, CandlestickSeries, HistogramSeries, type CandlestickData, type HistogramData, type UTCTimestamp, type WhitespaceData } from "lightweight-charts";
-import { element, link, button, input, select, field, accordion, timeValue } from "../../../review-app/src/ui/ui.js";
+import { element, link, button, input, select, field, accordion, row, timeValue } from "../../../review-app/src/ui/ui.js";
 import { formatUtc } from "../../../review-app/src/format.js";
 import { t } from "../../../review-app/src/i18n/i18n.js";
 import type { CardRenderer } from "./lifecycle.js";
@@ -9,33 +9,42 @@ import type { DeepbookUsdcChartCandlesResponse } from "../../core/read/deepbookU
 // These descriptions follow the source's explicit reason codes. Unknown
 // messages stay diagnostic text; the View does not infer their cause.
 const chartFailureLabels: Record<Extract<DeepbookUsdcChartCandlesResponse, { reason: string }>["reason"], string> = {
+  candle_coverage_incomplete: "The archive could not verify this period. Trade activity is unknown.",
   source_unavailable: "Chart data is unavailable right now.",
+  pool_list_incomplete: "Some markets could not be identified.",
   source_timeout: "The chart data source did not respond in time.",
   source_http_error: "The chart data source returned an error.",
-  official_indexer_invalid_payload: "The chart data source returned information that could not be used.",
+  invalid_chain_candle_evidence: "The chart data source returned information that could not be used.",
+  ambiguous_pool_name: "The source returned multiple markets under this pool name.",
   missing_pool_name: "No trading pair was selected.",
-  unsupported_interval: "This candle interval is not supported.",
-  invalid_timestamp: "A start or end time could not be read.",
-  invalid_timestamp_window: "The start time must be before the end time.",
-  invalid_limit: "The requested number of candles is not valid.",
-  unsupported_query_field: "This chart request includes an unsupported option.",
-  duplicate_query_field: "This chart request repeats an option.",
+  invalid_timestamp: "Choose a valid UTC time at or before the current time.",
+  market_not_created: "This pool did not exist during the requested period.",
+  selected_market_changed: "The market changed after you opened this card. Choose the current pair on a new chart.",
   limit_exceeds_chart_cap: "This chart request exceeds the candle limit.",
-  pool_not_in_official_usdc_pools: "This trading pair is not available in the supported USDC charts."
+  pool_not_in_mainnet_usdc_markets: "This trading pair is not available in the supported USDC charts."
 };
 
-const candleSchema = z.object({ start: z.string(), timestampMs: z.number().int(),
+const candleSchema = z.object({ start: z.string(), end: z.string().optional(), timestampMs: z.number().int(),
   open: z.string(), high: z.string(), low: z.string(), close: z.string(), volume: z.string() });
 type ChartCandle = z.infer<typeof candleSchema>;
 export const DEEPBOOK_USDC_CHART_SHORTCUTS = ["Latest 500", "Last 24h", "Last 7d", "Last 30d"] as const;
 export type DeepbookUsdcChartShortcut = (typeof DEEPBOOK_USDC_CHART_SHORTCUTS)[number];
-const poolsSchema = z.object({ status: z.literal("ok"), pools: z.array(z.object({ poolName: z.string(),
+const marketReadFailureLabels = {
+  coin_metadata_unavailable: "Coin metadata unavailable",
+  pool_identity_mismatch: "Pool object differs from its registered identity",
+  pool_object_unavailable: "Pool object unavailable"
+} as const;
+const marketReason = z.enum(["coin_metadata_unavailable", "pool_identity_mismatch", "pool_object_unavailable"]).optional();
+const poolsSchema = z.object({ status: z.literal("ok"), unavailablePools: z.array(z.object({poolId:z.string(), unavailableReason:marketReason})).optional(), pools: z.array(z.object({ poolId: z.string(), poolName: z.string(),
   baseAsset: z.object({ symbol: z.string() }) })), intervals: z.array(z.string()), defaultInterval: z.string(), defaultLimit: z.number().int().positive(), maxCandles: z.number().int().positive() });
-export const chartResultSchema = z.object({ status: z.enum(["ok", "empty_result"]), candles: z.array(candleSchema), candleCount: z.number().int().nonnegative(),
+export const chartResultSchema = z.object({ status: z.enum(["ok", "empty_result", "preview", "partial_coverage"]), candles: z.array(candleSchema), candleCount: z.number().int().nonnegative(),
   query: z.object({ poolName: z.string(), interval: z.string(),
     startTimeMs: z.number().int().nonnegative().optional(), endTimeMs: z.number().int().nonnegative().optional(),
-    limit: z.number().int().positive() }), source: z.object({ fetchedAt: z.string() }),
-  pair: z.object({ baseAsset: z.object({ symbol: z.string() }), quoteAsset: z.object({ symbol: z.literal("USDC") }) }) })
+    limit: z.number().int().positive() }), source: z.object({ endpoint: z.literal("order_fills"), poolId: z.string(), fetchedAt: z.string(), coveredUntil: z.iso.datetime().optional(), indexedAt: z.iso.datetime().optional(), indexedCheckpoint: z.number().optional() }),
+  pair: z.object({ poolId: z.string(), baseAsset: z.object({ symbol: z.string() }), quoteAsset: z.object({ symbol: z.literal("USDC") }) }) })
+  .refine(value => value.status !== "partial_coverage" || value.source.coveredUntil !== undefined, "Partial coverage requires an indexed cutoff.")
+  .refine(value => value.status !== "preview" || value.candleCount === 1, "A chart preview needs one closed candle.")
+  .refine(value => value.source.poolId === value.pair.poolId, "Market identity mismatch.")
   .refine((value) => value.candleCount === value.candles.length, "Candle count differs from returned rows.");
 
 export const chartRenderer = {
@@ -44,21 +53,40 @@ export const chartRenderer = {
   controls(snapshot, submit) {
     const choices = poolsSchema.parse(snapshot.data);
     const form = document.createElement("form"); form.className = "ui-form";
-    const pool = select({ choices: [{ label: "Choose a pair", value: "" }, ...choices.pools.map((item) => ({ label: `${item.baseAsset.symbol} / USDC`, value: item.poolName }))] }); pool.required = true;
+    const pool = select({ choices: [{ label: "Choose a pair", value: "" }, ...choices.pools.map((item) => ({ label: `${item.baseAsset.symbol} / USDC`, value: item.poolId }))] }); pool.required = true;
     const interval = select({ choices: choices.intervals.map((value) => ({ label: value, value })) });
     interval.value = typeof snapshot.input.interval === "string" ? snapshot.input.interval : choices.defaultInterval;
-    const start = input({ placeholder: "YYYY-MM-DDTHH:mm" });
-    const end = input({ placeholder: "YYYY-MM-DDTHH:mm" });
-    if (typeof snapshot.input.startTimeMs === "number") start.value = utcMsToInputValue(snapshot.input.startTimeMs);
-    if (typeof snapshot.input.endTimeMs === "number") end.value = utcMsToInputValue(snapshot.input.endTimeMs);
+    const start = input({ placeholder: "YYYY-MM-DDTHH:mm or epoch ms" });
+    const end = input({ placeholder: "YYYY-MM-DDTHH:mm or epoch ms" });
+    let exactStart = typeof snapshot.input.startTimeMs === "number" ? snapshot.input.startTimeMs : undefined;
+    let exactEnd = typeof snapshot.input.endTimeMs === "number" ? snapshot.input.endTimeMs : undefined;
+    let latestIndexed = snapshot.input.endMode === "latest_indexed";
     let candleLimit = Number(snapshot.input.limit ?? choices.defaultLimit);
-    const options = accordion("Time range & interval", snapshot.input.startTimeMs !== undefined || snapshot.input.endTimeMs !== undefined);
-    const rangeLabel = element("p", "ui-note", chartQueryText(snapshot.input as z.infer<typeof chartResultSchema>["query"]));
-    for (const control of [start, end]) control.addEventListener("input", () => { rangeLabel.textContent = "Custom range · UTC"; });
+    const options = accordion("Time range & interval", exactStart !== undefined || exactEnd !== undefined);
+    const rangeLabel = element("p", "ui-note", chartQueryText({ startTimeMs: exactStart, endTimeMs: exactEnd }));
+    function displayRange() {
+      start.value = exactStart === undefined ? "" : utcMsToInputValue(exactStart);
+      end.value = exactEnd === undefined ? "" : utcMsToInputValue(exactEnd);
+    }
+    displayRange();
+    start.addEventListener("input", () => {
+      exactStart = undefined;
+      rangeLabel.textContent = "Custom range · UTC";
+    });
+    end.addEventListener("input", () => {
+      exactEnd = undefined;
+      latestIndexed = false;
+      rangeLabel.textContent = "Custom range · UTC";
+    });
     const ranges = element("div", "card-actions");
     for (const shortcut of DEEPBOOK_USDC_CHART_SHORTCUTS) {
       const control = button(shortcut === "Latest 500" ? "Recent" : shortcut, () => {
-        const range = shortcutQuery(shortcut, new Date()); start.value = range.startInput; end.value = range.endInput; candleLimit = Number(range.limitInput);
+        const range = shortcutQuery(shortcut, new Date());
+        exactStart = range.startTimeMs;
+        exactEnd = range.endTimeMs;
+        candleLimit = range.limit;
+        latestIndexed = exactEnd !== undefined;
+        displayRange();
         rangeLabel.textContent = shortcut === "Latest 500" ? "Recent candles · UTC" : `${shortcut} · UTC`;
         submitSelection();
       }, "secondary");
@@ -68,12 +96,16 @@ export const chartRenderer = {
     options.body.append(field("Candle interval", interval), ranges, rangeLabel, field("Start (UTC)", start), field("End (UTC)", end));
     form.append(element("p", "ui-note", "Set the time range and interval before choosing a pair, if needed."),
       field("Choose a pair to open the chart", pool), options.details, error);
+    for (const market of choices.unavailablePools ?? []) {
+      form.append(row(market.unavailableReason ? marketReadFailureLabels[market.unavailableReason] : "Unavailable market", market.poolId));
+    }
     function submitSelection(): void {
       if (!pool.value) return;
       try {
-        const startTimeMs = parseUtcInputToMs(start.value), endTimeMs = parseUtcInputToMs(end.value);
+        const startTimeMs = exactStart ?? parseUtcInputToMs(start.value);
+        const endTimeMs = exactEnd ?? parseUtcInputToMs(end.value);
         if (startTimeMs !== undefined && endTimeMs !== undefined && startTimeMs >= endTimeMs) throw new Error("Start must precede end.");
-        submit({ poolName: pool.value, interval: interval.value, limit: candleLimit,
+        submit({ ...(latestIndexed ? {endMode:"latest_indexed"} : {}), poolId: pool.value, interval: interval.value, limit: candleLimit,
           ...(startTimeMs === undefined ? {} : { startTimeMs }), ...(endTimeMs === undefined ? {} : { endTimeMs }) });
       } catch (issue) { error.textContent = issue instanceof Error ? issue.message : "Invalid chart input."; }
     }
@@ -92,10 +124,15 @@ export const chartRenderer = {
         const node = element("div");
         node.append(element("p", "ui-note", message), element("p", "ui-note", "Ask in chat for a new chart with the pair and time range you want."));
         const details = accordion("Details");
+        const candidates = z.object({candidates:z.array(z.object({poolId:z.string(),baseCoinType:z.string(),quoteCoinType:z.string(),unavailableReason:marketReason}))}).safeParse(snapshot.data);
+        if (candidates.success) for (const market of candidates.data.candidates) {
+          details.body.append(row(market.poolId, [market.baseCoinType + " / " + market.quoteCoinType,
+            market.unavailableReason && marketReadFailureLabels[market.unavailableReason]].filter(Boolean).join(" · ")));
+        }
         details.body.append(element("p", undefined, `Reported reason: ${reason}`)); node.append(details.details);
         return { node };
       }
-      throw new Error("Chart data is incomplete.");
+      throw new Error("The saved chart does not contain verified pool-bound candles. Open a new chart.");
     }
     const data = parsed.data;
     const node = element("div");
@@ -105,19 +142,32 @@ export const chartRenderer = {
     );
     const detail = accordion("Details");
     const checked = element("p", "ui-note", `${t.common.retrievedAt}: `); checked.append(timeValue(data.source.fetchedAt)); detail.body.append(checked);
+    detail.body.append(row("Pool ID", data.source.poolId));
+    if (data.source.indexedAt) detail.body.append(row("Indexed through",timeValue(data.source.indexedAt)));
+    if (data.source.coveredUntil) detail.body.append(row("Coverage through", timeValue(data.source.coveredUntil)));
     const exactTime = (value: number | undefined) => value === undefined ? "not specified" :
-      Number.isFinite(new Date(value).getTime()) ? new Date(value).toISOString() : formatUtc(value);
+      new Date(value).toJSON() ?? formatUtc(value);
     detail.body.append(element("p", undefined,
       `Start: ${exactTime(data.query.startTimeMs)} · End: ${exactTime(data.query.endTimeMs)}`));
-    if (data.candleCount >= data.query.limit) node.append(element("p", "ui-note", `This view is limited to ${data.query.limit} candles; the requested period may contain more.`));
+    if (data.status === "partial_coverage") node.append(element("p", "ui-note", "The source has verified only the period before " + data.source.coveredUntil + "."));
+    if (data.status !== "preview" && data.candleCount >= data.query.limit) node.append(element("p", "ui-note", `This view is limited to ${data.query.limit} candles; the requested period may contain more.`));
     const boundary = element("p", "ui-note", `${t.chart.boundaryUsdc} ${t.chart.boundaryScope} ${t.chart.source}`);
     const attribution = link(t.chart.library, "https://www.tradingview.com/");
     attribution.target = "_blank"; attribution.rel = "noopener noreferrer";
     boundary.append(` ${t.chart.renderedWith} `, attribution, ".");
-    if (data.candles.length === 0) { detail.body.append(boundary); node.append(element("p", "ui-note", "No candles returned for this range."), detail.details); return { node }; }
+    if (data.candles.length === 0) { detail.body.append(boundary); node.append(element("p", "ui-note", data.status === "partial_coverage" ? "No fills in the verified portion." : "No candles returned for this range."), detail.details); return { node }; }
     const container = element("div", "card-chart"); const legend = element("p", "ui-note");
     const last = data.candles.at(-1)!;
     const describe = (candle: ChartCandle) => `${formatUtc(candle.start)} · Open ${candle.open} · High ${candle.high} · Low ${candle.low} · Close ${candle.close} · Volume ${candle.volume}`;
+    if (data.status === "preview") {
+      node.append(element("p","ui-note","Latest verified closed candle. The full chart is still loading."), element("p",undefined,describe(last)),detail.details);
+      return {node};
+    }
+    if (data.source.indexedAt && data.source.coveredUntil && last.timestampMs <= Date.parse(data.source.indexedAt) &&
+        Date.parse(data.source.indexedAt) + 1 === Date.parse(data.source.coveredUntil) &&
+        last.end && Date.parse(last.end) > Date.parse(data.source.coveredUntil)) {
+      node.append(element("p", "ui-note", "The last candle is forming. Its values include fills through " + data.source.indexedAt + "."));
+    }
     legend.textContent = describe(last); detail.body.append(legend, boundary); node.append(container, detail.details);
     let chart: ReturnType<typeof createChart> | undefined;
     let resizeObserver: ResizeObserver | undefined;
@@ -205,26 +255,20 @@ export function chartSeriesData(candles: ChartCandle[], query: z.infer<typeof ch
   return { prices, volumes, range: hasBoundary && from !== undefined && to !== undefined && from < to ? { from, to } : undefined };
 }
 
-export function chartQueryText(query: z.infer<typeof chartResultSchema>["query"]): string {
+export function chartQueryText(query: Pick<z.infer<typeof chartResultSchema>["query"], "startTimeMs" | "endTimeMs">): string {
   if (query.startTimeMs === undefined && query.endTimeMs === undefined) {
     return "Recent candles · UTC";
   }
-  const utc = (timestamp: number | undefined): string => {
-    if (timestamp === undefined) return "not specified";
-    const date = new Date(timestamp);
-    return Number.isNaN(date.getTime())
-      ? `${timestamp} milliseconds since 1970-01-01T00:00:00Z`
-      : formatUtc(timestamp);
-  };
+  const utc = (timestamp: number | undefined) => timestamp === undefined ? "not specified" : formatUtc(timestamp);
   return `Range (UTC): ${utc(query.startTimeMs)} → ${utc(query.endTimeMs)}`;
 }
 
 export function shortcutQuery(
   shortcut: DeepbookUsdcChartShortcut,
   now: Date
-): { startInput: string; endInput: string; limitInput: string } {
+): { startTimeMs?: number; endTimeMs?: number; limit: number } {
   if (shortcut === "Latest 500") {
-    return { startInput: "", endInput: "", limitInput: "500" };
+    return { limit: 500 };
   }
   const durationMs =
     shortcut === "Last 24h"
@@ -234,7 +278,7 @@ export function shortcutQuery(
         : 30 * 24 * 60 * 60 * 1000;
   const end = now.getTime();
   const start = end - durationMs;
-  return { startInput: utcMsToInputValue(start), endInput: utcMsToInputValue(end), limitInput: "10000" };
+  return { startTimeMs: start, endTimeMs: end, limit: 10000 };
 }
 
 export function parseUtcInputToMs(value: string): number | undefined {
@@ -242,18 +286,25 @@ export function parseUtcInputToMs(value: string): number | undefined {
   if (trimmed === "") {
     return undefined;
   }
+  if (/^(0|[1-9]\d*)$/.test(trimmed)) {
+    const ms = Number(trimmed);
+    if (!Number.isSafeInteger(ms)) throw new Error("Epoch milliseconds must be a safe integer.");
+    return ms;
+  }
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(trimmed)) {
-    throw new Error("UTC timestamps must use YYYY-MM-DDTHH:mm.");
+    throw new Error("UTC timestamps must use YYYY-MM-DDTHH:mm or nonnegative epoch milliseconds.");
   }
   const ms = Date.parse(`${trimmed}:00.000Z`);
-  if (!Number.isSafeInteger(ms)) {
+  if (!Number.isSafeInteger(ms) || ms < 0 || utcMsToInputValue(ms) !== trimmed) {
     throw new Error("UTC timestamp is invalid.");
   }
   return ms;
 }
 
-export function utcMsToInputValue(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 16);
+function utcMsToInputValue(ms: number): string {
+  const iso = new Date(ms).toJSON();
+  // Extended years and values beyond Date's range also round-trip through the editor.
+  return iso && !iso.startsWith("+") ? iso.slice(0, 16) : String(ms);
 }
 
 export function candleToCandlestickData(candle: ChartCandle): CandlestickData<UTCTimestamp> {

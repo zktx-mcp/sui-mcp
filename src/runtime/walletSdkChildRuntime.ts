@@ -71,7 +71,7 @@ export function runWalletSdkChild(createTransport: (input: WalletInit) => Promis
     transport = await createTransport(input);
     stage = "restoration_failed";
     send({ ...envelope(), type: "stage", stage: "session_restore" });
-    await transport.restore();
+    await transport.cleanupPairings();
     transport.onSessionChanged((topic, chains) => {
       try { snapshot(false, chains ? { topic, chains } : undefined); } catch { fail("wallet_state_unavailable"); }
     });

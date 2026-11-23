@@ -85,9 +85,11 @@ describe.each(stores)("local transaction material store (%s)", (_label, makeStor
       new Date("2026-06-06T00:00:00.000Z")
     );
 
-    expect(store.getTransactionMaterial({ ...handle, planId: "other_plan" })).toBeUndefined();
-    expect(store.getTransactionMaterial({ ...handle, reviewSessionId: "other_review" })).toBeUndefined();
-    expect(store.getTransactionMaterial({ ...handle, account: `0x${"b".repeat(64)}` })).toBeUndefined();
+    const beforeExpiry = new Date("2026-06-06T00:00:01.000Z");
+    expect(store.getTransactionMaterial(handle, beforeExpiry)).toBeDefined();
+    expect(store.getTransactionMaterial({ ...handle, planId: "other_plan" }, beforeExpiry)).toBeUndefined();
+    expect(store.getTransactionMaterial({ ...handle, reviewSessionId: "other_review" }, beforeExpiry)).toBeUndefined();
+    expect(store.getTransactionMaterial({ ...handle, account: `0x${"b".repeat(64)}` }, beforeExpiry)).toBeUndefined();
   });
 
   it("expires and deletes local transaction material records", () => {

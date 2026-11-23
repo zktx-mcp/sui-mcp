@@ -62,8 +62,8 @@ export const ADAPTER_PROMPT_SURFACES: readonly AdapterPromptSurface[] = [
     protocolSlug: "deep",
     title: "DeepBook Swap Review",
     description: 'Prepare a reviewable DeepBook mainnet swap from a one-line intent, e.g. "10 sui to usdc".',
-    intentArgDescription: 'Swap intent in one line, any language, e.g. "10 sui to usdc" or "10 수이 usdc로 환전"',
-    exampleIntents: ["10 sui to usdc", "10 수이 usdc로 환전"],
+    intentArgDescription: 'Describe the swap in one line, in any language, e.g. "swap 10 SUI for USDC".',
+    exampleIntents: ["10 sui to usdc", "swap 10 SUI for USDC"],
     toolName: "action_start_review"
   }
 ];

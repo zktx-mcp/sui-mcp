@@ -111,7 +111,7 @@ function buildDeepbookHumanReadableReview(
   });
   const expectedOutput = amountFromQuotePolicy("expected_output", input.swapQuotePolicy.expectedOutput);
   const minimumOutput = amountFromQuotePolicy("minimum_output", input.swapQuotePolicy.minimumOutput);
-  const protocolFee = amountFromQuotePolicy("fee", input.swapQuotePolicy.protocolFee);
+  const { inputFlow } = input.swapQuotePolicy;
   return {
     kind: "swap_human_readable_review",
     proposedAction: {
@@ -126,7 +126,10 @@ function buildDeepbookHumanReadableReview(
       outgoing: [sourceAmount],
       expectedIncoming: [expectedOutput],
       minimumIncoming: [minimumOutput],
-      fees: [protocolFee]
+      inputFlow,
+      ...(input.swapQuotePolicy.feeTargetRaw === undefined ? {} : { feeTargetRaw: input.swapQuotePolicy.feeTargetRaw }),
+      separateFeeBudgetRaw: input.swapQuotePolicy.separateFeeBudgetRaw,
+      fees: inputFlow.fee.kind === "separate_coin" ? [amountFromQuotePolicy("fee", inputFlow.fee.amount)] : []
     },
     recipients: [
       { role: "connected_account", address: input.account },
@@ -196,6 +199,7 @@ function buildDeepbookHumanReadableReview(
       }
     ],
     freshness: {
+      quotedAt: input.swapQuotePolicy.quoteSource.fetchedAt,
       status: "current",
       evaluatedAt: input.now.toISOString(),
       expiresAt: input.transactionMaterial.expiresAt,

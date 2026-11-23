@@ -11,7 +11,7 @@ import { createInternalMcpHandler } from "../src/runtime/shared/mcpHttp.js";
 import { createAuthenticatedFetch } from "../src/runtime/shared/authenticatedFetch.js";
 import { INTERNAL_MCP_PATH } from "../src/runtime/shared/control.js";
 import { settingsWorkflowFixture } from "./fixtures/settingsWorkflow.js";
-import { registerReadCards } from "../src/mcp-ui/tools.js";
+import { registerCardTools } from "../src/mcp-ui/tools.js";
 import { registerSettingsTools } from "../src/mcp/tools/settings/index.js";
 import { CARD_TOOLS, CARD_METADATA_KEY, cardSnapshotSchema } from "../src/mcp-ui/contracts.js";
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
@@ -28,7 +28,7 @@ async function fixture() {
     const server = new McpServer({ name: "settings-wire-fixture", version: "1" });
     const deps = { cards: { store: f.cards }, activityStore: f.wallet.activity, workflow: f.wallet.workflow,
       localSettings: f.localSettings, sessions: f.wallet.sessions, logger: f.wallet.logger };
-    registerReadCards(server, deps); registerSettingsTools(server, deps); return server;
+    registerCardTools(server, deps); registerSettingsTools(server, deps); return server;
   });
   const runtime = await startSharedServer({ port: 0, control, onError() {}, createApplication: async () => ({
     handleMcp: (request, response) => f.wallet.run(() => handler.handle(request, response)),
@@ -101,7 +101,7 @@ it("enforces the actual authenticated wire limit before Settings dispatch, inclu
       input: { ...input, chunkBase64: "A".repeat(65536) } } }))).rejects.toMatchObject({ code: -32600,
         data: { code: "settings_payload_too_large", maximumMessageSize: 65536 } });
     expect(f.act).toHaveBeenCalledTimes(count);
-    // SDK 2.3.1's complete HTTP-body guard runs before the smaller card
+    // SDK 2.4.0's complete HTTP-body guard runs before the smaller card
     // envelope guard. Neither error may admit a file write or wallet request.
     f.setSize(4 * 1024 * 1024 + 1);
     await expect(f.actCard(input)).rejects.toMatchObject({ status: 413,

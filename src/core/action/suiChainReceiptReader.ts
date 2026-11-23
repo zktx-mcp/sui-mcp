@@ -4,7 +4,8 @@ import { normalizeCoinType, type CoinUnit } from "../read/coinMetadata.js";
 import { suiTransactionDigestSchema } from "../suiAddress.js";
 import { receiptPtbMermaid } from "./receiptPtbGraph.js";
 import {
-  effectsStatusFromSdk,
+  receiptEffectsStatus,
+  type ReviewedOutputGuard,
   isReceiptNotFoundError,
   objectTypesFromSdk,
   packageCallsFromTransaction,
@@ -86,7 +87,8 @@ export type PublicChainReceipt = {
   packageCalls: SuiChainReceiptPackageCall[];
   balanceChanges: PublicChainReceiptBalanceChange[];
   objectTypes: Record<string, string>;
-  gas: PublicChainReceiptGas;
+  gas: PublicChainReceiptGas | undefined;
+  unavailableFields?: string[];
   inputs: PublicChainReceiptInput[];
   events: PublicChainReceiptEvent[];
   ptbGraph: PublicChainReceiptPtbGraph | undefined;
@@ -96,6 +98,7 @@ export type PublicChainReceipt = {
 
 export type PublicChainReceiptResult =
   | { status: "found"; receipt: PublicChainReceipt }
+  | { status: "observed"; txDigest: string; effectsStatus: SuiChainReceiptEffectsStatus; fetchedAt: string; detailStatus: "unavailable" }
   | { status: "invalid_digest" }
   | { status: "not_found" }
   | { status: "unavailable"; message: string };
@@ -113,9 +116,11 @@ export type ReadPublicChainReceiptOptions = {
   client: PublicChainReceiptReaderClient;
   network: "mainnet";
   expectedChainIdentifier: string;
+  readChainIdentifier?: () => Promise<string>;
   // Optional best-effort resolver for a balance-change coin's verified decimals and
   // symbol (the shared coin-metadata cache + DeepBook fallback). When omitted, the
   // receipt keeps raw amounts. Wired in start.ts from the read service.
+  reviewedOutputGuard?: (digest: string, sender: string) => ReviewedOutputGuard | undefined;
   resolveCoinUnit?: (coinType: string) => Promise<CoinUnit>;
 };
 
@@ -133,7 +138,8 @@ export async function readPublicChainReceipt(
 
   let chainIdentifier: string;
   try {
-    chainIdentifier = (await options.client.core.getChainIdentifier()).chainIdentifier;
+    chainIdentifier = options.readChainIdentifier ? await options.readChainIdentifier() :
+      (await options.client.core.getChainIdentifier()).chainIdentifier;
   } catch (error) {
     return { status: "unavailable", message: receiptErrorMessage(error, "Sui mainnet chain identifier lookup failed.") };
   }
@@ -145,61 +151,60 @@ export async function readPublicChainReceipt(
   try {
     result = await options.client.core.getTransaction({ digest: digest.data, include: PUBLIC_RECEIPT_INCLUDE });
   } catch (error) {
-    if (isReceiptNotFoundError(error)) {
+    if (isReceiptNotFoundError(error, digest.data)) {
       return { status: "not_found" };
     }
     return { status: "unavailable", message: receiptErrorMessage(error, "Sui mainnet transaction lookup failed.") };
   }
 
+  const tx = result.$kind === "Transaction" ? result.Transaction : result.FailedTransaction;
+  const sender = tx.transaction?.sender;
+  let guard: ReviewedOutputGuard | undefined;
+  if (tx.digest === digest.data && sender && tx.effects?.status?.success === false) {
+    try { guard = options.reviewedOutputGuard?.(digest.data, sender); }
+    catch { /* Local review instructions are optional context for a verified chain failure. */ }
+  }
+  const projected = projectPublicChainReceipt(result, digest.data, chainIdentifier, input.now, guard);
+  if (projected.status !== "found" || !options.resolveCoinUnit) return projected;
+  return { status: "found", receipt: { ...projected.receipt,
+    balanceChanges: await withCoinDecimals(projected.receipt.balanceChanges, options.resolveCoinUnit) } };
+}
+
+export function projectPublicChainReceipt(result: SuiClientTypes.TransactionResult<ChainReceiptInclude>, digest: string,
+  chainIdentifier: string, now: Date, guard?: ReviewedOutputGuard): PublicChainReceiptResult {
   const transaction = result.$kind === "Transaction" ? result.Transaction : result.FailedTransaction;
   const transactionData = transaction.transaction;
   const effects = transaction.effects;
-  if (!transactionData || !effects || !transaction.balanceChanges || !transaction.objectTypes) {
-    return { status: "unavailable", message: "Sui mainnet receipt is missing required fields." };
+  if (transaction.digest !== digest || effects?.transactionDigest !== digest) {
+    return { status: "unavailable", message: "The transaction and effects must match the requested receipt digest." };
   }
-
-  // Build receipt facts fail-closed: any malformed field (sender, Move calls,
-  // balance-change address, object id) throws inside this block and maps to an
-  // `unavailable` outcome, so the public receipt is never returned with silently
-  // dropped or nulled facts and the mappers can never crash the request. The PTB
-  // graph is best-effort and falls back to undefined (placeholder shown), so it is
-  // produced outside this block and never fails the receipt.
-  let receipt: PublicChainReceipt;
-  try {
-    receipt = {
-      txDigest: transaction.digest,
-      // A present-but-unparseable sender is a malformed payload and fails closed.
-      // An absent sender is legitimate for some system transactions, so it maps
-      // to undefined. The account-bound verifier instead requires a sender
-      // because it must match the reviewed account.
-      sender:
-        transactionData.sender === null || transactionData.sender === undefined
-          ? undefined
-          : requireReceiptAddress(transactionData.sender, "Sui mainnet receipt has an unparseable sender address."),
-      effectsStatus: effectsStatusFromSdk(effects.status),
-      packageCalls: packageCallsFromTransaction(transactionData),
-      balanceChanges: balanceChangesFromSdk(transaction.balanceChanges),
-      objectTypes: objectTypesFromSdk(transaction.objectTypes),
-      gas: gasFromSdk(effects.gasUsed, transactionData.gasData),
-      inputs: inputsFromSdk(transactionData.inputs ?? []),
-      events: eventsFromSdk(transaction.events ?? []),
-      ptbGraph: ptbGraphFromTransaction(transactionData),
-      chainIdentifier,
-      fetchedAt: input.now.toISOString()
-    };
-  } catch (error) {
-    return {
-      status: "unavailable",
-      message: receiptErrorMessage(error, "Sui mainnet receipt could not be read as expected facts.")
-    };
+  if (!effects?.status || typeof effects.status.success !== "boolean") return { status: "unavailable", message: "Missing execution status." };
+  if (result.$kind === "FailedTransaction" && effects.status.success) return { status: "unavailable", message: "Transaction status disagrees with its effects." };
+  const effectsStatus = receiptEffectsStatus(effects, digest, guard);
+  const unavailableFields: string[] = [];
+  function detail<T>(field: string, read: () => T | undefined): T | undefined {
+    try {
+      const value = read();
+      if (value !== undefined) return value;
+    } catch { /* Retain independent fields and the verified effects. */ }
+    unavailableFields.push(field);
+    return undefined;
   }
-
-  // Best-effort decimals enrichment: resolved outside the fail-closed block so a
-  // coin-metadata miss or outage leaves the balance change on its raw amount and
-  // never turns a readable receipt into an error.
-  if (options.resolveCoinUnit && receipt.balanceChanges.length > 0) {
-    receipt = { ...receipt, balanceChanges: await withCoinDecimals(receipt.balanceChanges, options.resolveCoinUnit) };
-  }
+  const receipt: PublicChainReceipt = {
+    txDigest: digest, effectsStatus, chainIdentifier, fetchedAt: now.toISOString(),
+    sender: detail("sender", () => transactionData?.sender ? requireReceiptAddress(transactionData.sender, "Invalid sender.") : undefined),
+    packageCalls: detail("packageCalls", () => transactionData && packageCallsFromTransaction(transactionData)) ?? [],
+    balanceChanges: detail("balanceChanges", () => transaction.balanceChanges?.flatMap((change, index) => {
+      const row = detail("balanceChanges", () => balanceChangeFromSdk(change, index));
+      return row ? [row] : [];
+    })) ?? [],
+    objectTypes: detail("objectTypes", () => transaction.objectTypes && objectTypesFromSdk(transaction.objectTypes)) ?? {},
+    gas: detail("gas", () => effects.gasUsed && gasFromSdk(effects.gasUsed, transactionData?.gasData)),
+    inputs: detail("inputs", () => transactionData?.inputs && inputsFromSdk(transactionData.inputs)) ?? [],
+    events: detail("events", () => transaction.events && eventsFromSdk(transaction.events)) ?? [],
+    ptbGraph: detail("ptbGraph", () => transactionData && ptbGraphFromTransaction(transactionData))
+  };
+  if (unavailableFields.length) receipt.unavailableFields = [...new Set(unavailableFields)];
   return { status: "found", receipt };
 }
 
@@ -225,10 +230,7 @@ async function withCoinDecimals(
   });
 }
 
-function balanceChangesFromSdk(
-  balanceChanges: SuiClientTypes.BalanceChange[]
-): PublicChainReceiptBalanceChange[] {
-  return balanceChanges.map((change, index) => {
+function balanceChangeFromSdk(change: SuiClientTypes.BalanceChange, index: number): PublicChainReceiptBalanceChange {
     const address = requireReceiptAddress(
       change.address,
       "Sui mainnet receipt contains a balance change with an invalid address."
@@ -241,12 +243,11 @@ function balanceChangesFromSdk(
       amountRaw: amount.toString(),
       direction: amount > 0n ? "increase" : amount < 0n ? "decrease" : "zero"
     };
-  });
 }
 
 function gasFromSdk(
   gasUsed: SuiClientTypes.GasCostSummary,
-  gasData: SuiClientTypes.TransactionData["gasData"]
+  gasData: SuiClientTypes.TransactionData["gasData"] | undefined
 ): PublicChainReceiptGas {
   const computation = BigInt(gasUsed.computationCost);
   const storage = BigInt(gasUsed.storageCost);
@@ -263,7 +264,7 @@ function gasFromSdk(
   };
 }
 
-function firstPaymentObjectId(gasData: SuiClientTypes.TransactionData["gasData"]): string | undefined {
+function firstPaymentObjectId(gasData: SuiClientTypes.TransactionData["gasData"] | undefined): string | undefined {
   const payment = gasData?.payment;
   if (!Array.isArray(payment) || payment.length === 0) {
     return undefined;

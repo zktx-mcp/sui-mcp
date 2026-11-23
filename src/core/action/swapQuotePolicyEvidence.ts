@@ -1,5 +1,7 @@
+import { minimumSwapOutput, quotePolicyRawAmountSchema, swapQuoteInputFlowSchema } from "./swapQuoteAmounts.js";
 import { z } from "zod";
 import {
+  minimumOutputEnforcementSchema,
   adapterEvidenceClaimSchema,
   adapterRawQuantitySchema,
   adapterSourceOfTruthSchema,
@@ -7,45 +9,20 @@ import {
   type AdapterRawQuantity,
   type AdapterSourceOfTruth
 } from "./signableAdapterContract.js";
-import { parseRawU64 } from "../numeric/rawU64.js";
+import { makeRawU64StringSchema, parseRawU64 } from "../numeric/rawU64.js";
 import type { LocalTransactionMaterialHandle } from "../session/transactionMaterialStore.js";
 import { normalizedSuiAddressSchema } from "../suiAddress.js";
 import {
   DEEPBOOK_SCALAR_UNIT_SOURCE,
-  SUI_METADATA_UNIT_SOURCE,
-  normalizeCoinType
+  SUI_METADATA_UNIT_SOURCE
 } from "../read/coinMetadata.js";
 
-export const SWAP_QUOTE_POLICY_EVIDENCE_VERSION =
-  "swap-quote-policy-v1";
-
-const BPS_DENOMINATOR = 10_000n;
+export const SWAP_QUOTE_POLICY_EVIDENCE_VERSION = "swap-quote-policy-v3";
 
 const isoUtcStringSchema = z.string().refine((value) => {
   const parsed = new Date(value);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
 }, "Expected ISO 8601 UTC timestamp");
-
-const coinTypeSchema = z.string().min(1).max(512).refine((value) => {
-  try {
-    normalizeCoinType(value);
-    return true;
-  } catch {
-    return false;
-  }
-}, "Expected a Sui struct tag coin type").transform((value) => normalizeCoinType(value));
-
-const quotePolicyAssetSchema = z.object({
-  symbol: z.string().min(1).max(64),
-  coinType: coinTypeSchema,
-  decimals: z.number().int().min(0).max(255),
-  unitSource: z.enum([DEEPBOOK_SCALAR_UNIT_SOURCE, SUI_METADATA_UNIT_SOURCE])
-}).strict();
-
-const quotePolicyRawAmountSchema = z.object({
-  raw: z.string().min(1),
-  asset: quotePolicyAssetSchema
-}).strict();
 
 export const swapQuotePolicyEvidenceSchema = z.object({
   evidenceVersion: z.literal(SWAP_QUOTE_POLICY_EVIDENCE_VERSION),
@@ -67,17 +44,23 @@ export const swapQuotePolicyEvidenceSchema = z.object({
     sourceMoveFunction: z.string().min(1).max(160)
   }).strict(),
   policySource: z.literal("adapter_policy_from_quote_evidence"),
+  maxSlippageSource: z.literal("action_request"),
   maxSlippageBps: z.number().int().min(1).max(10_000),
   staleAfterMs: z.number().int().min(1),
   sourceAmount: quotePolicyRawAmountSchema,
   expectedOutput: quotePolicyRawAmountSchema,
   minimumOutput: quotePolicyRawAmountSchema,
-  protocolFee: quotePolicyRawAmountSchema,
+  enforcement: minimumOutputEnforcementSchema.optional(),
+  inputFlow: swapQuoteInputFlowSchema,
+  feeTargetRaw: makeRawU64StringSchema("fee target").optional(),
+  separateFeeBudgetRaw: makeRawU64StringSchema("separate fee budget").nullable(),
   derivedAt: isoUtcStringSchema,
   expiresAt: isoUtcStringSchema
 }).strict();
 
 export type SwapQuotePolicyEvidence = z.infer<typeof swapQuotePolicyEvidenceSchema>;
+
+export type VerifySwapMinimum = (data: import("@mysten/sui/transactions").TransactionData, quote: SwapQuotePolicyEvidence) => void;
 
 export type CreateSwapQuotePolicyEvidenceInput = {
   materialHandle: LocalTransactionMaterialHandle;
@@ -91,7 +74,10 @@ export type CreateSwapQuotePolicyEvidenceInput = {
   sourceAmount: SwapQuotePolicyEvidence["sourceAmount"];
   expectedOutput: SwapQuotePolicyEvidence["expectedOutput"];
   minimumOutput: SwapQuotePolicyEvidence["minimumOutput"];
-  protocolFee: SwapQuotePolicyEvidence["protocolFee"];
+  inputFlow: SwapQuotePolicyEvidence["inputFlow"];
+  feeTargetRaw?: string | undefined;
+  separateFeeBudgetRaw: string | null;
+  enforcement?: SwapQuotePolicyEvidence["enforcement"];
   derivedAt: Date;
 };
 
@@ -113,13 +99,17 @@ export function createSwapQuotePolicyEvidence(
       network: "sui:mainnet",
       quoteEvidenceId: input.quoteEvidenceId,
       quoteSource: input.quoteSource,
+      maxSlippageSource: "action_request",
       policySource: "adapter_policy_from_quote_evidence",
       maxSlippageBps: input.maxSlippageBps,
       staleAfterMs: input.staleAfterMs,
       sourceAmount: input.sourceAmount,
       expectedOutput: input.expectedOutput,
       minimumOutput: input.minimumOutput,
-      protocolFee: input.protocolFee,
+      ...(input.enforcement ? { enforcement: input.enforcement } : {}),
+      inputFlow: input.inputFlow,
+      ...(input.feeTargetRaw === undefined ? {} : { feeTargetRaw: input.feeTargetRaw }),
+      separateFeeBudgetRaw: input.separateFeeBudgetRaw,
       derivedAt: input.derivedAt.toISOString(),
       expiresAt: input.materialHandle.expiresAt
     },
@@ -173,10 +163,20 @@ export function verifySwapQuotePolicyEvidence(input: {
 
   const expectedOutput = parseRawU64(evidence.expectedOutput.raw, "expectedOutput.raw", { positive: true });
   const minimumOutput = parseRawU64(evidence.minimumOutput.raw, "minimumOutput.raw", { positive: true });
-  parseRawU64(evidence.sourceAmount.raw, "sourceAmount.raw", { positive: true });
-  parseRawU64(evidence.protocolFee.raw, "protocolFee.raw");
+  const principal = parseRawU64(evidence.sourceAmount.raw, "sourceAmount.raw", { positive: true });
+  if (BigInt(evidence.inputFlow.expectedSpendRaw) + BigInt(evidence.inputFlow.expectedReturnRaw) !== principal) {
+    throw new Error("swap quote expected input spend and return must sum to the requested principal");
+  }
+  if (evidence.feeTargetRaw !== undefined && (evidence.separateFeeBudgetRaw === null ||
+      BigInt(evidence.feeTargetRaw) < BigInt(evidence.separateFeeBudgetRaw))) throw new Error("Invalid fee allocation target");
+  const fee = evidence.inputFlow.fee;
+  if (fee.kind === "separate_coin"
+    ? evidence.separateFeeBudgetRaw === null || BigInt(evidence.separateFeeBudgetRaw) < BigInt(fee.amount.raw)
+    : evidence.separateFeeBudgetRaw !== null) {
+    throw new Error("swap quote fee budget must cover the itemized fee and apply only to a separate fee coin");
+  }
   const computedMinimum =
-    (expectedOutput * (BPS_DENOMINATOR - BigInt(evidence.maxSlippageBps))) / BPS_DENOMINATOR;
+    minimumSwapOutput(expectedOutput, evidence.maxSlippageBps);
   if (minimumOutput !== computedMinimum) {
     throw new Error("swap quote policy minimumOutput.raw must match expectedOutput.raw and maxSlippageBps");
   }
@@ -184,6 +184,10 @@ export function verifySwapQuotePolicyEvidence(input: {
     throw new Error("swap quote policy minimum output asset must match expected output asset");
   }
 
+  if (evidence.enforcement && (evidence.enforcement.recipient !== evidence.account ||
+      evidence.enforcement.raw !== evidence.minimumOutput.raw || evidence.enforcement.coinType !== evidence.minimumOutput.asset.coinType)) {
+    throw new Error("Output enforcement must bind the reviewed minimum, recipient and asset.");
+  }
   const contractMapping = mapSwapQuotePolicyEvidenceToContractDraft(evidence);
   if (contractMapping.status === "unsupported") {
     throw new Error(`swap quote policy evidence is not contract-mappable: ${contractMapping.reason}`);
@@ -288,6 +292,7 @@ export function mapSwapQuotePolicyEvidenceToContractDraft(
       id: slippagePolicyClaimId,
       factKind: "slippage_policy",
       sourceEvidenceId: quoteSourceId,
+      maxSlippageSource: "action_request",
       policySource: "adapter_policy_from_quote_evidence",
       maxSlippageBps: evidence.maxSlippageBps,
       minOutRaw: evidence.minimumOutput.raw
@@ -361,7 +366,7 @@ function mapUnitSource(
       sourceDescription: "Token decimals from the pinned DeepBook mainnet metadata, used to interpret raw quote amounts"
     };
   }
-  if (unitSource === "sui_core_getCoinMetadata") {
+  if (unitSource === SUI_METADATA_UNIT_SOURCE) {
     return {
       sourceReferencesKind: "verified_mainnet_onchain_metadata",
       unitClaimSource: "verified_mainnet_onchain_metadata",

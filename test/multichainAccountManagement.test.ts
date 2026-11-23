@@ -1,3 +1,4 @@
+import { confirmSettingsRecords } from "./fixtures/settingsWorkflow.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
@@ -161,7 +162,7 @@ it("does not reinterpret reused IDs after restore and requires disconnecting the
   const backup = await w.run(() => w.localData.exportLocalData()), id = backup.data.accounts[0]!.id;
   expect(backup.data).not.toHaveProperty("chainAccountContexts");
   backup.data.accounts[0]!.address = otherSui;
-  await w.run(() => w.localData.importLocalDataReplace(backup));
+  await w.run(() => confirmSettingsRecords(f, backup));
   expect((await w.run(() => w.activity.getKnownAccount(otherSui)))?.id).toBe(id);
   expect(w.run(() => w.workflow.currentConnectionContext()).assetReadAccount).toEqual({ status: "address_required" });
   expect(w.run(() => w.records.currentConnection()?.connection.chainResults)).toEqual([{ chainId: "sui:mainnet", status: "bound", address: w.account }]);

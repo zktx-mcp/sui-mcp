@@ -18,14 +18,23 @@ export class SqliteCardRecordStore implements CardRecordStore {
       AND json_extract(input_json,'$.reviewSessionId')=? LIMIT 1`).get(ownerId, now.toISOString(), reviewSessionId);
   }
 
+  getClosedState(id: string): CardRecord["state"] | undefined {
+    const row = this.db.prepare(`SELECT id,kind,state,revision,created_at,expires_at,input_json,reason,error,result_json
+      FROM live_read_cards WHERE id=? AND state='closed'`).get(id) as Row | undefined;
+    return row ? this.publicState(row) : undefined;
+  }
+
+  private publicState(row: Row) {
+    return cardStateSchema.parse({ cardId: row.id, kind: row.kind, state: row.state, revision: row.revision,
+      createdAt: row.created_at, expiresAt: row.expires_at, input: JSON.parse(row.input_json),
+      ...(row.reason === null ? {} : { reason: row.reason }), ...(row.error === null ? {} : { error: row.error }),
+      ...(row.result_json === null ? {} : { data: JSON.parse(row.result_json) }) });
+  }
   get(id: string): CardRecord | undefined {
     const row = this.db.prepare("SELECT * FROM live_read_cards WHERE id = ?").get(id) as Row | undefined;
     if (!row) return undefined;
     return {
-      state: cardStateSchema.parse({ cardId: row.id, kind: row.kind, state: row.state, revision: row.revision,
-        createdAt: row.created_at, expiresAt: row.expires_at, input: JSON.parse(row.input_json),
-        ...(row.reason === null ? {} : { reason: row.reason }), ...(row.error === null ? {} : { error: row.error }),
-        ...(row.result_json === null ? {} : { data: JSON.parse(row.result_json) }) }),
+      state: this.publicState(row),
       tokenHash: row.token_hash, ownerId: row.owner_id,
       scope: row.scope, ...(row.operation_id === null ? {} : { operationId: row.operation_id }),
       ...(row.accepted_input_json === null ? {} : { acceptedInput: JSON.parse(row.accepted_input_json) as Record<string, unknown> }),

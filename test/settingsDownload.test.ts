@@ -170,14 +170,13 @@ it.each(["cancel", "replacement"] as const)("keeps the actual descriptor alive t
   fs.open = async (...args: Parameters<typeof fs.open>) => {
     const handle = await originalOpen(...args);
     if (String(args[0]) === path && typeof args[1] === "number" && !(args[1] & (constants.O_RDWR | constants.O_WRONLY))) {
-      const stream = handle.createReadStream.bind(handle), close = handle.close.bind(handle);
+      const read = handle.read.bind(handle), close = handle.close.bind(handle);
       handle.close = async () => { await close(); descriptorClosed = true; };
-      handle.createReadStream = ((options) => {
-        const actual = stream(options);
-        // The real descriptor, stream and product hash loop remain in use.
-        // Only external I/O completion is held before yielding the real bytes.
-        return { async *[Symbol.asyncIterator]() { entered.resolve(); await release.promise; for await (const part of actual) yield part; } } as ReturnType<typeof stream>;
-      }) as typeof handle.createReadStream;
+      handle.read = new Proxy(read, { async apply(target, receiver, args) {
+        entered.resolve(); await release.promise;
+        return Reflect.apply(target, receiver, args);
+      } });
+
     }
     return handle;
   };

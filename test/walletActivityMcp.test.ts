@@ -1,3 +1,4 @@
+import { confirmLocalRecords } from "./fixtures/settingsWorkflow.js";
 import { seedReadAddressCleared } from "./fixtures/readAccount.js";
 import { suiGrants } from "./fixtures/walletGrants.js";
 import { FixtureWalletRuntime } from "./fixtures/walletRuntime.js";
@@ -12,7 +13,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { McpServer } from "@modelcontextprotocol/server";
 import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
-import { registerReadCards } from "../src/mcp-ui/tools.js";
+import { registerCardTools } from "../src/mcp-ui/tools.js";
 import { registerSessionTools } from "../src/mcp/tools/session/index.js";
 import { registerActionTools } from "../src/mcp/tools/action/prepareSuiActionReview.js";
 import { registerReviewActivityListTool, registerReviewActivitySummaryTools } from "../src/mcp/tools/read/reviewActivityTools.js";
@@ -30,7 +31,7 @@ async function harness(ui = true, receiptDetails = false, accountReader?: NonNul
   // These registrations consume only the real stores/workflow below; no read
   // service or unrelated protocol dependency is replaced as part of the check.
   const deps = { sessions: f.sessions, activityStore: f.activity, cards: { store: f.cards }, workflow: f.workflow, logger: f.logger } as unknown as McpServerDeps;
-  registerReadCards(server, deps); registerSessionTools(server, deps); registerActionTools(server, deps);
+  registerCardTools(server, deps); registerSessionTools(server, deps); registerActionTools(server, deps);
   registerReviewActivityListTool(server, deps); registerReviewActivitySummaryTools(server, deps);
   const client = new Client({ name: "wallet-flow-client", version: "1" }, { capabilities: ui ? { extensions: { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } } } : {} });
   const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(b); await client.connect(a);
@@ -284,7 +285,7 @@ describe("wallet cards, ordinary MCP and stored review activity", () => {
     expect(backup.data.reviewRequests).toHaveLength(5); expect(backup.data.reviewExecutions).toHaveLength(2);
     const serialized = JSON.stringify(backup);
     for (const secret of ["symKey", "sdk_pending", "can_submit", "token_hash", "transactionBytes", '"signature":']) expect(serialized).not.toContain(secret);
-    await f.run(() => local.importLocalDataReplace(backup));
+    await f.run(() => confirmLocalRecords(f, local, backup));
     const restored = data(await call(TOOL_NAMES.readSummarizeReviewFunnel, { account: f.account }));
     expect(restored.summary).toEqual(beforeExport.summary);
     expect(f.run(() => f.records.connections())).toEqual(connectionJournal);
@@ -343,7 +344,7 @@ it.each(["initialization_failed", "restoration_failed"] as const)("returns compl
   const saved = f.run(() => f.records.currentRequest(ready.session.id))!, reads = f.chainRead.mock.calls.length;
   f.workflow.stop();
   const next = new WalletWorkflow({ ownerId: "restoring-owner", records: f.run(() => f.activity.createWalletWorkflowStore("restoring-owner")),
-    sessions: f.sessions, runtime: new FixtureWalletRuntime(reason === "restoration_failed" ? { ...f.transport, restore: async () => { throw new Error("PRIVATE-RESTORE"); } } : undefined),
+    sessions: f.sessions, runtime: new FixtureWalletRuntime(reason === "restoration_failed" ? { ...f.transport, cleanupPairings: async () => { throw new Error("PRIVATE-RESTORE"); } } : undefined),
     bindExternalEvent: (work) => f.access.bind(work),
     computation: f.computation, verifyReceipt: f.verifyReceipt, verifyNetwork: f.verifyNetwork, submitTransaction: f.submit,
     assertCurrent: f.access.assertCurrent, logger: f.logger, now: f.now });
@@ -390,7 +391,11 @@ it("reports a lost wallet run as a failed request without authorizing late signa
 
 it("keeps asynchronous card-creation failures inside both review gateways' safe error envelope", async () => {
   const { f, call } = await harness(); await f.approve();
-  const create = vi.spyOn(f.cards, "create").mockRejectedValue(new Error("PRIVATE-CARD-STORAGE"));
+  const db = new Database(join(f.directory, "activity.sqlite"));
+  const counts = () => ["review_sessions", "live_review_sessions", "live_read_cards"].map(table =>
+    (db.prepare(`SELECT count(*) AS total FROM ${table}`).get() as { total: number }).total);
+  const before = counts();
+  db.exec("CREATE TRIGGER fail_review_card BEFORE INSERT ON live_read_cards WHEN NEW.kind='review' BEGIN SELECT RAISE(ABORT,'PRIVATE-CARD-STORAGE'); END");
   const inputs = [
     { name: TOOL_NAMES.actionStartReview, input: { intent: { type: "swap", protocol: "deep", from: { symbol: "SUI", amount: "1" }, to: { symbol: "USDC" }, maxSlippageBps: 50 } } },
     { name: TOOL_NAMES.actionCreateProposalReview, input: { proposal: { type: "payment", id: "untrusted-payment", source: { kind: "user", name: "Fixture" },
@@ -404,7 +409,7 @@ it("keeps asynchronous card-creation failures inside both review gateways' safe 
     expect(JSON.parse(text.text)).toMatchObject({ ok: false, error: { kind: "internal_error" } });
     expect(JSON.stringify(response)).not.toContain("PRIVATE-CARD-STORAGE");
   }
-  expect(create).toHaveBeenCalledTimes(2); expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+  expect(counts()).toEqual(before); db.close(); expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
 });
 
 it.each([TOOL_NAMES.sessionGetReviewStatus, TOOL_NAMES.sessionGetExecutionResult,
@@ -513,7 +518,7 @@ it.each(["user_stop", "chain_event", "account_change", "session_delete", "discon
   const request = f.run(() => f.records.currentRequest(review.id))!;
   expect(request).toMatchObject({ requestStatus: "stopped", reason: expected });
   expect(f.run(() => f.records.authority(request.attemptId))).toMatchObject({ can_submit: 0, sdk_pending: 1 });
-  await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+  expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
   const history = data(await call(TOOL_NAMES.readGetReviewSessionDetail, { reviewSessionId: review.id, account: f.account }));
   expect(history.request.reason).toBe(expected);
   expect(data(await call(TOOL_NAMES.sessionGetExecutionResult, { reviewSessionId: review.id })).request.reason).toBe(expected);
@@ -547,7 +552,7 @@ it.each(["submitting", "awaiting_chain_result"] as const)("preserves same-digest
     input: f.connectionInput({ snapshot: cardSnapshotSchema.parse(data(connectCard)) }, { action: "disconnect", connectionId: connection.connectionId }) }));
   expect(f.run(() => f.records.authority(request.attemptId))).toEqual(authority);
   expect(f.run(() => f.records.busyForAccount(f.account, f.now()))).toBe(true);
-  await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+  expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
   f.notify(); disconnecting.resolve();
   if (stage === "submitting") submit.resolve({});
   else expect((await review.read()).data).toMatchObject({ observe: true, observationStopped: false });
@@ -570,6 +575,12 @@ it("ends the stopped card and permits same-digest observation only through a new
   f.chainRead.mockRejectedValue(Object.assign(new Error("Not yet found"), { name: "TimeoutError" }));
   data(await review.act({ action: "request_signature", connectionId: connection.connectionId, account: f.account, reviewRevision: 1 }));
   await vi.waitFor(() => expect(f.submit).toHaveBeenCalledOnce());
+  await review.read();
+  await vi.waitFor(() => {
+    const request = f.run(() => f.records.currentRequest(review.id))!;
+    expect(request.lastObservation?.kind).toBe("wait_timed_out");
+    expect(f.run(() => f.records.authority(request.attemptId)?.lookup_pending)).toBe(0);
+  });
   data(await review.act({ action: "stop_waiting" }));
   f.notify({ topic: "fixture-topic", grants: suiGrants([f.account], ["sui_signTransaction"]), expiresAt: new Date(Date.parse(connection.expiresAt) + 1000).toISOString() });
   submit.resolve({});
@@ -608,8 +619,8 @@ it.each(["request_update", "activity_insert"] as const)("recovers the submitted 
     expect(f.run(() => f.records.busyForAccount(f.account, f.now()))).toBe(true);
     expect(f.run(() => f.activity.createSessionRecordStore().hasUnsettledRequest(review.id, f.now()))).toBe(true);
     const backup = await f.run(() => f.localData.exportLocalData(f.now()));
-    await expect(f.run(() => f.localData.resetLocalData())).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
-    await expect(f.run(() => f.localData.importLocalDataReplace(backup))).rejects.toMatchObject({ details: { reason: "wallet_request_unsettled" } });
+    expect(() => f.run(() => f.localData.assertReplacementAllowed(f.now()))).toThrow(expect.objectContaining({ details: { reason: "wallet_request_unsettled" } }));
+    await expect(f.run(() => confirmLocalRecords(f, f.localData, backup))).rejects.toThrow();
     db.exec("DROP TRIGGER reject_finish"); f.chainRead.mockImplementation(receipt);
     const result = data(await call(TOOL_NAMES.sessionGetExecutionResult, { reviewSessionId: review.id }));
     expect(result).toMatchObject({ requestStatus: "completed", attemptId: request.attemptId,
@@ -639,12 +650,20 @@ it("lists live input and work, excluding cancelled and independently expired inp
     data(await review.act({ action: "cancel" }));
     expect(await review.read()).toMatchObject({ state: "closed", reason: "cancelled", data: { allowedActions: [] } });
   }
+  const closedProposal = data(await call(TOOL_NAMES.actionCreateProposalReview, { proposal: {
+    type: "payment", id: "history", source: { kind: "user", name: "Fixture" }, network: "sui:mainnet",
+    createdAt: f.now().toISOString(), purpose: "Proposed payment",
+    payment: { amount: { symbol: "SUI", amountDisplay: "1", amountKind: "display_proposal" }, recipient: { address: f.account } }
+  } }));
+  expect(closedProposal.card.state).toBe("closed");
   const expiring = await openProductReview(h), db = new Database(join(f.directory, "activity.sqlite"));
+  const inspections = vi.spyOn(f.sessions, "inspectReview");
   try {
     // Only the input expires; the review evidence remains a valid stored fact.
     db.prepare("UPDATE live_read_cards SET expires_at=?,revision=revision+1 WHERE id=?").run(f.now().toISOString(), expiring.ref.cardId);
     const overview = data(await call(TOOL_NAMES.sessionGetInteractionStatus)).pendingReviewSessions;
     expect(overview.truncated).toBe(false); expect(overview.items.map((r: any) => r.reviewSessionId)).toEqual([live.id]);
+    expect(inspections.mock.calls.map(([id]) => id)).not.toContain(closedProposal.reviewSessionId);
     expect(f.run(() => f.sessions.readReviewSession(expiring.id)?.status)).toBe("proposed");
     for (const id of cancelled) expect(f.run(() => f.sessions.readReviewSession(id))).toBeDefined();
     data(await live.act({ action: "prepare_review", connectionId: connection.connectionId, account: f.account, reviewRevision: 0 }));
@@ -657,7 +676,7 @@ it("lists live input and work, excluding cancelled and independently expired inp
     await vi.waitFor(() => expect(f.run(() => f.records.currentRequest(live.id)?.requestStatus)).toBe("request_failed"));
     expect(data(await call(TOOL_NAMES.sessionGetInteractionStatus)).pendingReviewSessions.items).toEqual([]);
     expect(f.submit).not.toHaveBeenCalled();
-  } finally { db.close(); }
+  } finally { inspections.mockRestore(); db.close(); }
 });
 
 it("settles an ended preparation after storage recovers, without restarting its sources", async () => {
@@ -740,7 +759,7 @@ it.each(["network", "signature_record", "submission_admission"] as const)("repor
     const request = f.run(() => f.records.currentRequest(review.id))!;
     expect(request.reason).toBe(reason);
     expect(request.signatureVerifiedAt).toBe(expectedVerificationTime);
-    expect(request.submittedAt).toBeUndefined(); expect(request.execution).toBeUndefined();
+    expect(request.submissionAdmittedAt).toBeUndefined(); expect(request.execution).toBeUndefined();
     expect(f.verifyNetwork).toHaveBeenCalledOnce(); expect(f.sign).toHaveBeenCalledOnce();
     expect(f.submit).not.toHaveBeenCalled(); expect(f.chainRead).not.toHaveBeenCalled();
 
@@ -752,7 +771,7 @@ it.each(["network", "signature_record", "submission_admission"] as const)("repor
     expect(detail.transitions.filter((t: { event: string }) => t.event === "signature_verified"))
       .toHaveLength(stage === "submission_admission" ? 1 : 0);
     expect(backup.data.reviewRequests.find((r) => r.attempt_id === request.attemptId))
-      .toMatchObject({ reason, request_status: "request_failed", signature_verified_at: expectedVerificationTime ?? null, submitted_at: null });
+      .toMatchObject({ reason, request_status: "request_failed", signature_verified_at: expectedVerificationTime ?? null, submission_admitted_at: null });
     expect(backup.data.reviewStatusTransitions.find((t) => t.attempt_id === request.attemptId && t.to_status === "request_failed")?.reason).toBe(reason);
     for (const privateText of ["PRIVATE-RPC-DETAIL", "PRIVATE-SQLITE-DETAIL"]) {
       expect(JSON.stringify({ result, detail, card, backup, logs: f.logger.error.mock.calls })).not.toContain(privateText);
@@ -925,7 +944,7 @@ it.each(["sdk_pending", "submit_pending", "lookup_pending", "request_deadline", 
       expect(() => f.run(() => f.workflow.reconcileConnectionContext())).toThrow("unrelated write refused");
       if (otherId && failure !== "request_deadline" && failure !== "connection_expiry") {
         expect(f.run(() => f.records.authority(otherId!))?.[failure]).toBe(1);
-        await expect(f.run(() => f.localData.resetLocalData())).rejects.toThrow();
+        await expect(f.run(() => confirmLocalRecords(f, f.localData))).rejects.toThrow();
       }
       expect(f.submit).toHaveBeenCalledTimes(dispatches);
       db.exec("DROP TRIGGER refuse_other");
@@ -963,12 +982,12 @@ it("keeps own completed facts readable during callback repair, but reports an ow
 it.each(["initializing", "recovering", "unavailable"] as const)("reports actual %s service availability before issuing a Disconnect card", async (status) => {
   const { f, call } = await harness();
   await f.approve();
-  const restoring = deferred<Awaited<ReturnType<typeof f.transport.restore>>>();
+  const restoring = deferred<void>();
   if (status === "unavailable") f.runtime.block("restoration_failed");
   else {
     f.runtime.fence(f.runtime.runId);
     if (status === "initializing") {
-      vi.spyOn(f.transport, "restore").mockReturnValueOnce(restoring.promise);
+      vi.spyOn(f.transport, "cleanupPairings").mockReturnValueOnce(restoring.promise);
       await f.run(() => f.runtime.replace(f.runtime.runId, (runId) => f.records.setWalletRunId(runId)));
     }
   }
@@ -984,5 +1003,5 @@ it.each(["initializing", "recovering", "unavailable"] as const)("reports actual 
     else expect(payload.error.details).not.toHaveProperty("reason");
     expect(result._meta).toBeUndefined(); expect(count()).toEqual(before);
     expect(f.transport.disconnect).not.toHaveBeenCalled(); expect(f.sign).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
-  } finally { restoring.resolve([]); db.close(); }
+  } finally { restoring.resolve(); db.close(); }
 });

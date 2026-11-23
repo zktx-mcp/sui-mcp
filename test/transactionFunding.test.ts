@@ -158,7 +158,7 @@ describe("transaction funding across the real SDK build and stored evidence", ()
         getTransaction: async () => ({ ...chainResponse, Transaction: { ...chainResponse.Transaction, events: [] } }) as never } } },
       { digest: m.digest.transactionDigest, now });
     expect(receipt.status).toBe("found");
-    if (receipt.status === "found") expect(receipt.receipt.gas.paymentObjectId).toBe(addressGas ? undefined : gasObject);
+    if (receipt.status === "found") expect(receipt.receipt.gas?.paymentObjectId).toBe(addressGas ? undefined : gasObject);
 
   });
 

@@ -4,6 +4,7 @@ import { asRecord, asString } from "./parse.js";
 export type WalletAssetRow = {
   symbol: string;
   total: string;
+  coinType?: string;
 };
 
 export function formatWalletAssetRow(entry: unknown): WalletAssetRow | null {
@@ -34,7 +35,7 @@ export function formatWalletAssetRow(entry: unknown): WalletAssetRow | null {
     total = "Amount unavailable";
   }
 
-  return { symbol, total };
+  return { symbol, total, ...(coinType ? { coinType } : {}) };
 }
 
 // Format a raw integer amount, returning undefined for a non-integer string so a

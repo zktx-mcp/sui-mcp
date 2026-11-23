@@ -1,3 +1,4 @@
+import { SuiEndpointError } from "../core/suiEndpoint.js";
 import type { Logger } from "./logger.js";
 
 // One stdio process owns the shared loopback server. Peers authenticate the
@@ -111,6 +112,10 @@ export async function startOrDeferReviewServer<T extends StartedReviewServerLike
         // An authenticated prior owner may have closed its port while its SDK
         // still owns private storage. Reuse the existing takeover observation.
         if (typeof error === "object" && error !== null && "code" in error && error.code === "DATA_DIRECTORY_OWNED") continue;
+        if (error instanceof SuiEndpointError && (error.kind === "endpoint_unreachable" || error.kind === "endpoint_timeout")) {
+          deps.logger.warn("Deferred owner acquisition will retry the unavailable Sui endpoint", { port, reason: error.kind });
+          continue;
+        }
         throw error;
       }
       if (!next) {

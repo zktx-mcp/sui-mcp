@@ -42,12 +42,20 @@ export class SqliteTransactionMaterialStore implements LocalTransactionMaterialS
     now = new Date()
   ): LocalTransactionMaterialHandle {
     const record = buildTransactionMaterialRecord(input, now);
-    this.db
+    const inserted = this.db
       .prepare(
         `INSERT INTO live_transaction_materials
            (material_id, review_session_id, plan_id, account, kind, source,
-            transaction_bytes, redacted_diagnostics_json, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            transaction_bytes, redacted_diagnostics_json, created_at, expires_at, preparation_id)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE ? IS NULL OR EXISTS (
+           SELECT 1 FROM live_review_sessions r JOIN live_wallet_connections c ON c.id=r.wallet_connection_id
+           WHERE r.id=? AND r.preparation_id=? AND r.account=? AND r.status!='expired' AND r.expires_at>?
+           AND json_extract(r.plans_json,'$[0].id')=?
+           AND json_extract(c.connection_json,'$.grantRevisions."sui:mainnet"')=r.wallet_grant_revision
+           AND c.owner_id=r.owner_id AND c.run_id=r.preparation_run_id AND c.current_slot=1 AND c.status='connected'
+           AND c.data_epoch=(SELECT data_epoch FROM settings_control WHERE id=1)
+         )`
       )
       .run(
         record.materialId,
@@ -59,8 +67,10 @@ export class SqliteTransactionMaterialStore implements LocalTransactionMaterialS
         Buffer.from(record.transactionBytes),
         record.redactedDiagnostics === undefined ? null : JSON.stringify(record.redactedDiagnostics),
         record.createdAt,
-        record.expiresAt
+        record.expiresAt, input.preparationId ?? null, input.preparationId ?? null,
+        record.reviewSessionId, input.preparationId ?? null, record.account, now.toISOString(), record.planId
       );
+    if (inserted.changes !== 1) throw new Error("The review preparation changed before storing its candidate.");
     return toMaterialHandle(record);
   }
 
@@ -85,6 +95,10 @@ export class SqliteTransactionMaterialStore implements LocalTransactionMaterialS
     return record;
   }
 
+  deleteTransactionMaterial(handle: LocalTransactionMaterialHandle): void {
+    this.db.prepare("DELETE FROM live_transaction_materials WHERE material_id=? AND review_session_id=? AND plan_id=? AND account=?")
+      .run(handle.materialId, handle.reviewSessionId, handle.planId, handle.account);
+  }
   deleteReviewSessionTransactionMaterials(reviewSessionId: string): void {
     this.db.prepare(`DELETE FROM live_transaction_materials WHERE review_session_id = ?`).run(reviewSessionId);
   }

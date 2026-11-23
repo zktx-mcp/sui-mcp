@@ -1,12 +1,12 @@
+import { CARD_RESOURCE_PREFIX } from "../../../mcp-ui/contracts.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { noParamsInputSchema, successOutputSchema } from "../../schemas.js";
 import { okToolResult } from "../../result.js";
-import { MCP_RESOURCES } from "../../resources.js";
+
 import {
   EVIDENCE_POLICY,
   FAIL_CLOSED_TOOLS,
-  IMPLEMENTED_TOOLS,
   PACKAGE_NAME,
   SERVER_LIMITATIONS,
   SERVER_NAME,
@@ -23,7 +23,8 @@ export const SUPPORTED_PROTOCOLS = [
   { id: "deepbook-margin", status: "mainnet", support: "protocol_notes_only" }
 ] as const;
 
-export function registerServerStatusTools(server: McpServer, registeredPromptNames: readonly string[]): void {
+export function registerServerStatusTools(server: McpServer, registeredPromptNames: readonly string[], registeredTools: ReadonlySet<string>,
+  fixedResources: readonly { name: string; uri: string; title: string; description: string }[]): void {
   server.registerTool(
     TOOL_NAMES.readGetServerStatus,
     {
@@ -50,6 +51,7 @@ export function registerServerStatusTools(server: McpServer, registeredPromptNam
         resources: z.object({
           count: z.number().int().nonnegative(),
           uris: z.array(z.string()),
+          templates: z.array(z.string()),
           items: z.array(
             z.object({
               name: z.string(),
@@ -81,13 +83,13 @@ export function registerServerStatusTools(server: McpServer, registeredPromptNam
         network: SERVER_NETWORK,
         runtime: SERVER_RUNTIME,
         transport: SERVER_TRANSPORT,
-        implementedTools: [...IMPLEMENTED_TOOLS],
-        implementedToolsCount: IMPLEMENTED_TOOLS.length,
+        implementedTools: [...registeredTools],
+        implementedToolsCount: registeredTools.size,
         failClosedTools: [...FAIL_CLOSED_TOOLS],
         resources: {
-          count: MCP_RESOURCES.length,
-          uris: MCP_RESOURCES.map((resource) => resource.uri),
-          items: MCP_RESOURCES.map((resource) => ({
+          count: fixedResources.length, templates: [CARD_RESOURCE_PREFIX + "{cardId}"],
+          uris: fixedResources.map((resource) => resource.uri),
+          items: fixedResources.map((resource) => ({
             name: resource.name,
             uri: resource.uri,
             title: resource.title,

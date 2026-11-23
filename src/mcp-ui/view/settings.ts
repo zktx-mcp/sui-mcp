@@ -389,6 +389,19 @@ function view(snapshot: CardSnapshot, act: ((input: Record<string, unknown>) => 
         }
         const preview = object(state.preparation?.preview);
         if (state.draft.kind === "import_local_data") {
+          const saved = object(preview.currentSettings), incoming = object(preview.incomingSettings);
+          if (saved && incoming) {
+            if (state.facts) {
+              for (const [label, endpoint] of [["gRPC", state.facts.localSettings.suiGrpcUrl], ["GraphQL", state.facts.localSettings.suiGraphqlUrl]] as const) {
+                content.append(row(`${label} in this process`, `${endpoint.effectiveValue} (${endpoint.source})`));
+              }
+            }
+            for (const [key, label] of [["suiGrpcUrl", "Saved gRPC endpoint"], ["suiGraphqlUrl", "Saved GraphQL endpoint"],
+              ["walletConnectionChains", "Networks for new connections"]] as const) {
+              const display = (value: unknown) => Array.isArray(value) ? value.join(", ") : String(value ?? "Unset");
+              content.append(row(label, `${display(saved[key])} → ${display(incoming[key])}`));
+            }
+          }
           const before = object(preview.currentCounts), after = object(preview.incomingCounts);
           content.append(element("h3", undefined, "Records to replace (now → backup)"));
           for (const [key, label] of recordLabels) {

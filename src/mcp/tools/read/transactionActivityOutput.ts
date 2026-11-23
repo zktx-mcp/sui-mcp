@@ -4,6 +4,7 @@ import {
   type ExternalActivityTransactionCompactFacts
 } from "../../../core/activity/transactionActivityDetails.js";
 import type {
+  SummarizeSuiAccountActivityResult,
   SuiTransactionAccountEffects,
   SuiTransactionActivityFact
 } from "../../../core/activity/transactionActivityTypes.js";
@@ -35,6 +36,7 @@ export const SUI_ACTIVITY_QUANTITY_SEMANTICS = {
     "transactions[].requestedAccountEffect.coinFlows[].*Raw",
     "transactions[].details.balanceChanges[].amountRaw",
     "transactions[].compact.balanceChanges[].amountRaw",
+    "accountCoinFlows.rows[].*Raw",
     "analysis.coinFlows[].*Raw"
   ],
   notFor: [
@@ -45,11 +47,20 @@ export const SUI_ACTIVITY_QUANTITY_SEMANTICS = {
   ]
 } as const;
 
-export type SuiActivityQuantitySemantics = typeof SUI_ACTIVITY_QUANTITY_SEMANTICS;
-
-export function suiActivityQuantitySemantics(): SuiActivityQuantitySemantics {
-  return SUI_ACTIVITY_QUANTITY_SEMANTICS;
+export function suiActivityQuantitySemantics(scope: "inspect" | "stored" | "scan" | "analysis") {
+  function exposed(field: string) {
+    if (scope === "inspect") return field.startsWith("transaction.");
+    if (scope === "stored") return field.startsWith("accountCoinFlows.") ||
+      field.startsWith("transactions[].details") || field.startsWith("transactions[].compact") || field.startsWith("analysis.gas.");
+    return !field.startsWith("transaction.") && !field.startsWith("accountCoinFlows.") &&
+      !field.startsWith("transactions[].details") && !field.startsWith("transactions[].compact") &&
+      (!field.startsWith("analysis.") || scope === "analysis");
+  }
+  return { ...SUI_ACTIVITY_QUANTITY_SEMANTICS,
+    rawAmountFields: SUI_ACTIVITY_QUANTITY_SEMANTICS.rawAmountFields.filter(exposed),
+    gasDisplayFields: SUI_ACTIVITY_QUANTITY_SEMANTICS.gasDisplayFields.filter(exposed) };
 }
+export type SuiActivityQuantitySemantics = ReturnType<typeof suiActivityQuantitySemantics>;
 
 export const ACCOUNT_ASSET_TIMELINE_QUANTITY_SEMANTICS = {
   kind: "sui_account_asset_timeline_raw_net_flows",
@@ -234,7 +245,8 @@ export function liveSuiActivityUserAnswerUse(
 }
 
 export function storedSuiActivityUserAnswerUse(
-  input: TransactionDetailAvailability | TransactionDetailAvailabilityStatus = "all"
+  input: TransactionDetailAvailability | TransactionDetailAvailabilityStatus,
+  flows: Pick<SummarizeSuiAccountActivityResult["accountCoinFlows"], "completeTransactions" | "incompleteTransactions" | "rowsTruncated">
 ): UserAnswerUse {
   const detailAvailability = normalizeDetailAvailability(input);
   const allTransactionsHaveDetails = detailAvailability.allReturnedTransactionsHaveDetails;
@@ -243,6 +255,7 @@ export function storedSuiActivityUserAnswerUse(
   return {
     canAnswer: [
       "stored_local_normalized_activity_summary_for_the_selected_account",
+      ...(flows.completeTransactions > 0 ? ["account_flows_from_complete_returned_stored_transactions"] : []),
       "deterministic_summary_over_stored_normalized_rows",
       "stored_transaction_detail_availability_for_returned_rows",
       ...(allTransactionsHaveDetails ? ["stored_transaction_context_for_all_returned_rows"] : []),
@@ -254,6 +267,8 @@ export function storedSuiActivityUserAnswerUse(
       "live_latest_activity",
       "complete_wallet_history",
       "complete_dapp_history",
+      ...(flows.rowsTruncated ? ["complete_asset_list_or_zero_flow_for_an_unlisted_asset"] : []),
+      ...(flows.incompleteTransactions > 0 ? ["account_amounts_for_transactions_with_incomplete_balances"] : []),
       ...(allTransactionsHaveDetails ? [] : ["stored_transaction_context_for_all_returned_rows_without_all_details"]),
       "display_token_amounts_without_verified_decimals",
       "fiat_usd_cash_out",
@@ -264,13 +279,14 @@ export function storedSuiActivityUserAnswerUse(
       "signing_data_or_readiness"
     ],
     answerFields: [
-      "summary",
+      "summary", "accountCoinFlows", "accountCoinFlows.rows", "accountCoinFlows.rowsTruncated", "accountCoinFlows.completeTransactions", "accountCoinFlows.incompleteTransactions",
       "analysis",
       "transactions",
       "transactionDetailAvailability",
       ...(allTransactionsHaveDetails ? ["transactions[].compact", "transactions[].details"] : [])
     ],
-    conclusionRuleFields: ["transactionDetailAvailability"],
+    conclusionRuleFields: ["transactionDetailAvailability", "accountCoinFlows.completeTransactions",
+      "accountCoinFlows.incompleteTransactions", "accountCoinFlows.rowsTruncated"],
     diagnosticOnlyFields: [
       "dataScope",
       "accountSource",
@@ -395,7 +411,7 @@ export function transactionFactOutput(transaction: SuiTransactionActivityFact): 
     ...(accountEffects === undefined ? {} : { requestedAccountEffect: accountEffects }),
     ...(transaction.details === undefined
       ? {}
-      : { compact: compactExternalActivityTransactionDetails(transaction.details) }),
+      : { compact: (transaction.compact ?? compactExternalActivityTransactionDetails(transaction.details, transaction.status)) }),
     ...(transaction.details === undefined ? {} : { details: transaction.details })
   };
 }
@@ -411,7 +427,7 @@ export function transactionFactAuditOutput(transaction: SuiTransactionActivityFa
     ...(accountEffects === undefined ? {} : { requestedAccountEffect: accountEffects }),
     ...(transaction.details === undefined
       ? {}
-      : { transactionContext: transactionContextOutput(compactExternalActivityTransactionDetails(transaction.details)) }),
+      : { transactionContext: transactionContextOutput((transaction.compact ?? compactExternalActivityTransactionDetails(transaction.details, transaction.status))) }),
     detailLookup: {
       tool: TOOL_NAMES.readInspectSuiTransaction,
       digest: transaction.digest
@@ -428,7 +444,7 @@ export function requestedAccountTransactionFactOutput(
 
   const compact = transaction.details === undefined
     ? undefined
-    : compactExternalActivityTransactionDetails(transaction.details);
+    : (transaction.compact ?? compactExternalActivityTransactionDetails(transaction.details, transaction.status));
   const transactionContext = compact === undefined
     ? undefined
     : transactionContextOutput(compact);
@@ -462,6 +478,7 @@ function transactionContextOutput(
   compact: ExternalActivityTransactionCompactFacts
 ): Omit<ExternalActivityTransactionCompactFacts, "balanceChanges"> {
   return {
+    balanceChangeScope: compact.balanceChangeScope,
     factScope: compact.factScope,
     requestedAccountScoped: compact.requestedAccountScoped,
     moveCallTargets: compact.moveCallTargets,
@@ -482,7 +499,7 @@ export function externalActivityTransactionRecordOutput(
     ...transaction,
     ...(transaction.details === undefined
       ? {}
-      : { compact: compactExternalActivityTransactionDetails(transaction.details) }),
+      : { compact: (transaction.compact ?? compactExternalActivityTransactionDetails(transaction.details, transaction.status)) }),
     detailLookup: {
       tool: TOOL_NAMES.readInspectSuiTransaction,
       digest: transaction.digest

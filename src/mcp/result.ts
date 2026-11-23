@@ -7,7 +7,7 @@ export function okToolResult<T extends UnknownRecord>(data: T): CallToolResult {
   assertNoForbiddenMcpFields(payload);
   return {
     structuredContent: payload,
-    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }]
+    content: [{ type: "text", text: JSON.stringify(payload) }]
   };
 }
 
@@ -16,6 +16,6 @@ export function errorToolResult(error: ToolError): CallToolResult {
   assertNoForbiddenMcpFields(payload);
   return {
     isError: true,
-    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }]
+    content: [{ type: "text", text: JSON.stringify(payload) }]
   };
 }

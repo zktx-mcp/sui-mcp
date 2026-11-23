@@ -1,3 +1,7 @@
+import { windowCompletion } from "./transactionActivityScanPolicy.js";
+import { parseSuiFunctionTarget } from "./suiFunctionTarget.js";
+import type { PrivateReviewArtifacts } from "../session/privateReviewArtifacts.js";
+import { mergeActivityDetails } from "./transactionActivityDetails.js";
 import { readStoredTransactionRequest } from "../session/sqliteTransactionRequest.js";
 import { publicConnectionOperation } from "../session/walletConnectionOperations.js";
 import { decideReviewEvaluation, needsReviewMaterial, type ReviewEvaluationCandidate, type ReviewEvaluation } from "../session/reviewValidity.js";
@@ -10,7 +14,7 @@ import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
-import { SqliteWalletWorkflowStore } from "../session/sqliteWalletWorkflowStore.js";
+import { claimFirstReviewOpening, SqliteWalletWorkflowStore } from "../session/sqliteWalletWorkflowStore.js";
 import type { AdapterLifecycleValidator } from "../action/adapterLifecycleValidation.js";
 import { assertNoForbiddenMcpFields } from "../action/forbiddenFields.js";
 import { parseLifecycleValidatedReviewState } from "../action/reviewStateValidation.js";
@@ -41,16 +45,15 @@ import type {
   CoinMetadataCacheRecord
 } from "../read/coinMetadata.js";
 import { SqliteLocalDataService, type SqliteLocalDataServiceOptions } from "./localDataService.js";
-import { buildExternalActivityCoverageResult } from "./externalActivityCoverage.js";
+import { buildExternalActivityCoverageResult, scanCompletesAffectedAccountRange } from "./externalActivityCoverage.js";
 import {
-  buildExternalActivityTransactionStreamResult,
-  canonicalExternalActivityTransactions
+  buildExternalActivityTransactionStreamResult
 } from "./externalActivityTransactionStream.js";
 import type {
   AccountRecord,
   AccountSource,
   ActiveAccountRecord,
-  ActivityStore,
+  ActivityStore, ActivityWindowBinding,
   ExternalActivityCoverageFilter,
   ExternalActivityCoverageResult,
   ExternalActivityScanInput,
@@ -154,7 +157,7 @@ export class SqliteActivityStore implements ActivityStore {
     this.validateAdapterLifecycle = options.validateAdapterLifecycle;
     const dataDirectory = dirname(options.databasePath);
     try {
-      mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
+      if (options.databasePath !== ":memory:") mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
     } catch {
       throw new ActivityStoreError(
         `Could not create the local activity data directory. Check directory permissions or set ${DATA_DIR_ENV}.`
@@ -178,8 +181,10 @@ export class SqliteActivityStore implements ActivityStore {
     // the owner. The 0700 directory is the primary protection (it also covers the WAL/SHM
     // sidecars and blocks other OS users); the 0600 file is belt-and-suspenders. Best-effort
     // because some platforms (e.g. Windows) ignore POSIX modes.
-    restrictPathPermissions(dataDirectory, 0o700);
-    restrictPathPermissions(options.databasePath, 0o600);
+    if (options.databasePath !== ":memory:") {
+      restrictPathPermissions(dataDirectory, 0o700);
+      restrictPathPermissions(options.databasePath, 0o600);
+    }
   }
 
   async upsertAccount(address: string, source: AccountSource, now = new Date()): Promise<AccountRecord> {
@@ -270,19 +275,19 @@ export class SqliteActivityStore implements ActivityStore {
     this.db
       .transaction(() => {
         const accountId = input.account
-          ? this.upsertAccountSync(input.account, "review_execution", input.transitionedAt).id
+          ? this.upsertAccountSync(input.account, "review_record", input.transitionedAt).id
           : null;
         if (accountId !== null) {
           this.assertReviewSessionAccount(input.reviewSessionId, accountId);
         }
-        this.insertReviewTransition({ ...input, accountId });
+        const transitionedAt = this.insertReviewTransition({ ...input, accountId });
         this.db
           .prepare(
             `UPDATE review_sessions
              SET current_status = ?, account_id = COALESCE(account_id, ?), updated_at = ?
              WHERE id = ?`
           )
-          .run(input.toStatus, accountId, input.transitionedAt, input.reviewSessionId);
+          .run(input.toStatus, accountId, transitionedAt, input.reviewSessionId);
       })();
   }
 
@@ -299,19 +304,19 @@ export class SqliteActivityStore implements ActivityStore {
   ): boolean {
     return this.runLiveReviewSessionMutation(live, () => {
       const accountId = input.account
-        ? this.upsertAccountSync(input.account, "review_execution", input.transitionedAt).id
+        ? this.upsertAccountSync(input.account, "review_record", input.transitionedAt).id
         : null;
       if (accountId !== null) {
         this.assertReviewSessionAccount(input.reviewSessionId, accountId);
       }
-      this.insertReviewTransition({ ...input, accountId });
+      const transitionedAt = this.insertReviewTransition({ ...input, accountId });
       this.db
         .prepare(
           `UPDATE review_sessions
            SET current_status = ?, account_id = COALESCE(account_id, ?), updated_at = ?
            WHERE id = ?`
         )
-        .run(input.toStatus, accountId, input.transitionedAt, input.reviewSessionId);
+        .run(input.toStatus, accountId, transitionedAt, input.reviewSessionId);
     });
   }
 
@@ -320,7 +325,7 @@ export class SqliteActivityStore implements ActivityStore {
     const stateJson = serializeJson(parsedState);
     this.db
       .transaction(() => {
-        const account = this.upsertAccountSync(parsedState.account, "review_execution", input.recordedAt);
+        const account = this.upsertAccountSync(parsedState.account, "review_record", input.recordedAt);
         this.assertReviewSessionAccount(input.reviewSessionId, account.id);
         this.db
           .prepare(
@@ -376,6 +381,10 @@ export class SqliteActivityStore implements ActivityStore {
       if (live.publication) {
         const { material: checked, clock } = live.publication;
         const at = clock(), handle = checked.artifacts.transactionMaterial;
+        if (handle && Date.parse(handle.expiresAt) <= at.getTime()) {
+          throw new SessionStoreError("invalid_session_transition", "Quote expired before review publication.",
+            { reason: "quote_expired_before_publication" });
+        }
         const material = handle && this.createTransactionMaterialStore().getTransactionMaterial(handle, at);
         const connection = live.expected?.walletConnectionId ? this.db.prepare(`SELECT c.status,c.owner_id,c.run_id,c.connection_json,r.preparation_run_id FROM live_wallet_connections c
           JOIN live_review_sessions r ON r.wallet_connection_id=c.id WHERE c.id=? AND r.id=? AND c.current_slot=1 AND c.data_epoch=(SELECT data_epoch FROM settings_control WHERE id=1)`)
@@ -390,7 +399,7 @@ export class SqliteActivityStore implements ActivityStore {
           throw new SessionStoreError("invalid_session_transition", "Review material or wallet selection changed before publication.");
         }
       }
-      const account = this.upsertAccountSync(parsedState.account, "review_execution", input.recordedAt);
+      const account = this.upsertAccountSync(parsedState.account, "review_record", input.recordedAt);
       this.assertReviewSessionAccount(input.reviewSessionId, account.id);
       this.db
         .prepare(
@@ -565,6 +574,14 @@ export class SqliteActivityStore implements ActivityStore {
     };
   }
 
+  findScanPredecessor(q: import("./activityStore.js").ScanContinuationQuery): ExternalActivityScanRecord | undefined {
+    const previous = this.externalActivityScanById(q.scanId);
+    if (!previous?.hasMore || !previous.responseCursor || !previous.continuity?.sourceLower) return undefined;
+    const keys = ["accountId", "kind", "relationship", "functionTarget", "fromCheckpoint", "toCheckpoint",
+      "fromTimestamp", "toTimestamp", "chainIdentifier", "endpointHost"] as const;
+    return keys.every(key => previous[key] === q[key]) ? previous : undefined;
+  }
+
   async recordExternalActivityScan(input: ExternalActivityScanInput): Promise<ExternalActivityScanRecord> {
     try {
       assertNoForbiddenMcpFields(input);
@@ -573,12 +590,16 @@ export class SqliteActivityStore implements ActivityStore {
         reason: "forbidden_field"
       });
     }
+    if (input.kind === "function_scan" && (!input.functionTarget || parseSuiFunctionTarget(input.functionTarget).target !== input.functionTarget)) {
+      throw new ActivityStoreReadError("input_invalid", "Missing normalized function scan target", { reason: "invalid_scan_function" });
+    }
     const account = await this.getKnownAccount(input.account);
     if (!account) {
       throw new ActivityStoreReadError("input_invalid", "External activity scan account is not a known wallet", {
         reason: "account_not_known"
       });
     }
+    const completion = input.kind !== "digest_lookup" && input.windowComplete === true ? windowCompletion(input) : input.windowComplete;
     const fetchedAt = parseIsoTimestamp(input.fetchedAt, "fetchedAt");
     const fromTimestamp = parseOptionalIsoTimestamp(input.fromTimestamp, "from");
     const toTimestamp = parseOptionalIsoTimestamp(input.toTimestamp, "to");
@@ -587,18 +608,20 @@ export class SqliteActivityStore implements ActivityStore {
       this.db
         .prepare(
           `INSERT INTO external_activity_scans
-             (scan_id, kind, account_id, relationship, input_digest, from_checkpoint, to_checkpoint,
+             (scan_id, kind, account_id, relationship, input_digest, continuity_json, source_upper_timestamp, source_upper_checkpoint, function_target, from_checkpoint, to_checkpoint,
               from_timestamp, to_timestamp, limit_count, request_cursor, response_cursor, endpoint_host,
               chain_identifier, fetched_at, stored_count, skipped_count, has_more, window_complete,
               incomplete_reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           input.scanId,
           input.kind,
           account.id,
           input.relationship,
-          input.inputDigest ?? null,
+          input.inputDigest ?? null, input.continuity ? JSON.stringify(input.continuity) : null,
+          input.sourceUpperTimestamp ?? null, input.sourceUpperCheckpoint ?? null,
+          input.functionTarget ?? null,
           input.fromCheckpoint ?? null,
           input.toCheckpoint ?? null,
           fromTimestamp ?? null,
@@ -612,31 +635,62 @@ export class SqliteActivityStore implements ActivityStore {
           0,
           input.transactions.length,
           input.hasMore ? 1 : 0,
-          input.windowComplete === null ? null : input.windowComplete ? 1 : 0,
+          completion === null ? null : Number(completion),
           input.incompleteReason ?? null
         );
 
-      let storedCount = 0;
-      const skippedCount = input.skippedCount ?? 0;
+      const observedDigests = new Set<string>();
+      const outsideFilter = input.outsideFilterCount ?? 0, unconfirmedRelation = input.unconfirmedRelationCount ?? 0;
+      // Each bit denotes an immutable scalar for this account and digest.
+      const fields = [["checkpoint", 1], ["timestamp", 2], ["known_sender_account_id", 4]] as const;
+      const disagrees = (field: string) => `excluded.${field} IS NOT NULL AND external_activity_transactions.${field} IS NOT NULL AND
+        excluded.${field} != external_activity_transactions.${field}`;
+      const metadataUpdates = fields.map(([field, bit]) => `${field} = CASE WHEN
+        (metadata_conflicts & ${bit}) != 0 OR (${disagrees(field)}) THEN NULL ELSE COALESCE(excluded.${field},external_activity_transactions.${field}) END`).join(", ");
+      const metadataConflicts = fields.map(([field,bit]) => `CASE WHEN ${disagrees(field)} THEN ${bit} ELSE 0 END`).join(" | ");
       const upsert = this.db.prepare(
         `INSERT INTO external_activity_transactions
            (account_id, digest, relationship, checkpoint, timestamp, status, known_sender_account_id,
             first_scan_id, last_scan_id, first_fetched_at, last_fetched_at, detail_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(account_id, digest, relationship) DO UPDATE SET
-           checkpoint = COALESCE(excluded.checkpoint, external_activity_transactions.checkpoint),
-           timestamp = COALESCE(excluded.timestamp, external_activity_transactions.timestamp),
-           status = excluded.status,
-           known_sender_account_id = COALESCE(excluded.known_sender_account_id, external_activity_transactions.known_sender_account_id),
-           last_scan_id = excluded.last_scan_id,
-           last_fetched_at = excluded.last_fetched_at,
+         ON CONFLICT(account_id, digest) DO UPDATE SET
+           relationship = CASE WHEN excluded.relationship='sent' THEN 'sent' ELSE external_activity_transactions.relationship END,
+           ${metadataUpdates},
+           metadata_conflicts = metadata_conflicts | ${metadataConflicts},
+           status = CASE WHEN external_activity_transactions.status_conflict THEN 'unknown' WHEN excluded.status='unknown' THEN external_activity_transactions.status WHEN external_activity_transactions.status IN (excluded.status,'unknown') THEN excluded.status ELSE 'unknown' END,
+           status_conflict = external_activity_transactions.status_conflict OR (excluded.status!='unknown' AND external_activity_transactions.status NOT IN ('unknown',excluded.status)),
+           first_scan_id = CASE WHEN excluded.first_fetched_at < external_activity_transactions.first_fetched_at THEN excluded.first_scan_id ELSE external_activity_transactions.first_scan_id END,
+           first_fetched_at = min(external_activity_transactions.first_fetched_at,excluded.first_fetched_at),
+           last_scan_id = CASE WHEN excluded.last_fetched_at >= external_activity_transactions.last_fetched_at THEN excluded.last_scan_id ELSE external_activity_transactions.last_scan_id END,
+           last_fetched_at = max(external_activity_transactions.last_fetched_at,excluded.last_fetched_at),
            detail_json = COALESCE(excluded.detail_json, external_activity_transactions.detail_json)`
       );
+      const validatedSenders = new Set<number>();
+      const observe = this.db.prepare("INSERT INTO external_activity_observations(scan_id,account_id,digest,detail_status) VALUES(?,?,?,?) ON CONFLICT(scan_id,digest) DO UPDATE SET detail_status=CASE WHEN external_activity_observations.detail_status='available' THEN 'available' ELSE excluded.detail_status END");
+      const existing = this.db.prepare("SELECT detail_json FROM external_activity_transactions WHERE account_id=? AND digest=?");
       for (const transaction of input.transactions) {
-        if (transaction.knownSenderAccountId !== undefined && !this.accountIdExists(transaction.knownSenderAccountId)) {
+        if (transaction.knownSenderAccountId !== undefined && !validatedSenders.has(transaction.knownSenderAccountId) && !this.accountIdExists(transaction.knownSenderAccountId)) {
           throw new ActivityStoreReadError("input_invalid", "External activity sender account is not known", {
             reason: "sender_account_not_known"
           });
+        }
+        if (transaction.knownSenderAccountId !== undefined) validatedSenders.add(transaction.knownSenderAccountId);
+        if (input.kind === "digest_lookup" && input.inputDigest !== transaction.digest) {
+          throw new ActivityStoreReadError("input_invalid", "Digest lookup disagrees with its observation", { reason: "digest_lookup_mismatch" });
+        }
+        let detailJson: string | null = null, detailStatus = "missing";
+        if (transaction.details) {
+          try {
+            detailJson = serializeExternalActivityTransactionDetail(transaction.details, account.address);
+            const prior = existing.get(account.id, transaction.digest) as { detail_json: string | null } | undefined;
+            if (prior?.detail_json) detailJson = serializeExternalActivityTransactionDetail(
+              mergeActivityDetails(JSON.parse(prior.detail_json), JSON.parse(detailJson)), account.address);
+            detailStatus = "available";
+          } catch (error) {
+            if (!(error instanceof ActivityStoreReadError) || error.details.reason !== "external_activity_detail_too_large") throw error;
+            detailJson = null;
+            detailStatus = "size_limit";
+          }
         }
         upsert.run(
           account.id,
@@ -650,19 +704,18 @@ export class SqliteActivityStore implements ActivityStore {
           input.scanId,
           fetchedAt,
           fetchedAt,
-          transaction.details === undefined
-            ? null
-            : serializeExternalActivityTransactionDetail(transaction.details, account.address)
+          detailJson
         );
-        storedCount += 1;
+        observe.run(input.scanId, account.id, transaction.digest, detailStatus);
+        observedDigests.add(transaction.digest);
       }
       this.db
         .prepare(
           `UPDATE external_activity_scans
-           SET stored_count = ?, skipped_count = ?
+           SET stored_count = ?, skipped_count = ?, outside_filter_count = ?, unconfirmed_relation_count = ?
            WHERE scan_id = ?`
         )
-        .run(storedCount, skippedCount + input.transactions.length - storedCount, input.scanId);
+        .run(observedDigests.size, outsideFilter + unconfirmedRelation + input.transactions.length - observedDigests.size, outsideFilter, unconfirmedRelation, input.scanId);
       return this.externalActivityScanById(input.scanId);
     })();
     if (!record) {
@@ -673,12 +726,31 @@ export class SqliteActivityStore implements ActivityStore {
     return record;
   }
 
+  withActivityWindow<T>(filter: ExternalActivityTransactionStreamFilter, bind: (window: ActivityWindowBinding) => T): T {
+    // bind can schedule asynchronous work, but the selected rows are captured
+    // before this read transaction returns. Never keep SQLite open across RPC.
+    const { result } = this.db.transaction(() => {
+      const scope = this.resolveReviewActivityScope(filter);
+      const row = this.db.prepare("SELECT user_data_revision FROM settings_control WHERE id=1").get() as { user_data_revision: number };
+      const result = bind({ account: scope.account, revision: row.user_data_revision, load: () => {
+        const coverage = this.getExternalActivityCoverageSync(filter, scope);
+        const activityTransactions = this.listExternalActivityEffectTransactionsSync(filter, scope, coverage.storedTransactionCount);
+        return { coverage, activityTransactions };
+      } });
+      return { result };
+    })();
+    return result;
+  }
+
   async getExternalActivityCoverage(filter: ExternalActivityCoverageFilter): Promise<ExternalActivityCoverageResult> {
+    return this.db.transaction(() => this.getExternalActivityCoverageSync(filter))();
+  }
+
+  private getExternalActivityCoverageSync(filter: ExternalActivityCoverageFilter, scope = this.resolveReviewActivityScope(filter)): ExternalActivityCoverageResult {
     const from = parseIsoTimestamp(filter.from, "from");
     const to = parseIsoTimestamp(filter.to, "to");
     assertDateRange(from, to);
     assertNonEmptyHalfOpenRange(from, to);
-    const scope = this.resolveReviewActivityScope(filter);
 
     if (scope.accountId === undefined) {
       return buildExternalActivityCoverageResult({
@@ -694,7 +766,7 @@ export class SqliteActivityStore implements ActivityStore {
     const scanWhereSql = `
       WHERE eas.account_id = ?
         AND (eas.from_timestamp IS NULL OR eas.from_timestamp < ?)
-        AND (eas.to_timestamp IS NULL OR eas.to_timestamp > ?)`;
+        AND (eas.to_timestamp IS NULL OR eas.to_timestamp >= ?)`;
     const scanParams = [scope.accountId, to, from] as const;
     const scanCount = (this.db
       .prepare(`SELECT COUNT(*) AS count FROM external_activity_scans eas ${scanWhereSql}`)
@@ -702,10 +774,10 @@ export class SqliteActivityStore implements ActivityStore {
     const scanRows = this.db
       .prepare(
         `SELECT eas.scan_id, eas.kind, eas.account_id, a.address AS account, eas.relationship,
-                eas.input_digest, eas.from_checkpoint, eas.to_checkpoint, eas.from_timestamp,
+                eas.input_digest, eas.continuity_json, eas.source_upper_timestamp, eas.source_upper_checkpoint, eas.function_target, eas.from_checkpoint, eas.to_checkpoint, eas.from_timestamp,
                 eas.to_timestamp, eas.limit_count, eas.request_cursor, eas.response_cursor,
                 eas.endpoint_host, eas.chain_identifier, eas.fetched_at, eas.stored_count,
-                eas.skipped_count, eas.has_more, eas.window_complete, eas.incomplete_reason
+                eas.skipped_count, eas.outside_filter_count, eas.unconfirmed_relation_count, eas.has_more, eas.window_complete, eas.incomplete_reason
          FROM external_activity_scans eas
          JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id = eas.account_id
          ${scanWhereSql}
@@ -720,33 +792,53 @@ export class SqliteActivityStore implements ActivityStore {
 
     const transactionWhereSql = "WHERE eat.account_id = ? AND eat.timestamp >= ? AND eat.timestamp < ?";
     const transactionParams = [scope.accountId, from, to] as const;
-    const canonicalTransactions = canonicalExternalActivityTransactions(this.externalActivityTransactions(transactionWhereSql, [...transactionParams]));
-    const storedTransactionCount = canonicalTransactions.length;
-    const storedTransactionRange = canonicalTransactions.length === 0
-      ? undefined
-      : externalActivityTransactionRangeFromRecords(canonicalTransactions);
-
+    const aggregate = this.db.prepare(`SELECT count(*) AS count, min(timestamp) AS firstTime, max(timestamp) AS lastTime,
+      min(CASE WHEN checkpoint IS NOT NULL THEN printf('%02d',length(checkpoint))||checkpoint END) AS firstCheckpoint,
+      max(CASE WHEN checkpoint IS NOT NULL THEN printf('%02d',length(checkpoint))||checkpoint END) AS lastCheckpoint
+      FROM external_activity_transactions eat ${transactionWhereSql}`).get(...transactionParams) as {
+        count: number; firstTime: string; lastTime: string; firstCheckpoint: string | null; lastCheckpoint: string | null };
+    const storedTransactionCount = aggregate.count;
+    const transactionsWithoutTime = (this.db.prepare("SELECT count(*) AS count FROM external_activity_transactions WHERE account_id=? AND timestamp IS NULL").get(scope.accountId) as CountRow).count;
+    const storedTransactionRange = aggregate.count ? { earliestTimestamp: aggregate.firstTime, latestTimestamp: aggregate.lastTime,
+      earliestCheckpoint: aggregate.firstCheckpoint?.slice(2), latestCheckpoint: aggregate.lastCheckpoint?.slice(2) } : undefined;
+    // A proof can precede the displayed scans. Stream matching candidates until
+    // the public evidence limit is reached, using the ordinary stored-scan reader.
+    const candidates = this.db.prepare(`SELECT eas.*, a.address AS account FROM external_activity_scans eas
+      JOIN accounts a ON a.id=eas.account_id
+      WHERE eas.account_id=? AND eas.kind='account_scan' AND eas.relationship='affected'
+      AND eas.window_complete=1 AND eas.from_checkpoint IS NULL AND eas.to_checkpoint IS NULL
+      AND eas.from_timestamp<=? AND eas.to_timestamp>=? ORDER BY eas.fetched_at DESC, eas.scan_id DESC`)
+      .iterate(scope.accountId, from, to) as Iterable<ExternalActivityScanRow>;
+    const proofIds: string[] = [];
+    for (const row of candidates) {
+      const scan = externalActivityScanFromRow(row);
+      if (scanCompletesAffectedAccountRange(scan, from, to)) proofIds.push(scan.scanId);
+      if (proofIds.length === EXTERNAL_ACTIVITY_COVERAGE_SCAN_MAX_RECORDS) break;
+    }
     return buildExternalActivityCoverageResult({
       scope,
       from,
       to,
       scans,
       scanCount,
-      storedTransactionCount,
+      transactionsWithoutTime, storedTransactionCount,
       storedTransactionRange,
-      scansTruncated
+      scansTruncated, proofIds
     });
   }
 
   async listExternalActivityEffectTransactions(
     filter: ExternalActivityTransactionStreamFilter
   ): Promise<ExternalActivityTransactionStreamResult> {
+    return this.db.transaction(() => this.listExternalActivityEffectTransactionsSync(filter))();
+  }
+
+  private listExternalActivityEffectTransactionsSync(filter: ExternalActivityTransactionStreamFilter, scope = this.resolveReviewActivityScope(filter), knownCount?: number): ExternalActivityTransactionStreamResult {
     const from = parseIsoTimestamp(filter.from, "from");
     const to = parseIsoTimestamp(filter.to, "to");
     assertDateRange(from, to);
     assertNonEmptyHalfOpenRange(from, to);
     const limit = normalizeExternalActivityLimit(filter.limit);
-    const scope = this.resolveReviewActivityScope(filter);
 
     if (scope.accountId === undefined) {
       return buildExternalActivityTransactionStreamResult({
@@ -760,21 +852,24 @@ export class SqliteActivityStore implements ActivityStore {
     }
 
     const whereSql = "WHERE eat.account_id = ? AND eat.timestamp >= ? AND eat.timestamp < ?";
-    const canonicalTransactions = canonicalExternalActivityTransactions(
-      this.externalActivityTransactions(whereSql, [scope.accountId, from, to])
-    );
-
+    const params = [scope.accountId, from, to];
+    const total = knownCount ?? (this.db.prepare(`SELECT count(*) AS count FROM external_activity_transactions eat ${whereSql}`).get(...params) as CountRow).count;
+    const rows = this.externalActivityTransactions(whereSql, params, limit);
     return buildExternalActivityTransactionStreamResult({
       scope,
       from,
       to,
-      transactions: canonicalTransactions.slice(0, limit),
-      truncated: canonicalTransactions.length > limit,
-      transactionCount: canonicalTransactions.length
+      transactions: rows,
+      truncated: total > rows.length,
+      transactionCount: total
     });
   }
 
   async summarizeExternalActivity(filter: ExternalActivitySummaryFilter): Promise<ExternalActivitySummaryResult> {
+    return this.db.transaction(() => this.summarizeExternalActivitySync(filter))();
+  }
+
+  private summarizeExternalActivitySync(filter: ExternalActivitySummaryFilter): ExternalActivitySummaryResult {
     const from = parseOptionalIsoTimestamp(filter.from, "from");
     const to = parseOptionalIsoTimestamp(filter.to, "to");
     assertDateRange(from, to);
@@ -805,12 +900,13 @@ export class SqliteActivityStore implements ActivityStore {
         .prepare(`SELECT eat.status AS key, COUNT(*) AS count FROM external_activity_transactions eat ${whereSql} GROUP BY eat.status`)
         .all(...params) as KeyCountRow[]
     );
-    const relationshipCounts = countMap(
-      EXTERNAL_ACTIVITY_RELATIONSHIPS,
-      this.db
-        .prepare(`SELECT eat.relationship AS key, COUNT(*) AS count FROM external_activity_transactions eat ${whereSql} GROUP BY eat.relationship`)
-        .all(...params) as KeyCountRow[]
-    );
+    const relationships = this.db.prepare(`SELECT eas.relationship AS key, COUNT(DISTINCT eat.digest) AS transactions,
+      COUNT(*) AS observations FROM external_activity_transactions eat
+      JOIN external_activity_observations o ON o.account_id=eat.account_id AND o.digest=eat.digest
+      JOIN external_activity_scans eas ON eas.scan_id=o.scan_id ${whereSql} GROUP BY eas.relationship`)
+      .all(...params) as { key: string; transactions: number; observations: number }[];
+    const relationshipCounts = countMap(EXTERNAL_ACTIVITY_RELATIONSHIPS, relationships.map(r => ({ key: r.key, count: r.transactions })));
+    const relationshipObservationCounts = countMap(EXTERNAL_ACTIVITY_RELATIONSHIPS, relationships.map(r => ({ key: r.key, count: r.observations })));
     const timestampRow = this.db
       .prepare(
         `SELECT MIN(eat.timestamp) AS earliest_timestamp, MAX(eat.timestamp) AS latest_timestamp
@@ -821,10 +917,12 @@ export class SqliteActivityStore implements ActivityStore {
     const rows = this.db
       .prepare(
         `SELECT eat.account_id, a.address AS account, eat.digest, eat.relationship,
-                eat.checkpoint, eat.timestamp, eat.status, eat.known_sender_account_id,
+                eat.checkpoint, eat.timestamp, eat.status, eat.metadata_conflicts, eat.known_sender_account_id,
                 eat.first_scan_id, eat.last_scan_id, eat.first_fetched_at, eat.last_fetched_at,
                 last_scan.incomplete_reason AS last_scan_incomplete_reason,
-                eat.detail_json
+                eat.detail_json,
+                (SELECT count(*) FROM external_activity_observations o WHERE o.account_id=eat.account_id AND o.digest=eat.digest) AS observation_count,
+                (SELECT detail_status FROM external_activity_observations o WHERE o.scan_id=eat.last_scan_id AND o.digest=eat.digest) AS last_detail_status
          FROM external_activity_transactions eat
          JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id = eat.account_id
          LEFT JOIN external_activity_scans last_scan ON last_scan.scan_id = eat.last_scan_id
@@ -846,7 +944,7 @@ export class SqliteActivityStore implements ActivityStore {
       {
         transactionCount: total,
         statusCounts,
-        relationshipCounts,
+        relationshipCounts, relationshipObservationCounts,
         earliestTimestamp: timestampRow.earliest_timestamp ?? undefined,
         latestTimestamp: timestampRow.latest_timestamp ?? undefined
       }
@@ -960,7 +1058,7 @@ export class SqliteActivityStore implements ActivityStore {
       const session = evaluated?.session;
       const request = target?.attemptId ? records.request(target.attemptId) : undefined;
       const authority = request && records.authority(request.attemptId);
-      const details = request?.execution && records.executionDetails(request.attemptId);
+      const details = record && request?.execution && records.executionDetails(request.attemptId);
       const operationRecord = ["connect", "disconnect"].includes(record?.scope ?? "") && record ? records.cardOperation(record) : undefined;
       const operation = operationRecord && publicConnectionOperation(operationRecord);
       const connectionFacts = records.readConnectionFacts(now), reviewTarget = session ? fixedReviewTarget(session, record?.state.input) : undefined;
@@ -1000,9 +1098,17 @@ export class SqliteActivityStore implements ActivityStore {
       const commit = this.db.transaction(() => {
         const current = this.liveReviewSessionRow(live.next.id);
         if (live.expected ? !current || !isDeepStrictEqual(sessionFromLiveReviewSessionRow(current), live.expected) : !!current) throw stale;
+        if (live.firstCard) {
+          const { record, assertTarget } = live.firstCard;
+          assertTarget();
+          if (live.expected || record.ownerId !== live.next.ownerId || record.scope !== "review" ||
+              record.state.input.reviewSessionId !== live.next.id) throw stale;
+        }
         writeActivity();
-        if (!this.applyLiveReviewSessionMutation(live)) {
-          throw stale;
+        if (!this.applyLiveReviewSessionMutation(live)) throw stale;
+        if (live.firstCard) {
+          const { record, terminalProjection } = live.firstCard;
+          this.createCardRecordStore().create(terminalProjection ? terminalProjection(record) : record);
         }
       });
       commit.immediate();
@@ -1042,6 +1148,11 @@ export class SqliteActivityStore implements ActivityStore {
     if (live.deleteTransactionMaterials) {
       this.db.prepare(`DELETE FROM live_transaction_materials WHERE review_session_id = ?`).run(live.next.id);
       this.db.prepare(`DELETE FROM live_private_review_artifacts WHERE review_session_id = ?`).run(live.next.id);
+    }
+    if (live.privateArtifactsJson !== undefined) {
+      const current = live.privateArtifactsJson && (JSON.parse(live.privateArtifactsJson) as PrivateReviewArtifacts).transactionMaterial?.materialId;
+      this.db.prepare("DELETE FROM live_transaction_materials WHERE review_session_id=? AND material_id IS NOT ?")
+        .run(live.next.id, current || null);
     }
     if (live.privateArtifactsJson === null) {
       this.db.prepare(`DELETE FROM live_private_review_artifacts WHERE review_session_id = ?`).run(live.next.id);
@@ -1099,10 +1210,10 @@ export class SqliteActivityStore implements ActivityStore {
     const row = this.db
       .prepare(
         `SELECT eas.scan_id, eas.kind, eas.account_id, a.address AS account, eas.relationship,
-                eas.input_digest, eas.from_checkpoint, eas.to_checkpoint, eas.from_timestamp,
+                eas.input_digest, eas.continuity_json, eas.source_upper_timestamp, eas.source_upper_checkpoint, eas.function_target, eas.from_checkpoint, eas.to_checkpoint, eas.from_timestamp,
                 eas.to_timestamp, eas.limit_count, eas.request_cursor, eas.response_cursor,
                 eas.endpoint_host, eas.chain_identifier, eas.fetched_at, eas.stored_count,
-                eas.skipped_count, eas.has_more, eas.window_complete, eas.incomplete_reason
+                eas.skipped_count, eas.outside_filter_count, eas.unconfirmed_relation_count, eas.has_more, eas.window_complete, eas.incomplete_reason
          FROM external_activity_scans eas
          JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id = eas.account_id
          WHERE eas.scan_id = ?`
@@ -1113,15 +1224,17 @@ export class SqliteActivityStore implements ActivityStore {
 
   private externalActivityTransactions(
     whereSql: string,
-    params: unknown[]
+    params: unknown[], limit: number
   ): ExternalActivityTransactionRecord[] {
     const rows = this.db
       .prepare(
         `SELECT eat.account_id, a.address AS account, eat.digest, eat.relationship,
-                eat.checkpoint, eat.timestamp, eat.status, eat.known_sender_account_id,
+                eat.checkpoint, eat.timestamp, eat.status, eat.metadata_conflicts, eat.known_sender_account_id,
                 eat.first_scan_id, eat.last_scan_id, eat.first_fetched_at, eat.last_fetched_at,
                 last_scan.incomplete_reason AS last_scan_incomplete_reason,
-                eat.detail_json
+                eat.detail_json,
+                (SELECT count(*) FROM external_activity_observations o WHERE o.account_id=eat.account_id AND o.digest=eat.digest) AS observation_count,
+                (SELECT detail_status FROM external_activity_observations o WHERE o.scan_id=eat.last_scan_id AND o.digest=eat.digest) AS last_detail_status
          FROM external_activity_transactions eat
          JOIN accounts a ON a.chain_id='${SUI_MAINNET_WALLET_CHAIN}' AND a.id = eat.account_id
          LEFT JOIN external_activity_scans last_scan ON last_scan.scan_id = eat.last_scan_id
@@ -1130,28 +1243,37 @@ export class SqliteActivityStore implements ActivityStore {
            CASE WHEN eat.checkpoint IS NULL THEN 0 ELSE 1 END DESC,
            CAST(eat.checkpoint AS INTEGER) DESC,
            COALESCE(eat.timestamp, '') DESC,
-           eat.digest DESC`
+           eat.digest DESC LIMIT ?`
       )
-      .all(...params) as ExternalActivityTransactionRow[];
+      .all(...params, limit) as ExternalActivityTransactionRow[];
     return rows.map(externalActivityTransactionFromRow);
   }
 
-  private insertReviewTransition(input: ReviewTransitionInput & { accountId?: number | null }): void {
+  private insertReviewTransition(input: ReviewTransitionInput & { accountId?: number | null }): string {
+    let transitionedAt = input.transitionedAt;
+    if (input.event === "opened") {
+      const opened = claimFirstReviewOpening(this.db, input.reviewSessionId, transitionedAt);
+      if (!opened) throw new ActivityStoreError("The review opening was already recorded or the session is missing.");
+      transitionedAt = opened.opened_at;
+    }
     this.db
       .prepare(
         `INSERT INTO review_status_transitions
            (review_session_id, event, from_status, to_status, account_id, reason, transitioned_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+         VALUES (?, ?, COALESCE(?, (SELECT current_status FROM review_sessions WHERE id=? AND ?!='created')), ?, ?, ?, ?)`
       )
       .run(
         input.reviewSessionId,
         input.event,
         input.fromStatus ?? null,
+        input.reviewSessionId,
+        input.event,
         input.toStatus,
         input.accountId ?? null,
         input.reason ?? null,
-        input.transitionedAt
+        transitionedAt
       );
+    return transitionedAt;
   }
 
   private resolveReviewActivityScope(filter: ReviewActivityFilter): ReviewActivityScope {
@@ -1211,25 +1333,7 @@ function assertNonEmptyHalfOpenRange(from: string, to: string): void {
   }
 }
 
-function externalActivityTransactionRangeFromRecords(
-  rows: ExternalActivityTransactionRecord[]
-): NonNullable<ExternalActivityCoverageResult["storedTransactionRange"]> {
-  const timestamps = rows.flatMap((row) => row.timestamp ?? []).sort();
-  const checkpoints = rows.flatMap((row) => row.checkpoint ?? []).sort(compareIntegerStrings);
-  return {
-    earliestTimestamp: timestamps[0],
-    latestTimestamp: timestamps.at(-1),
-    earliestCheckpoint: checkpoints[0],
-    latestCheckpoint: checkpoints.at(-1)
-  };
-}
 
-function compareIntegerStrings(a: string, b: string): number {
-  const delta = BigInt(a) - BigInt(b);
-  if (delta < 0n) return -1;
-  if (delta > 0n) return 1;
-  return 0;
-}
 
 class SqliteCoinMetadataCache implements CoinMetadataCache {
   constructor(private readonly db: SqliteDatabase) {}

@@ -21,7 +21,7 @@ type PackageJson = {
 const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as PackageJson;
 
 describe("npm release metadata", () => {
-  it("is configured for public latest-tag publishing", () => {
+  it("is configured for the public release channel for its version", () => {
     expect(packageJson.private).toBeUndefined();
     // Validate the semver shape, not an exact value — pinning the version drifts every release.
     expect(packageJson.version).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
@@ -29,7 +29,7 @@ describe("npm release metadata", () => {
     expect(SERVER_NAME).toBe("sui-mcp");
     expect(SERVER_VERSION).toBe(packageJson.version);
     expect(packageJson.license).toBe("MIT");
-    expect(packageJson.publishConfig).toEqual({ access: "public", tag: "latest" });
+    expect(packageJson.publishConfig).toEqual({ access: "public", tag: packageJson.version.split("+")[0]!.includes("-") ? "next" : "latest" });
     expect(packageJson.scripts.prepublishOnly).toBe("npm run release:check");
   });
 
@@ -59,14 +59,14 @@ describe("npm release metadata", () => {
 // checker: seven internal cards and the adapted backend; no external Settings page.
 const archive = ["package.json", "README.md", "LICENSE", "dist/runtime/start.js",
   "dist/runtime/walletSdkChild.js", "dist/runtime/walletSdkChildRuntime.js", "dist/runtime/walletSdkProcess.js", "dist/runtime/walletSdkIpc.js", "docs/UTILITY_INDEX.md",
-  "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt", ...MCP_RESOURCES.map((resource) => resource.path),
+  "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt", "LICENSES/@mysten-bcs-2.1.4-Apache-2.0.txt", "LICENSES/@mysten-utils-0.4.2-Apache-2.0.txt", ...MCP_RESOURCES.map((resource) => resource.path),
   "docs/LOCAL_DB_ARCHITECTURE.md", "docs/SDK_API.md", "docs/SIGNABLE_ADAPTER_CONTRACT.md", "docs/TRANSACTION_ACTIVITY_LOG.md",
   ...["account", "receipt", "chart", "connect", "disconnect", "review", "settings"].flatMap((name) => [`dist/mcp-app/${name}.html`, `dist/mcp-app/${name}.notices.txt`])];
 const pack = (paths: string[]) => ({ filename: "fixture.tgz", files: paths.map((path) => ({ path })) });
 
 it("accepts the complete current archive and rejects missing notices, backend license or the Settings card", () => {
   expect(() => assertPackContents(pack(archive))).not.toThrow();
-  for (const missing of ["dist/runtime/walletSdkChild.js", "dist/runtime/walletSdkChildRuntime.js", "dist/runtime/walletSdkIpc.js", "dist/mcp-app/review.notices.txt", "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt", "dist/mcp-app/settings.html"]) {
+  for (const missing of ["dist/runtime/walletSdkChild.js", "dist/runtime/walletSdkChildRuntime.js", "dist/runtime/walletSdkIpc.js", "dist/mcp-app/review.notices.txt", "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt", "LICENSES/@mysten-bcs-2.1.4-Apache-2.0.txt", "LICENSES/@mysten-utils-0.4.2-Apache-2.0.txt", "dist/mcp-app/settings.html"]) {
     expect(() => assertPackContents(pack(archive.filter((path) => path !== missing)))).toThrow(missing);
   }
 });

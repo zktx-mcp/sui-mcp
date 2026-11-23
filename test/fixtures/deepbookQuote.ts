@@ -1,3 +1,5 @@
+import { bcs } from "@mysten/sui/bcs";
+import { OrderDeepPrice } from "@mysten/deepbook-v3";
 import { DEEPBOOK_SDK_SIMULATION_SOURCE_BASE } from "../../src/core/read/deepbookSourceOwners.js";
 import { DEEPBOOK_SCALAR_UNIT_SOURCE } from "../../src/core/read/coinMetadata.js";
 import { deepbookQuoteUserAnswerUse } from "../../src/core/read/readResponseGuidance.js";
@@ -44,8 +46,23 @@ export function deepbookDisplayQuote(
       quoteOut: "123.456789",
       deepRequired: "0.025"
     },
+    quoteOutcome: "full_input_spend",
+    inputFlow: {
+      expectedSpendRaw: "1000000000",
+      expectedReturnRaw: "0",
+      fee: {
+        kind: "separate_coin", amount: {
+          raw: "25000", asset: {
+            symbol: "DEEP", coinType: "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP",
+            decimals: 6, unitSource: DEEPBOOK_SCALAR_UNIT_SOURCE
+          }
+        }
+      }
+    },
     rawQuote: {
       kind: "deepbook_quote_raw_u64",
+      poolTerms: { lotSizeRaw: "100000000", minBaseRaw: "1000000000", takerFeeRaw: "200000",
+        assetIsBase: true, deepPerAssetRaw: "125000000", whitelisted: false },
       sourceMoveFunction: "pool::get_quote_quantity_out",
       returnValueSourceMoveFunction: "pool::get_quantity_out",
       returnValueOrder: ["base_quantity_out", "quote_quantity_out", "deep_quantity_required"],
@@ -157,4 +174,17 @@ export function deepbookDisplayQuote(
       ]
     }
   };
+}
+
+export function quotePoolCommandResults(amounts: bigint[], buy = false) {
+  const raw = (n: bigint) => ({ bcs: bcs.U64.serialize(n).toBytes() });
+  return [
+    { returnValues: amounts.map(raw) },
+    { returnValues: [1n, 1n, 1n].map(raw) },
+    { returnValues: [1_000_000n, 0n, 0n].map(raw) },
+    { returnValues: [{ bcs: OrderDeepPrice.serialize({ asset_is_base: true, deep_per_asset: "1000000000" }).toBytes() }] },
+    { returnValues: [{ bcs: Uint8Array.of(0) }] },
+    { returnValues: [{ bcs: Uint8Array.from([1, ...bcs.U64.serialize(1000000n).toBytes()]) }] },
+    ...(buy ? [{ returnValues: [1n, 1n, 0n].map(raw) }] : [])
+  ];
 }

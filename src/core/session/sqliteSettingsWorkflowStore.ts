@@ -15,7 +15,7 @@ type OperationRow = {
   file_id: string | null; accepted_digest: string | null; admitted_at: string | null; result_json: string | null;
   prior_run_id: string | null; next_run_id: string | null; supersedes_operation_id: string | null; superseded_by_operation_id: string | null;
 };
-type FileRow = { file_id: string; operation_id: string; cleanup_operation_id: string; role: SettingsFile["role"]; relative_path: string; display_name: string;
+type FileRow = { block_hashes_json: string | null; file_id: string; operation_id: string; cleanup_operation_id: string; role: SettingsFile["role"]; relative_path: string; display_name: string;
   total_size: number; received_size: number; sha256: string; sealed: number; invalidated: number;
   cleanup: SettingsFile["cleanup"]; reservation_json: string | null };
 export type SettingsControl = { data_epoch: number; user_data_revision: number; active_operation_id: string | null;
@@ -176,7 +176,7 @@ export class SqliteSettingsWorkflowStore {
     replaceOperationId?: string, now = this.now()): SettingsOperation {
     return this.transaction(() => {
       const { card, operation } = this.requireAdmission(expected, input, currentFingerprint, replaceOperationId, now);
-      this.claimFinal(operation.operationId, replaceOperationId);
+      this.db.prepare("UPDATE settings_control SET active_operation_id=? WHERE id=1").run(operation.operationId);
       const next: SettingsOperation = { ...operation, phase: operation.draft!.kind === "restart_wallet_service" ? "stopping" : "executing",
         acceptedDigest: settingsIdentity(input), admittedAt: now.toISOString() };
       this.write(operation, next, card, { ...card, acceptedInput: input, state: { ...card.state,
@@ -275,9 +275,16 @@ export class SqliteSettingsWorkflowStore {
     }
     if (failure) throw failure;
   }
+  nextDownloadDeadline(after?: string): number | undefined {
+    const row = this.db.prepare(`SELECT min(json_extract(preparation_json,'$.download.expiresAt')) AS deadline FROM settings_operations
+      WHERE owner_id=? AND kind='download_backup' AND json_extract(preparation_json,'$.download.endReason') IS NULL
+      AND json_extract(preparation_json,'$.download.localSave.status') IS NOT 'saving'
+      AND json_extract(preparation_json,'$.download.expiresAt')>?`).get(this.ownerId, after ?? "") as {deadline:string|null};
+    return row.deadline ? Date.parse(row.deadline) : undefined;
+  }
   downloads(operationId?: string): SettingsOperation[] {
     return (this.db.prepare(`SELECT operation_id FROM settings_operations WHERE kind='download_backup' AND owner_id=?
-      ${operationId === undefined ? "" : "AND operation_id=?"}`)
+      ${operationId === undefined ? "AND json_extract(preparation_json,'$.download.endReason') IS NULL" : "AND operation_id=?"}`)
       .all(this.ownerId, ...(operationId === undefined ? [] : [operationId])) as { operation_id: string }[]).map((row) => this.get(row.operation_id)!);
   }
   continueDownload(expected: CardRecord, input: SettingsDownloadFileAction): SettingsFile | undefined {
@@ -478,8 +485,20 @@ export class SqliteSettingsWorkflowStore {
       return true;
     });
   }
+  private downloadIndex?: { id: string; operation: string; digest: string; hashes: string[] | undefined };
+  clearDownloadIndex(): void { delete this.downloadIndex; }
+  downloadBlockIndex(file: SettingsFile): string[] | undefined {
+    const active = this.downloadIndex;
+    if (active && active.id === file.fileId && active.operation === file.operationId && active.digest === file.sha256) return active.hashes;
+    const row = this.db.prepare(`SELECT block_hashes_json FROM settings_files WHERE file_id=? AND operation_id=?
+      AND sha256=? AND sealed=1 AND invalidated=0`).get(file.fileId, file.operationId, file.sha256) as { block_hashes_json: string | null } | undefined;
+    if (!row) throw new SettingsConflict("The sealed download changed.");
+    const hashes: string[] | undefined = row.block_hashes_json ? JSON.parse(row.block_hashes_json) : undefined;
+    this.downloadIndex = { id: file.fileId, operation: file.operationId, digest: file.sha256, hashes };
+    return hashes;
+  }
   file(id: string): SettingsFile | undefined {
-    const row = this.db.prepare("SELECT * FROM settings_files WHERE file_id=?").get(id) as FileRow | undefined;
+    const row = this.db.prepare("SELECT file_id,operation_id,cleanup_operation_id,role,relative_path,display_name,total_size,received_size,sha256,sealed,invalidated,cleanup,reservation_json FROM settings_files WHERE file_id=?").get(id) as FileRow | undefined;
     return row ? { fileId: row.file_id, operationId: row.operation_id, role: row.role, relativePath: row.relative_path,
       displayName: row.display_name, totalSize: row.total_size, receivedSize: row.received_size, sha256: row.sha256,
       sealed: row.sealed === 1, invalidated: row.invalidated === 1, cleanup: row.cleanup,
@@ -500,12 +519,13 @@ export class SqliteSettingsWorkflowStore {
   }
   createFile(file: SettingsFile): void {
     this.db.prepare(`INSERT INTO settings_files
-      (file_id,operation_id,cleanup_operation_id,role,relative_path,display_name,total_size,received_size,sha256,sealed,invalidated,cleanup,reservation_json)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(file.fileId, file.operationId, file.cleanupOperationId ?? file.operationId, file.role, file.relativePath, file.displayName,
+      (file_id,operation_id,cleanup_operation_id,role,relative_path,display_name,total_size,received_size,sha256,sealed,invalidated,cleanup,reservation_json,block_hashes_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(file.fileId, file.operationId, file.cleanupOperationId ?? file.operationId, file.role, file.relativePath, file.displayName,
         file.totalSize, file.receivedSize, file.sha256, Number(file.sealed), Number(file.invalidated), file.cleanup,
-        file.reservation ? JSON.stringify(file.reservation) : null);
+        file.reservation ? JSON.stringify(file.reservation) : null, file.blockHashes ? JSON.stringify(file.blockHashes) : null);
   }
   writeFile(file: SettingsFile): void {
+    if (file.invalidated && this.downloadIndex?.id === file.fileId) delete this.downloadIndex;
     if (this.db.prepare(`UPDATE settings_files SET received_size=?,sealed=?,invalidated=?,cleanup=?,reservation_json=? WHERE file_id=?`)
       .run(file.receivedSize, Number(file.sealed), Number(file.invalidated), file.cleanup,
         file.reservation ? JSON.stringify(file.reservation) : null, file.fileId).changes !== 1) {

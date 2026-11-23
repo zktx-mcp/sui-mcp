@@ -1,7 +1,7 @@
 import { Client, ProtocolError, SdkHttpError } from "@modelcontextprotocol/client";
 import { Server } from "@modelcontextprotocol/server";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import type { Transport } from "@modelcontextprotocol/client";
+import type { Tool, Transport } from "@modelcontextprotocol/client";
 import { SERVER_INSTRUCTIONS, SERVER_NAME, SERVER_VERSION } from "../../mcp/serverInfo.js";
 import { createAuthenticatedFetch, probeAuthenticatedServer } from "./authenticatedFetch.js";
 import { INTERNAL_MCP_PATH, type ControlIdentity } from "./control.js";
@@ -15,7 +15,7 @@ export async function startSharedStdio(input: {
   const server = new Server({ name: SERVER_NAME, version: SERVER_VERSION }, {
     capabilities: { tools: {}, resources: {}, prompts: {}, completions: {} }, instructions: SERVER_INSTRUCTIONS
   });
-  let connection: { instanceId: string; client: Client } | undefined;
+  let connection: { instanceId: string; client: Client; tools?: readonly Tool[] } | undefined;
   let connecting: Promise<Client> | undefined;
   let closed = false;
   const lifetime = new AbortController();
@@ -65,7 +65,13 @@ export async function startSharedStdio(input: {
         setProtocolVersion: (version) => http.setProtocolVersion(version),
         close: async () => { try { await http.terminateSession(); } catch { /* The prior owner may already be gone. */ } await http.close(); }
       };
-      http.onmessage = (message) => { if (http.sessionId !== undefined) transport.sessionId = http.sessionId; transport.onmessage?.(message); };
+      http.onmessage = (message) => {
+        if (http.sessionId !== undefined) transport.sessionId = http.sessionId;
+        if ("method" in message && message.method === "notifications/tools/list_changed" && connection?.client === client) {
+          delete connection.tools;
+        }
+        transport.onmessage?.(message);
+      };
       http.onerror = (error) => transport.onerror?.(error);
       http.onclose = () => transport.onclose?.();
       try {
@@ -78,10 +84,27 @@ export async function startSharedStdio(input: {
     connecting = open;
     try { return await open; } finally { if (connecting === open) connecting = undefined; }
   }
-  server.setRequestHandler("tools/list", async (request, extra) =>
-    (await owner(extra.mcpReq.signal)).listTools(request.params, { signal: extra.mcpReq.signal }));
-  server.setRequestHandler("tools/call", async (request, extra) =>
-    (await owner(extra.mcpReq.signal)).callTool(request.params, { signal: extra.mcpReq.signal }));
+  server.setRequestHandler("tools/list", async (request, extra) => {
+    const client = await owner(extra.mcpReq.signal);
+    const result = await client.listTools(request.params, { signal: extra.mcpReq.signal });
+    // The SDK aggregates every page on an initial list. Keep its precise
+    // definitions only for this connection to this backend instance.
+    if (request.params?.cursor === undefined && result.nextCursor === undefined && connection?.client === client) connection.tools = result.tools;
+    return result;
+  });
+  server.setRequestHandler("tools/call", async (request, extra) => {
+    const client = await owner(extra.mcpReq.signal);
+    const directory = connection?.client === client ? connection.tools : undefined;
+    const tool = directory?.find(item => item.name === request.params.name);
+    if (directory && !tool) {
+      // There is no announced output schema for this name. The server still
+      // decides whether the request is supported and enforces its own admission.
+      return client.request({ method: "tools/call", params: request.params }, { signal: extra.mcpReq.signal });
+    }
+    // An explicit definition validates the requested output before returning
+    // it, without compiling the entire directory during a concurrent Host read.
+    return client.callTool(request.params, { signal: extra.mcpReq.signal, ...(tool ? { toolDefinition: tool } : {}) });
+  });
   server.setRequestHandler("resources/list", async (request, extra) =>
     (await owner(extra.mcpReq.signal)).listResources(request.params, { signal: extra.mcpReq.signal }));
   server.setRequestHandler("resources/templates/list", async (request, extra) =>

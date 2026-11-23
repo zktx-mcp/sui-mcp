@@ -23,30 +23,24 @@ function isForbiddenFieldKey(key: string): boolean {
   );
 }
 
-export function findForbiddenMcpFields(value: unknown, path = "$"): string[] {
-  if (value === null || typeof value !== "object") {
-    return [];
-  }
-
+function* forbiddenFields(value: unknown, path: string): Generator<string> {
+  if (!value || typeof value !== "object") return;
   if (Array.isArray(value)) {
-    return value.flatMap((item, index) => findForbiddenMcpFields(item, `${path}[${index}]`));
+    for (let index = 0; index < value.length; index++) yield* forbiddenFields(value[index], `${path}[${index}]`);
+    return;
   }
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    const current = `${path}.${key}`;
+    if (isForbiddenFieldKey(key)) yield current;
+    yield* forbiddenFields((value as Record<string, unknown>)[key], current);
+  }
+}
 
-  return Object.entries(value as Record<string, unknown>).flatMap(([key, nested]) => {
-    const normalized = key.toLowerCase();
-    const currentPath = `${path}.${key}`;
-    // Deliberately conservative: MCP tool output and stored evidence should not
-    // carry raw byte, signing, token, signature, seed, or key material under
-    // direct prefix/suffix key names. Generic domain keys such as tokenSymbol
-    // and bytesPerSecond remain valid.
-    const current = isForbiddenFieldKey(normalized) ? [currentPath] : [];
-    return current.concat(findForbiddenMcpFields(nested, currentPath));
-  });
+export function findForbiddenMcpFields(value: unknown, path = "$"): string[] {
+  return [...forbiddenFields(value, path)];
 }
 
 export function assertNoForbiddenMcpFields(value: unknown): void {
-  const forbidden = findForbiddenMcpFields(value);
-  if (forbidden.length > 0) {
-    throw new Error(`MCP payload contains forbidden field(s): ${forbidden.join(", ")}`);
-  }
+  for (const path of forbiddenFields(value, "$")) throw new Error(`MCP payload contains forbidden field(s): ${path}`);
 }

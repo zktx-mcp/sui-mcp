@@ -25,8 +25,11 @@ textual, keyboard accessible and screen-reader labeled.
 Review primary facts include action, selected account, network, send limit
 (`up to` where relevant), expected/minimum receive, status and next action.
 `assetFlowPreview` display inputs are proposals, never signing quantities.
-Use "Minimum received on success" for the conditional minimum and label the
-trading fee as an estimate. Distinguish the estimated network fee from its
+Use "Minimum receive in this review" for a quote-policy lower bound. A claim about
+the amount received on chain requires verified transaction-level enforcement.
+Show expected input spend and return in the input asset. Label a separately
+quoted trading fee as an estimate and show the allocation supplied to the builder.
+An input-inclusive quote identifies the paying asset and the absence of an itemized amount. Distinguish the estimated network fee from its
 maximum gas budget; neither is a recorded fee payment.
 Show the final ReviewState failed/warning checks beside the decision.
 The live Review action row shows only actions available in the current stage.
@@ -474,7 +477,7 @@ result or copy default URLs into the View.
 
 ## Internal Read Cards
 
-Account and Receipt targets are established in chat, without card input forms. Missing targets produce a concise input-required message with no card record, source request, permissions or polling. The Account card shows SuiNS when available, the actual query address, coin totals, Display NFTs, an omitted-object count, fetched time and enumeration limits for an explicit or connection-qualified default address. The Receipt card shows execution outcome, balance changes, net gas, sender, digest and fetched time. The transaction graph is visible above the result. Technical input, object, call, event, identifier and timing facts are in one Details slide. Review uses the same observed-result layout and places earlier reviewed conditions in a separately labelled section of that slide, without nested disclosures. Reviewed estimates remain distinct from actual chain results. Internal request IDs, revisions and raw JSON dumps are not display requirements. Important failures, warnings and missing choices remain beside the active decision. The Chart card shows one selected DeepBook USDC pair with official intervals, the UTC period and any result-limit notice. When the pair is missing, optional interval/range choices are in Time range & interval, with an instruction to set them before choosing the pair; choosing the pair submits the complete valid query without a second Show chart button. Supplied pairs query directly. Detailed candle numbers are in an accessible disclosure. Candle count is not a form field; supplied limits, defaults and shortcut query values remain unchanged. Its initial time axis uses the saved request boundaries; omitted boundaries use available candle times, and a request without either boundary fits the returned candles. Boundary whitespace carries no price or volume. Empty results show the requested range and an explicit no-candles message. These are read-only views; they create no wallet connection, review approval, trading authority, P&L or fiat valuation.
+Account and Receipt targets are established in chat, without card input forms. Missing targets produce a concise input-required message with no card record, source request, permissions or polling. The Account card shows SuiNS when available, the actual query address, coin totals, objects with observed Display metadata, an omitted-object count, fetched time and enumeration limits for an explicit or connection-qualified default address. The Receipt card shows execution outcome, balance changes, net gas, sender, digest and fetched time. The transaction graph is visible above the result. Technical input, object, call, event, identifier and timing facts are in one Details slide. Review uses the same observed-result layout and places earlier reviewed conditions in a separately labelled section of that slide, without nested disclosures. Reviewed estimates remain distinct from actual chain results. Internal request IDs, revisions and raw JSON dumps are not display requirements. Important failures, warnings and missing choices remain beside the active decision. The Chart card shows one selected DeepBook USDC pair with official intervals, the UTC period and any result-limit notice. When the pair is missing, optional interval/range choices are in Time range & interval, with an instruction to set them before choosing the pair; choosing the pair submits the complete valid query without a second Show chart button. Supplied pairs query directly. Detailed candle numbers are in an accessible disclosure. Candle count is not a form field; supplied limits, defaults and shortcut query values remain unchanged. Its initial time axis uses the saved request boundaries; omitted boundaries use available candle times, and a request without either boundary fits the returned candles. Boundary whitespace carries no price or volume. Empty results show the requested range and an explicit no-candles message. These are read-only views; they create no wallet connection, review approval, trading authority, P&L or fiat valuation.
 
 All read cards use one SQLite-backed input lifecycle and one View lifecycle. The View inserts a result node before invoking its mount callback. Size-dependent renderers wait for positive layout dimensions, ignore hidden zero-size layouts, and release observers and drawing resources on disposal. Chart resizing preserves the current viewport rather than reapplying the initial query range. Initialization reads the same card record. Chat navigation, frame recreation and teardown do not close input or cancel work. A valid unsubmitted selection remains available; admission or backend expiry ends that original input. A read may finish after its View closes. Completed results are static, remain stored until local data replacement/reset, and do not repeat the source query. A different selection after admission needs a new card.
 
@@ -518,7 +521,7 @@ Prefer:
 - review needs updating
 - review blocked
 - expected to receive
-- minimum received on success
+- minimum receive in this review
 - data retrieved
 
 Source fields keep their defined names and meanings. Use Data retrieved for

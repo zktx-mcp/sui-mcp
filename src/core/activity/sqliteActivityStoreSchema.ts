@@ -20,8 +20,8 @@ const CURRENT_SCHEMA_SQL = `
       address TEXT NOT NULL,
       first_seen_at TEXT NOT NULL,
       last_used_at TEXT NOT NULL,
-      first_source TEXT NOT NULL CHECK (first_source IN ('wallet_connection', 'review_execution')),
-      last_source TEXT NOT NULL CHECK (last_source IN ('wallet_connection', 'review_execution')),
+      first_source TEXT NOT NULL CHECK (first_source IN ('wallet_connection', 'review_record')),
+      last_source TEXT NOT NULL CHECK (last_source IN ('wallet_connection', 'review_record')),
       UNIQUE (chain_id,address)
     );
 
@@ -101,7 +101,8 @@ const CURRENT_SCHEMA_SQL = `
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       signature_verified_at TEXT,
-      submitted_at TEXT,
+      submission_admitted_at TEXT,
+      observation_json TEXT,
       UNIQUE (review_session_id, review_revision)
     );
     CREATE INDEX IF NOT EXISTS idx_review_requests_session ON review_requests(review_session_id, created_at);
@@ -185,14 +186,25 @@ const CURRENT_SCHEMA_SQL = `
       checkpoint TEXT,
       timestamp TEXT,
       status TEXT NOT NULL CHECK (status IN ('success', 'failure', 'unknown')),
+      metadata_conflicts INTEGER NOT NULL DEFAULT 0 CHECK(metadata_conflicts BETWEEN 0 AND 7),
+      status_conflict INTEGER NOT NULL DEFAULT 0 CHECK(status_conflict IN (0,1)),
       known_sender_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
       first_scan_id TEXT NOT NULL REFERENCES external_activity_scans(scan_id) ON DELETE RESTRICT,
       last_scan_id TEXT NOT NULL REFERENCES external_activity_scans(scan_id) ON DELETE RESTRICT,
       first_fetched_at TEXT NOT NULL,
       last_fetched_at TEXT NOT NULL,
       detail_json TEXT,
-      PRIMARY KEY (account_id, digest, relationship)
+      PRIMARY KEY (account_id, digest)
     );
+
+    CREATE TABLE IF NOT EXISTS external_activity_observations (
+      scan_id TEXT NOT NULL REFERENCES external_activity_scans(scan_id) ON DELETE RESTRICT,
+      account_id INTEGER NOT NULL, digest TEXT NOT NULL,
+      detail_status TEXT NOT NULL CHECK (detail_status IN ('available','missing','size_limit')),
+      PRIMARY KEY (scan_id, digest),
+      FOREIGN KEY (account_id, digest) REFERENCES external_activity_transactions(account_id, digest)
+    );
+    CREATE INDEX IF NOT EXISTS idx_external_activity_observations_digest ON external_activity_observations(account_id, digest);
 
     CREATE INDEX IF NOT EXISTS idx_external_activity_transactions_account_time
       ON external_activity_transactions(account_id, timestamp);
@@ -220,6 +232,7 @@ const CURRENT_SCHEMA_SQL = `
 
     CREATE TABLE IF NOT EXISTS live_transaction_materials (
       material_id TEXT PRIMARY KEY,
+      preparation_id TEXT,
       review_session_id TEXT NOT NULL,
       plan_id TEXT NOT NULL,
       account TEXT NOT NULL,
@@ -329,6 +342,7 @@ const CURRENT_SCHEMA_SQL = `
       total_size INTEGER NOT NULL CHECK (total_size BETWEEN 0 AND 9007199254740991),
       received_size INTEGER NOT NULL CHECK (received_size BETWEEN 0 AND total_size),
       sha256 TEXT NOT NULL,
+      block_hashes_json TEXT,
       sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0,1)),
       invalidated INTEGER NOT NULL DEFAULT 0 CHECK (invalidated IN (0,1)),
       cleanup TEXT NOT NULL DEFAULT 'pending' CHECK (cleanup IN ('pending','complete','failed')),
@@ -419,6 +433,10 @@ function externalActivityScansTableSql(): string {
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
     relationship TEXT NOT NULL CHECK (relationship IN ('affected', 'sent')),
     input_digest TEXT,
+    function_target TEXT,
+    continuity_json TEXT,
+    source_upper_timestamp TEXT,
+    source_upper_checkpoint TEXT,
     from_checkpoint TEXT,
     to_checkpoint TEXT,
     from_timestamp TEXT,
@@ -431,6 +449,8 @@ function externalActivityScansTableSql(): string {
     fetched_at TEXT NOT NULL,
     stored_count INTEGER NOT NULL CHECK (stored_count >= 0),
     skipped_count INTEGER NOT NULL CHECK (skipped_count >= 0),
+    outside_filter_count INTEGER NOT NULL DEFAULT 0 CHECK(outside_filter_count >= 0),
+    unconfirmed_relation_count INTEGER NOT NULL DEFAULT 0 CHECK(unconfirmed_relation_count >= 0),
     has_more INTEGER NOT NULL CHECK (has_more IN (0, 1)),
     window_complete INTEGER CHECK (window_complete IN (0, 1)),
     incomplete_reason TEXT CHECK (
@@ -445,7 +465,7 @@ function externalActivityScansTableSql(): string {
 function settingsRevisionTriggers(): string {
   const userTables = ["accounts", "review_sessions", "review_state_snapshots",
     "review_status_transitions", "review_executions", "review_requests", "external_activity_scans",
-    "external_activity_transactions", "local_settings"];
+    "external_activity_transactions", "external_activity_observations", "local_settings"];
   const walletTables = ["live_wallet_connections", "wallet_connection_operations", "live_review_sessions", "live_request_authority"];
   const invalidate = (condition: string) => `
     UPDATE live_read_cards SET revision=revision+1

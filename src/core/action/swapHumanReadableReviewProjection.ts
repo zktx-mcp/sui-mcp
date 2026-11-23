@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { transactionFundingSummary } from "./transactionFunding.js";
 import type {
   SwapHumanReadableReviewAmount
@@ -121,12 +122,19 @@ function assertSwapHumanReadableReviewProjectsQuotePolicy(
     "minimum_output",
     swapQuotePolicy.minimumOutput
   );
-  assertSingleAmountProjection(
-    "fee",
-    evidence.review.assetFlow.fees,
-    "fee",
-    swapQuotePolicy.protocolFee
-  );
+  const { inputFlow, fees } = evidence.review.assetFlow;
+  if (!isDeepStrictEqual(inputFlow, swapQuotePolicy.inputFlow) ||
+      evidence.review.assetFlow.feeTargetRaw !== swapQuotePolicy.feeTargetRaw ||
+      evidence.review.assetFlow.separateFeeBudgetRaw !== swapQuotePolicy.separateFeeBudgetRaw ||
+      evidence.review.freshness.quotedAt !== swapQuotePolicy.quoteSource.fetchedAt) {
+    throw new Error("swap human-readable review input flow must match swap quote policy evidence");
+  }
+  const fee = swapQuotePolicy.inputFlow.fee;
+  if (fee.kind === "separate_coin") {
+    assertSingleAmountProjection("fee", fees, "fee", fee.amount);
+  } else if (fees.length !== 0) {
+    throw new Error("an input-inclusive quote cannot itemize an additional fee");
+  }
 
   if (evidence.review.targets.length !== 1) {
     throw new Error("swap human-readable review targets must contain exactly one swap output asset target");

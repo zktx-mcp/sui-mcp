@@ -1,3 +1,4 @@
+import { swapQuoteInputFlowSchema } from "./swapQuoteAmounts.js";
 import { z } from "zod";
 import { proposalReviewModelSchema } from "../proposal/schemas.js";
 import { suiAddressStringSchema } from "../suiAddress.js";
@@ -250,6 +251,7 @@ export const humanReadableReviewEnvelopeSchema = z.object({
   unsupportedClaims: z.array(humanReadableReviewGapSchema),
   freshness: z.object({
     status: z.literal("current"),
+    quotedAt: z.iso.datetime().optional(),
     evaluatedAt: z.string(),
     expiresAt: z.string(),
     reason: z.string()
@@ -262,6 +264,9 @@ export const swapHumanReadableReviewProjectionSchema = z.object({
     outgoing: z.array(swapHumanReadableReviewAmountSchema),
     expectedIncoming: z.array(swapHumanReadableReviewAmountSchema),
     minimumIncoming: z.array(swapHumanReadableReviewAmountSchema),
+    inputFlow: swapQuoteInputFlowSchema.optional(),
+    feeTargetRaw: makeRawU64StringSchema("fee target").optional(),
+    separateFeeBudgetRaw: makeRawU64StringSchema("separateFeeBudgetRaw").nullable().optional(),
     fees: z.array(swapHumanReadableReviewAmountSchema)
   }).strict(),
   targets: z.array(swapHumanReadableReviewTargetSchema)

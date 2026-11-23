@@ -17,7 +17,12 @@ export const accountRenderer = {
         typeof payload.objectsTruncated !== "boolean" || typeof payload.fetchedAt !== "string") throw new Error("Account data is incomplete.");
     const node = element("div");
     node.append(identitySection(payload.account, payload), balanceSection(payload));
-    node.append(row("NFTs", String(payload.nfts.length)));
+    const seen = typeof payload.displayObjectCount === "number" ? payload.displayObjectCount : payload.nfts.length;
+    node.append(row("Objects with Display metadata", payload.objectScanStatus === "unavailable" ? "Unavailable" :
+      `${seen}${payload.objectsTruncated ? " observed (partial scan)" : ""}`));
+    const renderable = typeof payload.renderableDisplayCount === "number" ? payload.renderableDisplayCount : seen;
+    if (renderable < seen) node.append(row("With a display name or image", String(renderable)));
+    if (payload.displayObjectsTruncated) node.append(placeholder(`Showing ${payload.nfts.length} of ${renderable} displayable objects.`));
     const details = accordion("Details");
     if (payload.nfts.length) details.body.append(nftSection(payload));
     details.body.append(row(t.common.retrievedAt, timeValue(payload.fetchedAt)));
@@ -30,6 +35,7 @@ function identitySection(address: string, payload: Record<string, unknown>): HTM
   const node = section();
   const name = typeof payload.name === "string" && payload.name.length > 0 ? payload.name : undefined;
   if (name) node.append(row(t.account.name, name));
+  else if (payload.nameStatus === "unavailable") node.append(row(t.account.name, "Unavailable"));
   node.append(row(t.account.address, monoShort(address)));
   return node;
 }
@@ -37,9 +43,10 @@ function identitySection(address: string, payload: Record<string, unknown>): HTM
 // Show the verified total without exposing the storage format of the balance.
 function balanceSection(payload: Record<string, unknown>): HTMLElement {
   const node = section(t.account.balances);
+  if (payload.balancesIncompleteReason) node.append(placeholder("The balance scan is incomplete. Only consistently observed balances are shown."));
   const balances = Array.isArray(payload.balances) ? payload.balances : [];
   if (balances.length === 0) {
-    node.append(element("p", "ui-note", t.account.noBalances));
+    if (!payload.balancesIncompleteReason) node.append(element("p", "ui-note", t.account.noBalances));
     return node;
   }
   for (const entry of balances) {
@@ -55,7 +62,7 @@ function balanceSection(payload: Record<string, unknown>): HTMLElement {
 // load directly from their external host (page CSP allows external https), with a
 // no-referrer policy so only the image bytes are requested.
 function nftSection(payload: Record<string, unknown>): HTMLElement {
-  const node = section(t.account.nfts);
+  const node = section("Objects with Display metadata");
   const nfts = Array.isArray(payload.nfts) ? payload.nfts : [];
   const grid = element("div", "account-nfts");
   for (const raw of nfts) {
@@ -113,6 +120,7 @@ function assetBreakdownRow(assetRow: WalletAssetRow): HTMLElement {
   const total = element("span", "account-asset-total");
   total.append(assetRow.total);
   node.append(total);
+  if (assetRow.coinType) node.append(element("span", "ui-mono", assetRow.coinType));
   return node;
 }
 

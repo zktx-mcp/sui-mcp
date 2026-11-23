@@ -89,14 +89,13 @@ channel:
   outcomes retain the known digest and may be read again, never resubmitted.
   A later explicit reviewed revision has a new attempt while prior facts remain.
 
-DeepBook swap material is built with an explicit fee mode. When the account's
-DEEP balance covers the protocol fee, the swap quotes and builds in DEEP fee
-mode; otherwise it re-quotes through the protocol's input-fee dry run and
-builds with an explicit zero-DEEP coin so the taker fee is paid from the
-source coin at the protocol penalty. The selected fee mode is recorded as
-review evidence and shown as a check. Before building, the producer verifies
-the account holds the source amount plus the explicit gas budget and fails
-closed with the exact required and held amounts.
+The current DeepBook adapter requests a DEEP-fee quote first. A positive quoted fee can be allocated from the DEEP balance available after reserving any DEEP input principal. For a quote with zero DEEP allocation, a DEEP output, or insufficient available DEEP, it obtains an input-fee quote and builds with a zero-DEEP coin. The final quote supplies the principal, expected input spend and return, expected output, fee treatment and observation time. The Review shows a separate fee allocation only when the builder supplies a fee coin with positive value. An input-inclusive fee has no itemized amount. Gas is assessed separately.
+
+The public quote and the account-bound Review date each quote when its final raw response arrives. The 30-second window for a new approval starts at that instant for the selected fee mode. Waiting for a fee-policy or account read consumes the remaining time.
+
+Swap policy evidence v3 binds these facts to the material. The requested tolerance in basis points sets the raw minimum to `expected − floor(expected × bps / 10000)`. The adapter evaluates the selected quote after receipt and the 30-second deadline is exclusive. The installed adapter verifies its enforcement method against the decoded final transaction, including the payment asset and destination, principal, positive output floor, fee cap, and return of change. The minimum failure display requires a matching digest and guarded command or the precise protocol abort. Preserve the observed outcome when optional details fail validation. Public historical reviews retain the values recorded when prepared.
+
+For the installed swap adapter, `slippageOrMinOut.enforcement` identifies the checked output coin, recipient, raw floor, split command and exact reviewed digest. The quote supplies the expected amount. The adapter verifies the finalized commands and compares the selected account's simulated net changes after separating network gas. A quote-only historical contract can lack enforcement evidence.
 
 This gate is enforced at the contract-schema layer. `transactionReviewDataSchema`
 requires a `reviewedTransactionDigest` (the Sui transaction digest of the

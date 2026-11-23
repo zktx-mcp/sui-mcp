@@ -1,9 +1,10 @@
+import { downloadBlockHashes } from "./settingsFileStore.js";
 import { randomUUID } from "node:crypto";
 import { basename, dirname } from "node:path";
-import { TextDecoder, isDeepStrictEqual } from "node:util";
+import { isDeepStrictEqual } from "node:util";
 import type { SqliteActivityStore } from "../activity/sqliteActivityStore.js";
 import type { SqliteLocalDataService } from "../activity/localDataService.js";
-import { LocalDataError } from "../activity/localDataTypes.js";
+import { LocalDataError, type LocalDataEnvelope } from "../activity/localDataTypes.js";
 import { settingsInputError, SETTINGS_REPLACEMENT_BLOCKED_MESSAGE } from "./settingsInputError.js";
 import type { SqlitePreferencesRepository } from "../preferences/sqlitePreferencesRepository.js";
 import { SETTINGS_APPLIES_AFTER_RESTART } from "../preferences/preferencesStore.js";
@@ -27,6 +28,7 @@ export class SettingsWorkflow {
   private readonly finishedFileIO = new Set<string>();
   // This tracks actual pending I/O only; SQLite owns check results and permission.
   private readonly checkingFiles = new Set<string>();
+  private timerDeadline: number | undefined;
   private downloadTimer: ReturnType<typeof setTimeout> | undefined;
   private closing = false;
   private readonly downloadIO = new Map<string, Set<Promise<unknown>>>();
@@ -35,7 +37,7 @@ export class SettingsWorkflow {
   private readonly localSaveResults = new Map<string, { saveAttemptId: string; outcome: SettingsLocalSaveOutcome }>();
   constructor(private readonly options: {
     records: SqliteSettingsWorkflowStore; files: SettingsFileStore; activity: SqliteActivityStore;
-    localData: SqliteLocalDataService; preferences: SqlitePreferencesRepository; wallet: WalletWorkflow;
+    validateUpload?(bytes: Buffer): Promise<LocalDataEnvelope>; localData: SqliteLocalDataService; preferences: SqlitePreferencesRepository; wallet: WalletWorkflow;
     readFacts(): Promise<NonNullable<SettingsView["facts"]>>;
     resolveEndpoint(input: Extract<SettingsDraft, { kind: "set_endpoint" | "restore_endpoint" }>): EndpointChange;
     verifyEndpoint(input: Extract<SettingsDraft, { kind: "set_endpoint" | "restore_endpoint" }>): Promise<EndpointChange>;
@@ -148,21 +150,19 @@ export class SettingsWorkflow {
     finally { active.delete(task); if (!active.size) this.downloadIO.delete(fileId); }
   }
   private scheduleDownloadExpiry(skipElapsed = false): void {
+    const deadline = this.closing ? undefined : this.records.nextDownloadDeadline(skipElapsed ? this.now().toISOString() : undefined);
+    if (this.downloadTimer !== undefined && deadline === this.timerDeadline) return;
     if (this.downloadTimer !== undefined) clearTimeout(this.downloadTimer);
     this.downloadTimer = undefined;
-    if (this.closing) return;
-    const deadlines = this.records.downloads().flatMap((operation) => {
-      const download = settingsDownload(operation)!;
-      return !download.endReason && download.localSave?.status !== "saving" && download.expiresAt && (!skipElapsed || Date.parse(download.expiresAt) > this.now().getTime()) ? [Date.parse(download.expiresAt)] : [];
-    });
-    if (!deadlines.length) return;
+    this.timerDeadline = deadline;
+    if (deadline === undefined) return;
     this.downloadTimer = setTimeout(() => {
       this.downloadTimer = undefined;
       void this.maintenance(() => this.maintainDownloads()).catch(() => {
         // Durable cleanup remains pending/failed; a same-operation read or
         // startup can retry. Never spin on an already elapsed deadline.
       });
-    }, Math.max(0, Math.min(...deadlines) - this.now().getTime()));
+    }, Math.max(0, deadline - this.now().getTime()));
     this.downloadTimer.unref?.();
   }
   async maintainDownloads(): Promise<void> {
@@ -176,6 +176,7 @@ export class SettingsWorkflow {
     if (failure) throw failure;
   }
   dataReplaced(): void {
+    this.records.clearDownloadIndex();
     // The replacement action owns and awaits its transferred cleanup journal.
     // Starting another cleanup here would race its I/O reservation and return
     // before the action's required cleanup result is known.
@@ -187,6 +188,7 @@ export class SettingsWorkflow {
     this.downloadTimer = undefined;
     await Promise.allSettled([...this.downloadTasks, ...[...this.downloadIO.values()].flatMap((tasks) => [...tasks])]);
     await this.maintenance(async () => {
+      this.records.clearDownloadIndex();
       for (const operation of this.records.downloads()) this.observeLocalSave(operation);
       await Promise.allSettled([...this.localSaveTasks.values()]);
       this.records.transaction(() => { for (const operation of this.records.downloads()) this.records.endDownload(operation.operationId, "server_restarted"); });
@@ -201,7 +203,7 @@ export class SettingsWorkflow {
       const checked = this.records.requireDownloadRead(record, fileId, attemptId), length = Math.min(limit, checked.file.totalSize - offset);
       if (!Number.isSafeInteger(offset) || offset < 0 || length < 1) throw new SettingsConflict("This part of the backup is unavailable.");
       let data: Buffer;
-      try { data = await this.trackDownloadIO(fileId, () => this.options.files.readDownloadRange(checked.file, offset, length)); }
+      try { data = await this.trackDownloadIO(fileId, () => this.options.files.readDownloadRange({ ...checked.file, blockHashes: this.records.downloadBlockIndex(checked.file) }, offset, length)); }
       catch {
         this.options.assertCurrent();
         this.records.transaction(() => this.records.endDownload(operation.operationId, "source_unavailable"));
@@ -227,7 +229,7 @@ export class SettingsWorkflow {
       bytes = Buffer.from(JSON.stringify(this.options.localData.exportLocalDataSync(this.now())), "utf8");
       const fileId = randomUUID();
       return { fileId, operationId: operation.operationId, role: "export", relativePath: settingsDownloadPath(fileId),
-        displayName: `${operation.operationId}.json`, totalSize: bytes.length, receivedSize: 0, sha256: settingsFileDigest(bytes),
+        displayName: `${operation.operationId}.json`, totalSize: bytes.length, receivedSize: 0, sha256: settingsFileDigest(bytes), blockHashes: downloadBlockHashes(bytes),
         sealed: false, invalidated: false, cleanup: "pending" };
     });
     const task = this.writeDownload(file, bytes);
@@ -313,22 +315,8 @@ export class SettingsWorkflow {
     const rejection = retainedBackupRejection(operation, operation.fileId ? this.records.file(operation.fileId) : undefined);
     return rejection ? { ...rest, preparation: { restoreCheck: rejection } } : rest;
   }
-  private async backupInput(file: SettingsFile): Promise<unknown> {
-    const bytes = await this.options.files.readUpload(file);
-    return this.parseBackupBytes(bytes);
-  }
-  private parseBackupBytes(bytes: Buffer): unknown {
-    let text: string;
-    try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-    catch (error) {
-      if (!(error instanceof TypeError) || !("code" in error) || error.code !== "ERR_ENCODING_INVALID_ENCODED_DATA") throw error;
-      throw new LocalDataError("input_invalid", "The backup is not valid UTF-8.", { reason: "invalid_backup_encoding" });
-    }
-    try { return JSON.parse(text) as unknown; }
-    catch (error) {
-      if (!(error instanceof SyntaxError)) throw error;
-      throw new LocalDataError("input_invalid", "The backup is not valid JSON.", { reason: "invalid_backup_json" });
-    }
+  private validateUpload(bytes: Buffer): Promise<LocalDataEnvelope> {
+    return this.options.validateUpload?.(bytes) ?? Promise.resolve(this.options.localData.validateBackupBytes(bytes));
   }
   private fingerprint(operation: SettingsOperation): string {
     const control = this.records.control(), draft = operation.draft;
@@ -672,7 +660,7 @@ export class SettingsWorkflow {
       preparation = { localSettings, endpoint: { endpoint: draft.endpoint, ...this.options.resolveEndpoint(draft),
         storedValue: current.storedValue, effectiveValue: current.effectiveValue, source: current.source } };
       if (collected !== this.fingerprint(initial.operation)) throw new SettingsConflict("The network setting changed while it was being checked. Review the change again.");
-    } else preparation = { counts: this.options.localData.getDataCountsSync() };
+    } else preparation = {};
     this.options.assertCurrent();
     let refused: SettingsConflict | undefined;
     this.records.transaction(() => {
@@ -771,13 +759,14 @@ export class SettingsWorkflow {
       checking = this.records.cards.get(card.state.cardId)!;
     });
     this.checkingFiles.add(file.fileId);
-    let verified = false, input: unknown, failure: Extract<RestoreCheck, { status: "cannot_restore" | "check_required" }> | undefined;
+    let verified = false, input: LocalDataEnvelope | undefined, failure: Extract<RestoreCheck, { status: "cannot_restore" | "check_required" }> | undefined;
     let unexpected: unknown;
     try {
       try {
         const bytes = await this.options.files.readUpload(file); verified = true;
         this.options.assertCurrent();
-        input = this.parseBackupBytes(bytes);
+        input = await this.validateUpload(bytes);
+        this.options.assertCurrent();
       } catch (error) {
         this.options.assertCurrent();
         if (error instanceof LocalDataError && error.kind === "input_invalid") {
@@ -805,7 +794,7 @@ export class SettingsWorkflow {
         }
         if (!failure) {
           try {
-            const preview = this.options.localData.previewImportLocalDataSync(input, decisionTime);
+            const preview = this.options.localData.previewValidatedImport(input!, decisionTime);
             preparation = { preview };
             this.options.localData.assertReplacementAllowed(decisionTime);
             this.records.requireFinalSlot();
@@ -838,7 +827,7 @@ export class SettingsWorkflow {
     if (draft.kind === "download_backup" || draft.kind === "set_wallet_networks" || draft.kind === "clear_read_address") throw new SettingsConflict("This action is applied by its explicit save or download request.");
     if (draft.kind === "restart_wallet_service") { this.restart(expected, action); return; }
     let endpoint: EndpointChange | undefined;
-    let imported: Awaited<ReturnType<SqliteLocalDataService["parseAndVerifyImportEnvelope"]>> | undefined;
+    let imported: LocalDataEnvelope | undefined;
     if (draft.kind === "set_endpoint" || draft.kind === "restore_endpoint") {
       endpoint = await this.options.verifyEndpoint(draft);
       const prepared = endpointPreparationSchema.parse(initial.operation.preparation?.endpoint);
@@ -852,7 +841,9 @@ export class SettingsWorkflow {
       const rejection = retainedBackupRejection(initial.operation, file);
       if (rejection) throw new SettingsConflict(rejection.check.status === "cannot_restore" ? rejection.check.message : "Choose another backup file.");
       try {
-        imported = await this.options.localData.parseAndVerifyImportEnvelope(await this.backupInput(file));
+        const validated = await this.validateUpload(await this.options.files.readUpload(file));
+        this.options.assertCurrent();
+        imported = await this.options.localData.verifyImportEndpoints(validated);
       } catch (error) {
         this.options.assertCurrent();
         // A rejected final verification does not apply data or end the card,
@@ -880,12 +871,13 @@ export class SettingsWorkflow {
     this.records.transaction(() => {
       const decisionTime = this.now();
       const fingerprint = () => this.fingerprint(this.records.get(action.operationId)!);
-      if (replacement) {
-        this.options.localData.currentDataCountsSync(decisionTime);
-        try { this.records.requireAdmission(expected, action, fingerprint, undefined, decisionTime); }
-        catch (error) { if (!(error instanceof SettingsConflict)) throw error; refused = error; return; }
+      if (replacement) this.options.localData.advanceRequestDeadlines(decisionTime);
+      let operation: SettingsOperation;
+      try { operation = this.records.admit(expected, action, fingerprint, undefined, decisionTime); }
+      catch (error) {
+        if (!replacement || !(error instanceof SettingsConflict)) throw error;
+        refused = error; return;
       }
-      const operation = this.records.admit(expected, action, fingerprint, undefined, decisionTime);
       let details: Record<string, unknown> = {};
       if (endpoint) {
         const previous = this.options.preferences.getLocalSettingSync(endpoint.key);

@@ -25,7 +25,7 @@ export class FixtureWalletRuntime implements WalletRuntime {
     const runId = this.runId;
     if (!this.transport) { this.state = walletUnavailable("initialization_failed", this.runId); return; }
     try {
-      await this.transport.restore();
+      await this.transport.cleanupPairings();
       if (this.closing || this.blocked || this.runId !== runId) return;
       this.unsubscribe = this.transport.onSessionChanged((topic, changedChains) => {
         try { this.publish(false, topic, changedChains); } catch { this.fail("wallet_state_unavailable"); }

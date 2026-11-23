@@ -1,16 +1,16 @@
+import { activityPackageFamilies } from "./transactionActivityLineages.js";
 import { z } from "zod";
 import { parseSuiAddress } from "../suiAddress.js";
 import type { ExternalActivityTransactionDetail } from "./transactionActivityDetails.js";
 import {
   SUI_DEFI_ACTIVITY_PROTOCOL_RULES,
   protocolActivityPrimaryActions,
-  protocolPackageRuleAllows,
   type ProtocolActivityPrimaryAction,
   type ProtocolPackageRule,
   type ProtocolRule
 } from "./transactionActivityProtocolRules.js";
 
-export const SUI_DEFI_ACTIVITY_CLASSIFIER_VERSION = "sui_defi_activity_v0_4" as const;
+export const SUI_DEFI_ACTIVITY_CLASSIFIER_VERSION = "sui_defi_activity_v0_6" as const;
 
 const protocolActivityPrimaryActionSchema = z.enum(protocolActivityPrimaryActions);
 
@@ -21,7 +21,7 @@ const protocolMatchBasisSchema = z.enum([
   "shared_object"
 ]);
 
-const primaryActionPriority: Record<ProtocolActivityPrimaryAction, number> = {
+const declaredActionPriority: Record<ProtocolActivityPrimaryAction, number> = {
   order: 0,
   swap: 0,
   liquidity: 0,
@@ -36,7 +36,8 @@ export const protocolActivityClassifierMatchSchema = z.object({
   protocolId: z.string(),
   displayName: z.string(),
   activityCategory: z.string(),
-  primaryAction: protocolActivityPrimaryActionSchema,
+  declaredAction: protocolActivityPrimaryActionSchema,
+  transactionStatus: z.enum(["success", "failure", "unknown"]),
   matchBasis: protocolMatchBasisSchema,
   evidence: z.array(z.discriminatedUnion("kind", [
     z.object({
@@ -87,11 +88,12 @@ type PackageEvidenceFields = {
 };
 
 export function classifySuiDeFiActivity(
-  details: ExternalActivityTransactionDetail
+  details: ExternalActivityTransactionDetail,
+  transactionStatus: ProtocolActivityClassifierMatch["transactionStatus"] = "unknown"
 ): ProtocolActivityClassifierMatch[] {
-  const matches = SUI_DEFI_ACTIVITY_PROTOCOL_RULES.flatMap((rule) => matchProtocol(rule, details));
+  const matches = SUI_DEFI_ACTIVITY_PROTOCOL_RULES.flatMap((rule) => matchProtocol(rule, details, transactionStatus));
   const deepTradeDirect = matches.some((match) =>
-    match.protocolId === "deeptrade-core" && match.matchBasis === "direct_move_call"
+    match.protocolId === "deeptrade-core" && match.evidence.some(item => item.kind === "moveCall")
   );
   const deepBookMatch = matches.find((match) => match.protocolId === "deepbook-v3");
 
@@ -122,19 +124,41 @@ export function classifySuiDeFiActivity(
   });
 }
 
+function typeEvidence(rule: ProtocolRule, type: string | undefined) {
+  if (!type) return;
+  const outer = type.split("<", 1)[0]!;
+  const parts = outer.split("::");
+  if (parts.length !== 3) return;
+  const [address, module, name] = parts, id = parseSuiAddress(address!);
+  const family = activityPackageFamilies[rule.protocolId];
+  if (!id || !family?.types[id]?.includes(`${module}::${name}`)) return;
+  return { id, evidence: { source: `mainnet_type_origin_v${family.versions.indexOf(id) + 1}` } };
+}
+
+function directPackage(rule: ProtocolRule, id: string | undefined): ProtocolPackageRule | undefined {
+  if (!id) return;
+  if (rule.typeOnlyPackages?.includes(id)) return;
+  const mvrName = rule.namedPackages?.[id];
+  const family = activityPackageFamilies[rule.protocolId];
+  const version = family?.versions.indexOf(id) ?? -1;
+  if (version < 0 || !rule.actionForMoveCall) return;
+  return { source: `mainnet_direct_call_v${version + 1}`, ...(mvrName ? { mvrName } : {}) };
+}
+
 function matchProtocol(
   rule: ProtocolRule,
-  details: ExternalActivityTransactionDetail
+  details: ExternalActivityTransactionDetail,
+  transactionStatus: ProtocolActivityClassifierMatch["transactionStatus"]
 ): ProtocolActivityClassifierMatch[] {
   const evidence: ProtocolActivityEvidence[] = [];
   const limitationSet = new Set<string>();
   let matchBasis: ProtocolMatchBasis | undefined;
-  let primaryAction: ProtocolActivityPrimaryAction = "unknown";
+  let declaredAction: ProtocolActivityPrimaryAction = "unknown";
 
   for (const call of details.moveCalls) {
     const packageId = normalizedPackageFromMoveCall(call);
-    const packageRule = packageId === undefined ? undefined : rule.packages[packageId];
-    if (packageRule === undefined || !protocolPackageRuleAllows(packageRule, "moveCall")) {
+    const packageRule = directPackage(rule, packageId);
+    if (packageRule === undefined) {
       continue;
     }
     evidence.push({
@@ -146,21 +170,13 @@ function matchProtocol(
       commandIndex: call.commandIndex
     });
     matchBasis = selectPreferredMatchBasis(matchBasis, "direct_move_call");
-    primaryAction = strongestPrimaryAction(primaryAction, rule.actionForMoveCall?.(call) ?? "unknown");
-    if (packageRule.limitation !== undefined) {
-      limitationSet.add(packageRule.limitation);
-    }
+    declaredAction = strongestPrimaryAction(declaredAction, rule.actionForMoveCall?.(call) ?? "unknown");
   }
 
   for (const event of details.events) {
-    const packageId = normalizedPackageFromEvent(event);
-    const packageRule = packageId === undefined ? undefined : rule.packages[packageId];
-    if (
-      packageId !== undefined
-      && packageRule !== undefined
-      && protocolPackageRuleAllows(packageRule, "eventType")
-      && event.eventType !== undefined
-    ) {
+    const origin = typeEvidence(rule, event.eventType);
+    if (origin && event.eventType) {
+      const packageId = origin.id, packageRule = origin.evidence;
       evidence.push({
         kind: "eventType",
         package: packageId,
@@ -174,13 +190,9 @@ function matchProtocol(
 
   for (const change of details.objectChanges) {
     for (const type of uniqueStrings([change.inputType, change.outputType].flatMap((value) => value === undefined ? [] : [value]))) {
-      const packageId = normalizedPackageFromType(type);
-      const packageRule = packageId === undefined ? undefined : rule.packages[packageId];
-      if (
-        packageId !== undefined
-        && packageRule !== undefined
-        && protocolPackageRuleAllows(packageRule, "objectType")
-      ) {
+      const origin = typeEvidence(rule, type);
+      if (origin) {
+        const packageId = origin.id, packageRule = origin.evidence;
         evidence.push({
           kind: "objectType",
           objectId: change.objectId,
@@ -213,9 +225,10 @@ function matchProtocol(
   if (matchBasis === "shared_object") {
     limitationSet.add("shared_object_match_does_not_prove_wallet_position");
   }
-  if (matchBasis === "event_type" || matchBasis === "object_type") {
+  if (!evidence.some((item) => item.kind === "moveCall") && (matchBasis === "event_type" || matchBasis === "object_type")) {
     limitationSet.add("no_direct_move_call_match");
   }
+  limitationSet.add("declared_call_does_not_prove_fill_or_account_effect");
   limitationSet.add("transaction_activity_label_only");
   limitationSet.add("not_position_inventory_or_pnl_or_signing");
 
@@ -224,7 +237,8 @@ function matchProtocol(
     protocolId: rule.protocolId,
     displayName: rule.displayName,
     activityCategory: rule.activityCategory,
-    primaryAction,
+    declaredAction,
+    transactionStatus,
     matchBasis,
     evidence: uniqueEvidence(evidence),
     relatedProtocols: [],
@@ -258,11 +272,11 @@ function selectPreferredMatchBasis(
 
 function matchBasisPriority(matchBasis: ProtocolMatchBasis): number {
   switch (matchBasis) {
-    case "direct_move_call":
-      return 0;
     case "event_type":
-      return 1;
+      return 0;
     case "object_type":
+      return 1;
+    case "direct_move_call":
       return 2;
     case "shared_object":
       return 3;
@@ -273,7 +287,7 @@ function strongestPrimaryAction(
   current: ProtocolActivityPrimaryAction,
   candidate: ProtocolActivityPrimaryAction
 ): ProtocolActivityPrimaryAction {
-  const priority = primaryActionPriority[candidate] - primaryActionPriority[current];
+  const priority = declaredActionPriority[candidate] - declaredActionPriority[current];
   if (priority !== 0) {
     return priority < 0 ? candidate : current;
   }
@@ -282,15 +296,6 @@ function strongestPrimaryAction(
 
 function normalizedPackageFromMoveCall(call: { package: string; target: string }): string | undefined {
   return parseSuiAddress(call.package) ?? normalizedPackageFromType(call.target);
-}
-
-function normalizedPackageFromEvent(
-  event: { package?: string | undefined; eventType?: string | undefined }
-): string | undefined {
-  if (event.package !== undefined) {
-    return parseSuiAddress(event.package);
-  }
-  return event.eventType === undefined ? undefined : normalizedPackageFromType(event.eventType);
 }
 
 function normalizedPackageFromType(type: string): string | undefined {

@@ -34,8 +34,8 @@ export function latest<T extends { lastActivityAt: string }>(items: T[]) {
 // Runtime workflows own reconciliation/observation. A server without a wallet
 // workflow can still expose ordinary preparation facts, with explicit absence.
 export async function readCurrentReview(deps: Pick<McpServerDeps, "workflow" | "sessions">, id: string,
-  explicitResult = false): Promise<ReviewSnapshot | undefined> {
-  if (deps.workflow) return deps.workflow.readReview(id, explicitResult);
+  explicitResult = false, fixedAttemptId?: string): Promise<ReviewSnapshot | undefined> {
+  if (deps.workflow) return deps.workflow.readReview(id, explicitResult, fixedAttemptId);
   const session = await deps.sessions.getReviewSession(id);
   return session ? { session, hasReviewInput: false, walletAvailability: walletUnavailable("initialization_failed"), progress: { status: "idle" } } : undefined;
 }

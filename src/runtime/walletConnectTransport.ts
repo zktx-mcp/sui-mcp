@@ -66,14 +66,13 @@ export async function createWalletConnectTransport(options: {
   };
   const requireActive = () => { if (stopped) throw new Error("WalletConnect owner stopped."); };
   return {
-    async restore() {
+    async cleanupPairings() {
       requireActive();
       // A pending proposal is not an approved session and must not reappear as
       // a new approval ceremony after owner replacement.
       for (const pairing of client.core.pairing.getPairings()) {
         if (!pairing.active) await client.core.pairing.disconnect({ topic: pairing.topic });
       }
-      return client.session.getAll().flatMap((session) => { const value = current(session.topic); return value ? [value] : []; });
     },
     async connect(chains) {
       requireActive();
@@ -82,7 +81,7 @@ export async function createWalletConnectTransport(options: {
       const optionalNamespaces = Object.fromEntries(scope.map((chain) => [chain.split(":")[0]!, { chains: [chain],
         methods: chain === SUI_MAINNET_WALLET_CHAIN ? [SUI_SIGN_TRANSACTION_METHOD] : [],
         events: chain === SUI_MAINNET_WALLET_CHAIN ? ["accountsChanged", "chainChanged"] : [] }]));
-      const connecting = await client.connect({ requiredNamespaces: {}, optionalNamespaces });
+      const connecting = await client.connect({ requiredNamespaces: {}, optionalNamespaces }).catch((error: unknown) => { throw transportError(error); });
       const approval = connecting.approval().then(sessionValue).catch((error: unknown) => { throw transportError(error); });
       // Attach a rejection handler immediately; the backend records the same
       // promise's outcome once the private QR has been associated with its row.
@@ -100,8 +99,10 @@ export async function createWalletConnectTransport(options: {
       if (!session || !walletGrantAccount(session.grants, SUI_MAINNET_WALLET_CHAIN, input.account)?.methods.includes(SUI_SIGN_TRANSACTION_METHOD)) {
         throw new Error("This wallet session cannot sign for the selected Sui account.");
       }
-      return signedResponse.parse(await client.request({ topic: input.topic, chainId: SUI_MAINNET_WALLET_CHAIN,
-        request: { method: SUI_SIGN_TRANSACTION_METHOD, params: { transaction: input.transactionBytesBase64, address: input.account } } }));
+      const response = await client.request({ topic: input.topic, chainId: SUI_MAINNET_WALLET_CHAIN,
+        request: { method: SUI_SIGN_TRANSACTION_METHOD, params: { transaction: input.transactionBytesBase64, address: input.account } } })
+        .catch((error: unknown) => { throw transportError(error); });
+      return signedResponse.parse(response);
     },
     session: current,
     inspect,

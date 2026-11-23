@@ -9,10 +9,12 @@ import {
 } from "./reviewComputationResult.js";
 
 export type ReviewComputationInput = {
+  preparationId?: string;
   reviewSessionId: string;
   plan: ActionPlan;
   account: string;
   now?: Date;
+  clock?: () => Date;
 };
 
 export type ReviewComputationOutput = {
@@ -54,7 +56,7 @@ export async function computeReviewStateWithPrivateArtifacts(
       reviewSessionId: input.reviewSessionId,
       planId: input.plan.id,
       account: input.account,
-      now: input.now
+      now: input.clock?.() ?? input.now
     },
     computed.result,
     deps.validateAdapterLifecycle ?? rejectAdapterLifecycle

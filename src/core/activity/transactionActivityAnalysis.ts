@@ -49,6 +49,7 @@ export type SuiActivityAnalysisTransaction = {
 };
 
 export type SuiActivityAnalysisContext = {
+  storedAccountFlows?: boolean;
   relationship?: ExternalActivityRelationship | undefined;
   windowComplete?: boolean | null | undefined;
   orderingVerified?: boolean | undefined;
@@ -57,6 +58,7 @@ export type SuiActivityAnalysisContext = {
     transactionCount: number;
     statusCounts: Record<ExternalActivityTransactionStatus, number>;
     relationshipCounts: Record<ExternalActivityRelationship, number>;
+    relationshipObservationCounts?: Record<ExternalActivityRelationship, number>;
     earliestTimestamp?: string | undefined;
     latestTimestamp?: string | undefined;
   } | undefined;
@@ -68,13 +70,14 @@ export type SuiActivityAnalysis = {
     analyzedTransactionCount: number;
     statusCounts: Record<ExternalActivityTransactionStatus, number>;
     relationshipCounts: Record<ExternalActivityRelationship, number>;
+    relationshipObservationCounts?: Record<ExternalActivityRelationship, number>;
     earliestTimestamp?: string | undefined;
     latestTimestamp?: string | undefined;
     earliestCheckpoint?: string | undefined;
     latestCheckpoint?: string | undefined;
   };
   moveCallTargets: Array<{ target: string; count: number }>;
-  protocols: Array<{ protocolId: string; displayName?: string | undefined; count: number }>;
+  protocols: Array<{ protocolId: string; displayName?: string | undefined; count: number; statusCounts: Record<ExternalActivityTransactionStatus, number> }>;
   coinFlows: Array<{
     coinType: string;
     increaseRaw: string;
@@ -148,7 +151,7 @@ export function buildSuiActivityAnalysis(
   let earliestCheckpoint: string | undefined;
   let latestCheckpoint: string | undefined;
   const moveCallCounts = new Map<string, number>();
-  const protocolCounts = new Map<string, { displayName?: string | undefined; count: number }>();
+  const protocolCounts = new Map<string, { displayName?: string | undefined; count: number; statusCounts: Record<ExternalActivityTransactionStatus, number> }>();
   const coinFlows = new Map<string, CoinFlowAccumulator>();
   const objectChanges = { created: 0, mutated: 0, deleted: 0 };
   const eventTypeCounts = new Map<string, number>();
@@ -195,12 +198,15 @@ export function buildSuiActivityAnalysis(
       }
       protocolsInTransaction.add(match.protocolId);
       const existing = protocolCounts.get(match.protocolId);
+      const counts = existing?.statusCounts ?? zeroStatusCounts();
+      counts[transaction.status] += 1;
       protocolCounts.set(match.protocolId, {
+        statusCounts: counts,
         displayName: existing?.displayName ?? match.displayName,
         count: (existing?.count ?? 0) + 1
       });
     }
-    for (const change of compact.balanceChanges) {
+    for (const change of context.storedAccountFlows && transaction.details?.truncation.balanceChanges ? [] : compact.balanceChanges) {
       const entry = coinFlows.get(change.coinType) ?? {
         increaseRaw: 0n,
         decreaseRaw: 0n,
@@ -286,6 +292,7 @@ export function buildSuiActivityAnalysis(
       analyzedTransactionCount: transactions.length,
       statusCounts: overviewSummary?.statusCounts ?? statusCounts,
       relationshipCounts: overviewSummary?.relationshipCounts ?? relationshipCounts,
+      ...(overviewSummary?.relationshipObservationCounts ? { relationshipObservationCounts: overviewSummary.relationshipObservationCounts } : {}),
       ...(overviewEarliestTimestamp === undefined ? {} : { earliestTimestamp: overviewEarliestTimestamp }),
       ...(overviewLatestTimestamp === undefined ? {} : { latestTimestamp: overviewLatestTimestamp }),
       ...(earliestCheckpoint === undefined ? {} : { earliestCheckpoint }),
@@ -316,7 +323,7 @@ function compactFacts(transaction: SuiActivityAnalysisTransaction): ExternalActi
   }
   return transaction.details === undefined
     ? undefined
-    : compactExternalActivityTransactionDetails(transaction.details);
+    : compactExternalActivityTransactionDetails(transaction.details, transaction.status);
 }
 
 function zeroStatusCounts(): Record<ExternalActivityTransactionStatus, number> {

@@ -1,15 +1,16 @@
+import { z } from "zod";
 import {
   EXTERNAL_ACTIVITY_SCAN_DEFAULT_LIMIT,
   EXTERNAL_ACTIVITY_SCAN_MAX_LIMIT,
   type ExternalActivityIncompleteReason,
+  type ExternalActivityScanRecord,
+  type ScanContinuity,
   type ExternalActivityRelationship
 } from "./activityStore.js";
 import { externalActivityTransactionTouchesAccount } from "./transactionActivityDetails.js";
 import {
   TransactionActivityError,
-  type ScanSuiAccountActivityInput,
-  type SuiTransactionActivityFact,
-  type SuiTransactionActivityPage
+  type SuiTransactionActivityFact
 } from "./transactionActivityTypes.js";
 
 export function normalizeActivityLimit(limit: number | undefined): number {
@@ -39,7 +40,7 @@ export function normalizeCheckpointBound(value: string | undefined, field: strin
       max: String(Number.MAX_SAFE_INTEGER)
     });
   }
-  return value;
+  return String(BigInt(value));
 }
 
 export function assertCheckpointRange(fromCheckpoint: string | undefined, toCheckpoint: string | undefined): void {
@@ -99,41 +100,73 @@ export function compareActivityFactsDescending(
   return -compareActivityFactsAscending(a, b);
 }
 
-export function windowCompletion(
-  input: ScanSuiAccountActivityInput,
-  page: SuiTransactionActivityPage,
-  orderingVerified: boolean
-): boolean | null {
-  const hasLowerBound = input.fromCheckpoint !== undefined || input.fromTimestamp !== undefined;
-  const hasAnyWindowBound = hasLowerBound || input.toCheckpoint !== undefined || input.toTimestamp !== undefined;
-  if (!hasAnyWindowBound) {
-    return null;
-  }
-  if (!page.hasMore) {
-    return true;
-  }
-  if (!orderingVerified) {
-    return false;
-  }
-  const reachedCheckpoint = input.fromCheckpoint === undefined
-    ? false
-    : page.transactions.some(
-        (transaction) => transaction.checkpoint !== undefined && BigInt(transaction.checkpoint) <= BigInt(input.fromCheckpoint!)
-      );
-  const reachedTimestamp = input.fromTimestamp === undefined
-    ? false
-    : page.transactions.some((transaction) => transaction.timestamp !== undefined && transaction.timestamp <= input.fromTimestamp!);
-  return reachedCheckpoint || reachedTimestamp;
+const checkpointNumber = z.string().regex(/^\d+$/);
+const checkpointTime = z.iso.datetime({ precision: 3 });
+export const scanContinuitySchema = z.object({
+  rootScanId: z.string().min(1), predecessorScanId: z.string().min(1).optional(),
+  sourceLower: z.object({ checkpoint: checkpointNumber, timestamp: checkpointTime }).strict().optional(),
+  newestCheckpoint: checkpointNumber.optional(), oldestCheckpoint: checkpointNumber.optional(),
+  newestTimestamp: checkpointTime.optional(), oldestTimestamp: checkpointTime.optional()
+}).strict();
+
+export type ScanPageProof = z.infer<typeof scanContinuitySchema>;
+
+type ScanWindow = Pick<ExternalActivityScanRecord, "scanId" | "requestCursor" | "hasMore" | "continuity" |
+  "fromTimestamp" | "toTimestamp" | "fromCheckpoint" | "toCheckpoint" | "sourceUpperTimestamp" | "sourceUpperCheckpoint">;
+
+export function validScanPageBounds(proof: ScanContinuity, upper: string, upperTime: string): boolean {
+  const { newestCheckpoint, oldestCheckpoint, newestTimestamp, oldestTimestamp, sourceLower } = proof;
+  if (sourceLower && (BigInt(sourceLower.checkpoint) > BigInt(upper) || sourceLower.timestamp > upperTime)) return false;
+  if (!newestCheckpoint && !oldestCheckpoint && !newestTimestamp && !oldestTimestamp) return true;
+  return !!newestCheckpoint && !!oldestCheckpoint && !!newestTimestamp && !!oldestTimestamp &&
+    BigInt(oldestCheckpoint) <= BigInt(newestCheckpoint) && BigInt(newestCheckpoint) <= BigInt(upper) &&
+    oldestTimestamp <= newestTimestamp && newestTimestamp <= upperTime;
+}
+
+export function scanPageFollows(previous: ScanContinuity, next: ScanContinuity): boolean {
+  const before = previous.sourceLower, after = next.sourceLower;
+  if (!!before !== !!after || (before && after &&
+      (BigInt(after.checkpoint) < BigInt(before.checkpoint) || after.timestamp < before.timestamp))) return false;
+  return previous.rootScanId === next.rootScanId && previous.oldestCheckpoint !== undefined &&
+    previous.oldestTimestamp !== undefined && (!next.newestCheckpoint || BigInt(next.newestCheckpoint) <= BigInt(previous.oldestCheckpoint)) &&
+    (!next.newestTimestamp || next.newestTimestamp <= previous.oldestTimestamp);
+}
+
+export function windowCompletion(scan: ScanWindow): boolean | null {
+  const { fromTimestamp, toTimestamp, fromCheckpoint, toCheckpoint, continuity: proof } = scan;
+  if (!fromTimestamp && !toTimestamp && !fromCheckpoint && !toCheckpoint) return null;
+  if (!proof?.sourceLower || !scan.sourceUpperCheckpoint || !scan.sourceUpperTimestamp) return false;
+  if (scan.requestCursor ? !proof.predecessorScanId : proof.rootScanId !== scan.scanId || proof.predecessorScanId) return false;
+
+  const first = proof.sourceLower;
+  const endCheckpoint = toCheckpoint ?? fromCheckpoint;
+  const endTimestamp = toTimestamp ?? fromTimestamp;
+  if (BigInt(first.checkpoint) > BigInt(scan.sourceUpperCheckpoint) || first.timestamp > scan.sourceUpperTimestamp ||
+      (endCheckpoint && BigInt(endCheckpoint) > BigInt(scan.sourceUpperCheckpoint)) ||
+      (endTimestamp && endTimestamp > scan.sourceUpperTimestamp)) return false;
+  // Checkpoints can share a timestamp. At a pruned floor, equality alone cannot
+  // cover all transactions at the start millisecond.
+  const lowerCovered = BigInt(first.checkpoint) === 0n ||
+    (fromCheckpoint !== undefined && BigInt(fromCheckpoint) >= BigInt(first.checkpoint)) ||
+    (fromTimestamp !== undefined && fromTimestamp > first.timestamp);
+  if (!lowerCovered) return false;
+  return scanReachedLowerBound(scan);
+}
+
+export function scanReachedLowerBound(scan: Pick<ScanWindow, "hasMore" | "fromCheckpoint" | "fromTimestamp" | "continuity">): boolean {
+  const { fromTimestamp, fromCheckpoint } = scan;
+  return !scan.hasMore ||
+    (fromCheckpoint !== undefined && scan.continuity?.oldestCheckpoint !== undefined && BigInt(scan.continuity.oldestCheckpoint) < BigInt(fromCheckpoint)) ||
+    (fromTimestamp !== undefined && scan.continuity?.oldestTimestamp !== undefined && scan.continuity.oldestTimestamp < fromTimestamp);
 }
 
 export function incompleteReasonForScan(input: {
   orderingVerified: boolean;
   windowComplete: boolean | null;
+  hasMore: boolean;
 }): ExternalActivityIncompleteReason | undefined {
-  if (!input.orderingVerified) {
-    return "ordering_unverified";
-  }
-  return input.windowComplete === false ? "limit_reached" : undefined;
+  if (!input.orderingVerified) return "ordering_unverified";
+  return input.windowComplete === false && input.hasMore ? "limit_reached" : undefined;
 }
 
 export function filterTransactionsForRequestedWindow(

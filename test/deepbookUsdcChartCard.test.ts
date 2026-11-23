@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { candleToCandlestickData, candleToVolumeData, chartQueryText, chartRenderer, chartResultSchema, chartSeriesData, parseUtcInputToMs, shortcutQuery } from "../src/mcp-ui/view/chart.js";
 import { chartInputSchema } from "../src/core/read/readCardInputs.js";
 
+const savedPoolId = "0x" + "1".repeat(64);
+
 const chartApi = vi.hoisted(() => ({
   addSeries: vi.fn(() => ({ setData: vi.fn() })),
   create: vi.fn(), resize: vi.fn(), setVisibleRange: vi.fn(), fitContent: vi.fn(), remove: vi.fn(),
@@ -37,7 +39,7 @@ function prepareLayout() {
     createdAt: "2026-06-27T01:00:00.000Z", expiresAt: "2026-06-27T01:30:00.000Z", inputRemainingMs: 0, pollAfterMs: 5000, input: {},
     data: { status: "ok", query: { poolName: "SUI_USDC", interval: "15m", startTimeMs: 1782518400000, endTimeMs: 1782522000000, limit: 120 },
       candles: [{ timestampMs: 1782520200000, start: "2026-06-27T00:30:00.000Z", open: "1", high: "1", low: "1", close: "1", volume: "0" }],
-      candleCount: 1, source: { fetchedAt: "2026-06-27T01:00:00.000Z" }, pair: { baseAsset: { symbol: "SUI" }, quoteAsset: { symbol: "USDC" } } }
+      candleCount: 1, source: { endpoint: "order_fills", poolId: savedPoolId, fetchedAt: "2026-06-27T01:00:00.000Z" }, pair: { poolId: savedPoolId, baseAsset: { symbol: "SUI" }, quoteAsset: { symbol: "USDC" } } }
   });
   return { result, container: nodes.find((node) => node.className === "card-chart")!,
     resize: () => { changed(); flushFrame(); }, queueResize: () => changed(), flushFrame, frames, resizeDisconnect, themeDisconnect };
@@ -45,8 +47,10 @@ function prepareLayout() {
 
 describe("DeepBook chart input and display", () => {
   it("retains the time shortcuts and rejects invalid windows without inventing candles", () => {
-    expect(shortcutQuery("Latest 500", new Date("2026-06-27T03:00:00.000Z"))).toEqual({ startInput: "", endInput: "", limitInput: "500" });
-    expect(shortcutQuery("Last 24h", new Date("2026-06-27T03:00:00.000Z"))).toEqual({ startInput: "2026-06-26T03:00", endInput: "2026-06-27T03:00", limitInput: "10000" });
+    expect(shortcutQuery("Latest 500", new Date("2026-06-27T03:00:00.000Z"))).toEqual({ limit: 500 });
+    expect(shortcutQuery("Last 24h", new Date("2026-06-27T03:00:45.678Z"))).toEqual({
+      startTimeMs: Date.parse("2026-06-26T03:00:45.678Z"), endTimeMs: Date.parse("2026-06-27T03:00:45.678Z"), limit: 10000
+    });
     expect(() => parseUtcInputToMs("2026-06-27 00:00")).toThrow("YYYY-MM-DDTHH:mm");
     expect(chartInputSchema.safeParse({ poolName: "SUI_USDC", startTimeMs: 2, endTimeMs: 1 }).success).toBe(false);
     expect(chartInputSchema.safeParse({ poolName: "", limit: 500 }).success).toBe(false);
@@ -63,8 +67,8 @@ describe("DeepBook chart input and display", () => {
     const candle = { timestampMs: 1782520200000, start: "2026-06-27T00:30:00.000Z", open: "0.7", high: "0.8", low: "0.6", close: "0.75", volume: "12" };
     for (const candles of [[], [candle]]) {
       const result = chartResultSchema.parse({ status: candles.length === 0 ? "empty_result" : "ok", query,
-        candles, candleCount: candles.length, source: { fetchedAt: "2026-07-01T12:00:00.000Z" },
-        pair: { baseAsset: { symbol: "SUI" }, quoteAsset: { symbol: "USDC" } } });
+        candles, candleCount: candles.length, source: { endpoint: "order_fills", poolId: savedPoolId, fetchedAt: "2026-07-01T12:00:00.000Z" },
+        pair: { poolId: savedPoolId, baseAsset: { symbol: "SUI" }, quoteAsset: { symbol: "USDC" } } });
       expect(result.query).toEqual(query);
       expect(chartQueryText(result.query)).toBe("Range (UTC): 2026-06-27 00:00:00 UTC → 2026-06-27 01:00:00 UTC");
       const { limit: _limit, ...missingLimit } = result.query;
@@ -73,7 +77,7 @@ describe("DeepBook chart input and display", () => {
   });
   it("keeps omitted UTC boundaries explicit instead of filling them with current or candle times", () => {
     const query = { poolName: "SUI_USDC", interval: "15m", limit: 500 };
-    expect(chartQueryText(query)).toBe("Recent candles · UTC");
+    expect(chartQueryText({})).toBe("Recent candles · UTC");
     expect(chartQueryText({ ...query, startTimeMs: 1782518400000 })).toBe("Range (UTC): 2026-06-27 00:00:00 UTC → not specified");
     expect(chartQueryText({ ...query, endTimeMs: 1782522000000 })).toBe("Range (UTC): not specified → 2026-06-27 01:00:00 UTC");
     // The source query accepts safe integer milliseconds, including values

@@ -8,10 +8,10 @@ in the card dependency notices described below.
 ## Package Versions
 
 - `@modelcontextprotocol/ext-apps`: `2.0.3`
-- `@modelcontextprotocol/client`, `@modelcontextprotocol/core`, `@modelcontextprotocol/server`: `2.3.1`
-- `@modelcontextprotocol/node`: `2.1.1`
-- `@mysten/sui`: `2.35.0`
-- `@mysten/deepbook-v3`: `2.6.4`
+- `@modelcontextprotocol/client`, `@modelcontextprotocol/core`, `@modelcontextprotocol/server`: `2.4.0`
+- `@modelcontextprotocol/node`: `2.1.2`
+- `@mysten/sui`: `2.39.1`
+- `@mysten/deepbook-v3`: `2.13.0`
 - `@walletconnect/sign-client`, `@walletconnect/types`, `@walletconnect/utils`: `2.26.0`
 - `qrcode`: `1.5.4`
 - `@zktx.io/ptb-model`: `0.5.0`
@@ -59,7 +59,7 @@ single serialized `CallToolResult` carrier validated with the pinned SDK
 schema. Conflicting payloads or private metadata are rejected. Ordinary data
 does not supply input permission, and saved resource links remain read-only.
 
-`@modelcontextprotocol/ext-apps` is pinned to `2.0.3`, with the MCP client/core/server packages at `2.3.1` and Node transport at `2.1.1`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Disconnect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
+`@modelcontextprotocol/ext-apps` is pinned to `2.0.3`, with the MCP client/core/server packages at `2.4.0` and Node transport at `2.1.2`. The server uses `registerAppTool`, `registerAppResource` and `getUiCapability`; the view uses `App` for host-mediated calls and teardown. Account, Receipt, Chart, Connect, Disconnect, Review and Settings are separate self-contained resources, so an account card does not load the PTB or chart renderer. Settings uses scoped app-only inputs for local actions and file transfer. The server keeps app-only permissions out of model content.
 
 Settings completes a selected upload's verification and restore preparation on
 the backend. The card renders the stored `restoreCheck` result and collects one
@@ -198,6 +198,10 @@ type BaseQuantityOut = {
 
 The pinned SDK accepts `number | bigint` quote inputs. Its high-level quote query objects include an input echo field (`baseQuantity` or `quoteQuantity`) produced with `Number(inputRaw)`, plus display quote fields (`baseOut`, `quoteOut`, and `deepRequired`) produced after scalar division and `Number(...)` conversion. Sui MCP does not use those high-level query objects as the canonical quote source for adapter preparation. It uses the pinned SDK transaction builder quote functions, requests `client.core.simulateTransaction` command results, and parses raw `u64` return values. The simulated public Move entrypoint is `pool::get_quote_quantity_out` for base-to-quote reads and `pool::get_base_quantity_out` for quote-to-base reads; both delegate to `pool::get_quantity_out`, whose official Move source defines the return order as `base_quantity_out`, `quote_quantity_out`, and `deep_quantity_required`. Public `quote` fields are exact decimal display strings derived from those raw values through pinned DeepBook scalars; `rawQuote` carries the raw evidence. `read_quote_deepbook_action` marks the input as raw `u64`, while `read_quote_deepbook_display_amount` marks the input as a source display amount converted to raw `u64`. Raw quote evidence is not an effective price, price-impact calculation, quote-vs-mid slippage calculation, venue comparison, best-route claim, fiat cash-out estimate, external market lookup, USDC/USD peg assumption, P&L, cost basis, final min-out, signing data, or signing readiness. The account-bound DeepBook review may derive a fresh raw quote policy from this evidence and use that derived policy for local unsigned transaction material build, while keeping bytes private to the backend until a scoped user selection admits a WalletConnect request for that reviewed revision. MCP and ordinary review-status outputs still do not contain transaction bytes, signing data, or signing readiness. When the digest commitment stage completes, it is derived from the locally stored transaction bytes through pinned SDK `Transaction.from(...).getDigest()` and remains an internal binding, not a public signing artifact.
 
+For input-inclusive fees, the two corresponding `InputFee` builders call the directional `_input_fee` getters. Their third tuple slot is zero. In both modes the input-side return is the unspent principal. Input-fee quotes subtract trading fees during matching and return no independent input-fee amount. Sui MCP decodes the three eight-byte quote values at the command that produced them and validates each bundled pool parameter result. [DeepBook v9 matching and return values](https://github.com/MystenLabs/deepbookv3/blob/v9.0.0/packages/deepbook/sources/book/book.move#L110-L231)
+
+The selected DeepBook SDK calls core v9. The quote and book parameters, trade parameters, DEEP conversion and pool whitelist status are read in one simulation. The account Review separately reads the pool's EWMA fee configuration and available DEEP. Each fixed-point product uses the raw Move scale of one billion. The transferable output is split at the reviewed minimum and immediately rejoined before refunds are returned.
+
 ## Runtime Boundary
 
 - JSON-RPC client imports are not used.
@@ -228,8 +232,8 @@ The backend reconstructs the returned transaction with `Transaction.from`,
 recomputes its digest and calls pinned `verifyTransactionSignature` with the
 admitted address and verified Sui client (including schemes requiring online
 verification). Submission uses `client.core.executeTransaction` exactly once
-per admitted attempt. `waitForTransaction` supplies separately verified chain
-facts; its absence/timeout does not prove execution failure.
+per admitted attempt. Each receipt observation calls `client.core.getTransaction` for that same digest.
+A missing receipt or timeout leaves the chain outcome unconfirmed.
 
 SDK session storage persists only the pinned connection namespaces. History,
 requests and unknown queue keys are volatile. The SDK has no supported complete
@@ -265,7 +269,7 @@ SDK path; testing it alone does not establish the runtime's gRPC behavior.
 
 The source of truth for address-balance withdrawal and gas reservation formats
 is Sui mainnet-v1.72.5 `sui-types/src/coin_reservation.rs` and
-`transaction.rs`, together with the installed Sui 2.35.0 BCS and transaction definitions. The derivation of the reservation decoder retains its original source attribution. The SDK’s
+`transaction.rs`, together with the installed Sui 2.39.1 BCS and transaction definitions. The derivation of the reservation decoder retains its original source attribution. The SDK’s
 `utils/coin-reservation.ts` helper is not publicly exported. The local read-only
 funding verifier uses the SDK's public BCS, base58 and dynamic-field primitives
 for the documented reservation format; it does not replace SDK coin selection

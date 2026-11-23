@@ -5,7 +5,7 @@ import { TransactionActivityService } from "../../src/core/activity/transactionA
 import { SuiReadService, type DeepBookReadClient } from "../../src/core/read/readService.js";
 import { InMemorySessionStore } from "../../src/core/session/sessionStore.js";
 import { createMcpServer, startMcp } from "../../src/mcp/server.js";
-import { InMemoryActivityStore } from "./inMemoryActivityStore.js";
+import { SqliteActivityStore } from "../../src/core/activity/sqliteActivityStore.js";
 import { InMemoryLocalSettingsService } from "./inMemoryLocalSettings.js";
 import { MemoryCoinMetadataCache } from "./memoryCoinMetadataCache.js";
 
@@ -65,7 +65,7 @@ const deepbook: DeepBookReadClient = {
   }
 };
 
-const activityStore = new InMemoryActivityStore();
+const activityStore = new SqliteActivityStore({ databasePath: ":memory:", validateAdapterLifecycle: validateSupportedAdapterLifecycle });
 const logger = {
   error(_message: string, _meta?: Record<string, unknown>) {}
 };

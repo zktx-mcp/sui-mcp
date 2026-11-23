@@ -4,6 +4,8 @@ Sui MCP uses a local SQLite database for durable product state that must survive
 
 This document is for maintainers and contributors who change local state, import/export behavior, activity queries, or review evidence storage. Product users normally need only the README and `docs/MCP_SETUP.md`.
 
+The current format stores each observed transaction once per Sui account and digest. Each scan-to-digest observation records its own origin and whether detail was available, absent, or too large to retain. Complete conflicting balance observations are excluded from account flow totals. Public backup and replacement include these links and their account ownership. Private candidate transaction material is tied to an active preparation. The public request field `submissionAdmittedAt` records when SQLite consumed permission for a submission attempt.
+
 ## Runtime Boundary
 
 The process that binds the configured loopback port initializes these local components. Other stdio processes authenticate that server and forward their calls; they do not open SQLite:
@@ -248,6 +250,8 @@ The same record contains a model-safe result and, for receipts, separately valid
 
 Input TTL is not a result-retention deadline. Completed results survive restart and remain until explicit local data reset/import; there is no automatic age-based deletion or per-card size cap. Existing query limits still apply. DB size can therefore grow with usage. Reset/import affects other local data too and must retain its explicit confirmation and failure-atomicity contract.
 
+The market history cache contains public pool aggregates independent of account activity. It is separate from the wallet database and excluded from Settings export and restore.
+
 ### Wallet and request ownership
 
 The same product DB stores `review_requests` per attempt, with a unique review
@@ -256,7 +260,7 @@ status and signature/submission timestamps. `review_sessions.current_attempt_id`
 selects the current attempt explicitly. `review_executions` is keyed by attempt,
 contains only verified chain success/failure, and cannot stand in for wallet
 rejection or an unknown outcome. Public history and live request transitions
-commit together with card admission or closure. Old attempts remain readable.
+commit together with card admission or closure. Old attempts remain readable. The most recent unsuccessful digest read records its kind and time under the same attempt. Endpoint denial and a different chain stop automatic observation; an explicit same-digest read can recover after the endpoint has been repaired.
 
 `live_request_authority` holds owner, wallet connection revision, submission
 permission, pending callback flags and backend deadlines. `live_wallet_connections`
@@ -458,8 +462,7 @@ only explicit user stopping sets `observation_stopped`; wallet changes and
 disconnect requests preserve that flag, the lookup deadline and pending work.
 They cannot silently release account-busy protection or restart an observation
 the user stopped. Existing deadline, owner-recovery and data-replacement rules
-remain separate. Stored reasons flow unchanged to cards, model results, activity
-and public backup; earlier recorded reasons are not rewritten speculatively.
+remain separate. Cards and model results report the current request and observation. A confirmed chain result clears the current observation and its recovery instruction. Earlier transition reasons remain in activity history and public backups.
 
 Wallet dependency failure keeps guarded DB reads, local deadline reconciliation
 and independent receipt observation available. Only a healthy wallet dependency
@@ -504,6 +507,8 @@ updates preserve the original operation result and card input lifetime.
 The runtime accepts one current SQLite structure, checked against its table, column, constraint, index and trigger definitions before writes. There is no separate database version counter, migration registry or older-format decoder. All clients sharing a data directory must use the same package release.
 
 A current backup carries `format`, `network`, `exportedAt` and its product data. It has no numeric schema version. Import rejects a different format, unknown or missing fields, invalid references or invalid raw quantities. Missing settings or activity arrays are not filled from defaults. Supported `function_scan` provenance remains part of the current format. Validation failure leaves current data intact.
+
+The first Review opening is recorded once, at or after its creation time even if the local clock moves backwards. The header and opening event use the same timestamp. Restore checks each review header against its recorded transitions and state snapshots in insertion order. A quote can expire within the same review revision. An admission must precede the reviewed expiry. Its mainnet receipt can arrive later. Each admitted request retains its revision and recorded signature-verification and submission times. Local transition times within one request are nondecreasing in stored order. Equal timestamps are valid. The completion transition owns the local recording time shown in the execution. Restore checks the execution time against that record. Earlier writers could sample the display time after the transition. Restore uses the verified transition time for those records and rejects a display time preceding the transition. The chain receipt retains its own observation time. A stopped request can have no submission, and a recovered request can have an unknown outcome. These records remain public history after restore. They convey no wallet permissions.
 
 With a new empty data directory, the runtime stores the built-in mainnet endpoints and initial Sui connection scope automatically. Custom endpoint configuration is optional; environment overrides retain their existing precedence. Wallet-dependent features require a new connection, while public-address reads do not. Empty local history does not imply an absence of on-chain transactions. Existing DB and backup files are not deleted by startup.
 

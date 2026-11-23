@@ -47,7 +47,7 @@ Live scan and live-summary rows use `transactionContext` for transaction-level c
 Compact facts:
 Inspect and stored-summary rows can include `compact`.
 
-`compact.factScope: "transaction"` and `compact.requestedAccountScoped: false` mean compact balance changes, object changes, events, and gas are transaction-level facts.
+Object changes, events, and gas are transaction-level facts. For compact balances, inspect `balanceChangeScope`: live inspection covers the transaction, while a stored row covers only `balanceChangesAccount`.
 
 Compact balance changes can aggregate repeated ownerless raw changes with `count`; `analysis.coinFlows` is a transaction/page aggregate, not wallet-specific evidence.
 

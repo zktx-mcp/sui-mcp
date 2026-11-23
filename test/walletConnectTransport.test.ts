@@ -56,7 +56,12 @@ it("keeps a non-mainnet session unusable for supported accounts and removes aban
   sdk.sessions.set("approved", approved()); const wrong = approved(); wrong.topic = "wrong"; wrong.namespaces.sui.accounts = [`sui:testnet:${account}`]; sdk.sessions.set("wrong", wrong);
   sdk.pairings = [{ topic: "abandoned", expiry: Math.floor(Date.now() / 1000) + 60, active: false }];
   const transport = await open();
-  try { expect((await transport.restore()).map((s) => s.topic)).toEqual(["approved", "wrong"]); expect(transport.session("wrong")?.grants.flatMap((grant) => grant.accounts)).toEqual([]); expect(sdk.removePairing).toHaveBeenCalledExactlyOnceWith({ topic: "abandoned" }); }
+  try {
+    await transport.cleanupPairings();
+    expect(transport.inspectAll().map(session => session.topic)).toEqual(["approved", "wrong"]);
+    expect(transport.session("wrong")?.grants.flatMap(grant => grant.accounts)).toEqual([]);
+    expect(sdk.removePairing).toHaveBeenCalledExactlyOnceWith({ topic: "abandoned" });
+  }
   finally { transport.stop(); }
 });
 

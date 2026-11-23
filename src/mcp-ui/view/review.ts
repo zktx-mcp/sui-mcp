@@ -1,3 +1,4 @@
+import { receiptObservationMessages } from "../../core/session/transactionRequest.js";
 import type { TransactionRequest } from "../../core/session/transactionRequest.js";
 import { reviewViewSchema, closedReviewCardSchema, type ReviewView, type ClosedReviewCard } from "../../core/session/workflowView.js";
 import { section, element, row, accordion, button, mono, monoShort, timeValue } from "../../../review-app/src/ui/ui.js";
@@ -100,9 +101,29 @@ function reviewedConditions(data: ReviewFacts): HTMLElement {
   node.append(row(review.account ? receivesHere ? "Send and receive account" : "Reviewed account" : "Account to review", address ? monoShort(address) : "Not selected"), row("Network", t.common.mainnet));
   if (human) {
     for (const amount of human.assetFlow.outgoing) node.append(row("You send, up to", `${rawToDisplay(amount.rawAmount, amount.decimals)} ${amount.symbol}`));
+    const flow = human.assetFlow.inputFlow, input = human.assetFlow.outgoing[0];
+    if (flow && input) {
+      node.append(row("Expected input spend", `${rawToDisplay(flow.expectedSpendRaw, input.decimals)} ${input.symbol}`),
+        row("Expected input returned", `${rawToDisplay(flow.expectedReturnRaw, input.decimals)} ${input.symbol}`));
+      if (flow.fee.kind === "base_fee_waived") node.append(row("Quoted base trading fee", "0 · pool fee exemption"));
+      if (flow.fee.kind === "included_in_input") {
+        node.append(row("Trading fee", `Included in ${input.symbol} spend. The quote does not itemize the fee.`));
+      }
+    }
     for (const amount of human.assetFlow.expectedIncoming) node.append(row("Expected to receive", `${rawToDisplay(amount.rawAmount, amount.decimals)} ${amount.symbol}`));
-    for (const amount of human.assetFlow.minimumIncoming) node.append(row("Minimum received on success", `${rawToDisplay(amount.rawAmount, amount.decimals)} ${amount.symbol}`));
+    for (const amount of human.assetFlow.minimumIncoming) node.append(row(review.state?.transactionReviewData?.slippageOrMinOut.enforcement ? "Minimum received on success" : "Minimum receive in this review", `${rawToDisplay(amount.rawAmount, amount.decimals)} ${amount.symbol}`));
     for (const amount of human.assetFlow.fees) node.append(row("Estimated trading fee", `${rawToDisplay(amount.rawAmount, amount.decimals)} ${amount.symbol}`));
+    if (flow?.fee.kind === "separate_coin" && human.assetFlow.separateFeeBudgetRaw != null) {
+      const asset = flow.fee.amount.asset;
+      const supplied = BigInt(human.assetFlow.separateFeeBudgetRaw);
+      const target = human.assetFlow.feeTargetRaw;
+      if (target !== undefined) {
+        node.append(row("Target fee allocation", `${rawToDisplay(target, asset.decimals)} ${asset.symbol}`),
+          row("Extra available above the quoted fee", `${rawToDisplay((supplied - BigInt(flow.fee.amount.raw)).toString(), asset.decimals)} ${asset.symbol}`));
+        if (supplied < BigInt(target)) node.append(element("p", "ui-note", "Your balance limits the fee allowance. A change in price or filled quantity could make this transaction fail and use gas."));
+      }
+      node.append(row("Allocated for trading fees", `${rawToDisplay(human.assetFlow.separateFeeBudgetRaw, asset.decimals)} ${asset.symbol}`));
+    }
     for (const recipient of human.recipients.filter((item) => item.address !== address)) node.append(row("Receiving account", mono(recipient.address)));
   } else {
     for (const amount of plan.assetFlowPreview.outgoing) node.append(row("Requested send", `${amount.amount} ${amount.symbol}`));
@@ -119,6 +140,7 @@ function reviewedConditions(data: ReviewFacts): HTMLElement {
 function reviewDetails(review: Review, historical = false): HTMLElement {
   const node = section(), state = review.state, human = state?.humanReadableReview;
   node.append(row("Summary", human?.proposedAction.summary ?? review.plan.summary), row("Protocol", review.plan.protocol));
+  if (human?.freshness.quotedAt) node.append(row("Quote received", timeValue(human.freshness.quotedAt)));
   if (human) node.append(row("Estimates checked at", timeValue(human.freshness.evaluatedAt)), row("Estimates expire", timeValue(human.freshness.expiresAt)));
   if (!state) { node.append(element("p", "ui-note", "This proposal has not been checked for a wallet account yet.")); return node; }
   if (state.evidenceValidity === "invalidated") node.append(element("p", "ui-note",
@@ -129,8 +151,8 @@ function reviewDetails(review: Review, historical = false): HTMLElement {
   if (state.transactionReviewData?.gas.gasBudgetRaw !== undefined) node.append(element("p", "ui-note", t.receipt.gasLimitExplanation));
   const policy = state.transactionReviewData?.slippageOrMinOut;
   if (policy?.minOutRaw !== undefined) node.append(row("Minimum receive (raw units)", policy.minOutRaw));
-  if (policy?.maxSlippageBps !== undefined) node.append(row("Maximum slippage (basis points)", String(policy.maxSlippageBps)));
-  if (policy?.policySource) node.append(row("Slippage choice", policy.policySource === "user_explicit" ? "Chosen by you" : "Set by the protocol adapter's quote rules"));
+  if (policy?.maxSlippageBps !== undefined) node.append(row(policy.maxSlippageSource === "action_request" ? "Requested maximum slippage (basis points)" : "Maximum slippage (basis points)", String(policy.maxSlippageBps)));
+  if (policy?.policySource) node.append(row("Minimum receive calculation", policy.policySource === "user_explicit" ? "Based on your explicit slippage choice" : "Calculated from the quote and requested slippage limit"));
   for (const change of state.simulation?.balanceChanges ?? []) {
     const amount = human && [...human.assetFlow.outgoing, ...human.assetFlow.expectedIncoming, ...human.assetFlow.fees].find((item) => item.coinType === change.coinType);
     node.append(row(`Estimated balance change · ${change.address}`, amount ? `${signedRawToDisplay(change.amount, amount.decimals)} ${amount.symbol}` : `${change.amount} raw units · ${change.coinType}`));
@@ -322,8 +344,8 @@ function reviewView(snapshot: CardSnapshot, display?: CardReceiptDisplay, act?: 
       } else {
         const facts = transactionFacts(request), receipt = execution.chainReceipt;
         node.append(facts, details("Details", (body) => {
-          for (const change of receipt.accountBalanceChanges) body.append(row(change.coinType, `${change.amountRaw} raw units`));
-          for (const call of receipt.packageCalls) body.append(row("Package call", call.target));
+          for (const change of receipt.accountBalanceChanges ?? []) body.append(row(change.coinType, `${change.amountRaw} raw units`));
+          for (const call of receipt.packageCalls ?? []) body.append(row("Package call", call.target));
           body.append(historical);
         }));
       }
@@ -341,7 +363,8 @@ function reviewView(snapshot: CardSnapshot, display?: CardReceiptDisplay, act?: 
       status.setAttribute("role", "status"); decision.append(status);
       if (!proposal && (!request || request.requestStatus === "awaiting_signature") && data.walletAvailability.status !== "available") decision.append(element("p", "ui-note", data.walletAvailability.message));
       if (request) {
-        if (request.reason) decision.append(element("p", "ui-note", request.reason));
+        if (request.lastObservation && !request.execution) decision.append(element("p", "ui-note", receiptObservationMessages[request.lastObservation.kind]));
+        if (request.reason && (!request.lastObservation || request.reason !== receiptObservationMessages[request.lastObservation.kind])) decision.append(element("p", "ui-note", request.reason));
         if (["stopped", "request_failed"].includes(request.requestStatus)) decision.append(element("p", "ui-note", "No chain execution result has been confirmed."));
         if (data.observe && request.requestStatus === "outcome_unknown") decision.append(element("p", "ui-note", "Checking this transaction on Sui…"));
         if (act && data.allowedActions.includes("stop_waiting")) {

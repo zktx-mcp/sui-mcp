@@ -1,6 +1,6 @@
 import type { UserAnswerUse } from "../evidence/userAnswerUse.js";
 import type {
-  DeepbookAccountInventoryDetailStatus,
+  DeepbookAccountInventoryDetailStatus, DeepbookUsdcPriceHistorySummary, DeepbookUsdcPriceAtTimeSummary,
   IntentEvidenceResponseEvidence,
   IntentEvidenceSettlementAssetCoverage
 } from "./readServiceTypes.js";
@@ -188,6 +188,7 @@ export function intentEvidenceUserAnswerUse(
           "candidateConversions[].targetSymbol",
           "candidateConversions[].sourceDisplayAmount",
           "candidateConversions[].status",
+          ...(hasDirectQuoteEvidence ? ["candidateConversions[].quote.quoteOutcome", "candidateConversions[].quote.inputFlow"] : []),
           "requiredUserChoices"
         ]
       : [];
@@ -279,91 +280,58 @@ export function deepbookMidPriceUserAnswerUse(): UserAnswerUse {
   };
 }
 
-export function deepbookUsdcPriceHistoryUserAnswerUse(): UserAnswerUse {
+type FactsOf<T> = T extends unknown ? Omit<T, "userAnswerUse"> : never;
+export type PriceHistoryFacts = FactsOf<DeepbookUsdcPriceHistorySummary>;
+export type PriceAtTimeFacts = FactsOf<DeepbookUsdcPriceAtTimeSummary>;
+
+// Build client guidance only after the producer has selected the actual outcome.
+export function candleUserAnswerUse(facts: PriceHistoryFacts | PriceAtTimeFacts): UserAnswerUse {
+  const canAnswer: string[] = [];
+  const atTime = "target" in facts;
+  const answerFields = ["status", ...(atTime ? ["target.targetTime", "target.searchWindow"] : ["requested.range"])];
+  const diagnostics = atTime ? ["requested.range"] : [];
+  if ("reason" in facts) answerFields.push("reason");
+  if ("candidates" in facts && facts.candidates) answerFields.push("candidates");
+  if ("pair" in facts && facts.pair) answerFields.push("pair");
+  if ("source" in facts && facts.source) {
+    if (facts.source.poolList) diagnostics.push("source.poolList");
+    if (facts.source.baseUrl) diagnostics.push("source.baseUrl");
+    if (facts.source.candles) answerFields.push("source.candles");
+  }
+  if ("candleAvailability" in facts) {
+    answerFields.push("candleAvailability");
+    if (!atTime || facts.status === "no_price_in_search_window") {
+      if ("bars" in facts && facts.bars.length) canAnswer.push(DEEPBOOK_ANSWER_USE.poolUsdcCandleHistory);
+      canAnswer.push(facts.candleAvailability === "partial_coverage"
+        ? DEEPBOOK_ANSWER_USE.candleAvailabilityThroughCutoff : DEEPBOOK_ANSWER_USE.candleAvailabilityForRequestedUtcRange);
+    }
+  }
+  if ("bars" in facts) answerFields.push("bars");
+  if ("match" in facts) {
+    canAnswer.push(DEEPBOOK_ANSWER_USE.poolUsdcCandleForRequestedTime, DEEPBOOK_ANSWER_USE.representativeClosePriceForMatchedCandle);
+    answerFields.push("match.kind", "match.distanceMinutes", "match.representativePrice", "matchedCandle.start",
+      "matchedCandle.end", "matchedCandle.open", "matchedCandle.high", "matchedCandle.low", "matchedCandle.close");
+  }
   return {
-    canAnswer: [
-      DEEPBOOK_ANSWER_USE.officialUsdcCandleHistory,
-      DEEPBOOK_ANSWER_USE.officialCandleAvailabilityForRequestedUtcRange
-    ],
-    cannotAnswer: [...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.officialUsdcCandles],
-    answerFields: [
-      "pair",
-      "requested.range",
-      "candleAvailability",
-      "bars",
-      "source.candles",
-      "responseSummary",
-      "unsupportedClaims"
-    ],
+    canAnswer, cannotAnswer: [...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.officialUsdcCandles],
+    answerFields: [...answerFields, "responseSummary", "unsupportedClaims"],
     conclusionRuleFields: ["responseSummary", "quantitySemantics", "unsupportedClaims"],
-    diagnosticOnlyFields: ["source.poolList", "source.baseUrl"]
+    diagnosticOnlyFields: diagnostics
   };
 }
 
-export function deepbookUsdcPriceAtTimeUserAnswerUse(matchAvailable: boolean): UserAnswerUse {
-  return {
-    canAnswer: [
-      DEEPBOOK_ANSWER_USE.officialUsdcCandleForRequestedTime,
-      ...(matchAvailable ? [DEEPBOOK_ANSWER_USE.representativeClosePriceForMatchedCandle] : [])
-    ],
-    cannotAnswer: [...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.officialUsdcCandles],
-    answerFields: [
-      "target.targetTime",
-      "target.searchWindow",
-      "status",
-      "pair",
-      ...(matchAvailable
-        ? [
-            "match.kind",
-            "match.distanceMinutes",
-            "match.representativePrice",
-            "matchedCandle.start",
-            "matchedCandle.end",
-            "matchedCandle.open",
-            "matchedCandle.high",
-            "matchedCandle.low",
-            "matchedCandle.close"
-          ]
-        : []),
-      "candleAvailability",
-      "source.candles",
-      "responseSummary",
-      "unsupportedClaims"
-    ],
-    conclusionRuleFields: ["responseSummary", "quantitySemantics", "unsupportedClaims"],
-    diagnosticOnlyFields: ["requested.range", "source.poolList", "source.baseUrl"]
-  };
-}
-
-export function deepbookQuoteUserAnswerUse(summaryKind: "raw" | "display"): UserAnswerUse {
+export function deepbookQuoteUserAnswerUse(summaryKind: "raw" | "display", hasFeePolicy = false): UserAnswerUse {
   return {
     canAnswer: [
       "indicative_deepbook_pool_quote_for_explicit_source_input",
       "raw_sdk_quote_return_values_before_slippage_policy"
     ],
     cannotAnswer: [...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.quote],
-    answerFields:
-      summaryKind === "raw"
-        ? [
-            "poolKey",
-            "direction",
-            "amountRaw",
-            "quote.baseOut",
-            "quote.quoteOut",
-            "quote.deepRequired",
-            "rawQuote.directionalOutput",
-            "fetchedAt"
-          ]
-        : [
-            "pool",
-            "direction",
-            "inputAmount",
-            "quote.baseOut",
-            "quote.quoteOut",
-            "quote.deepRequired",
-            "rawQuote.directionalOutput",
-            "fetchedAt"
-          ],
+    answerFields: [
+      ...(summaryKind === "raw" ? ["poolKey", "direction", "amountRaw"] : ["pool", "direction", "inputAmount"]),
+      "quote.baseOut", "quote.quoteOut", "quote.deepRequired", "rawQuote.directionalOutput",
+      "rawQuote.inputAmount", ...(hasFeePolicy ? ["rawQuote.poolTerms.gasFeePolicy"] : []), "inputFlow.expectedSpendRaw", "inputFlow.expectedReturnRaw", "inputFlow.fee", "quoteOutcome", "fetchedAt"
+    ],
     diagnosticOnlyFields: ["source", "rawQuote.returnValueOrder", "rawQuote.boundary"],
     conclusionRuleFields: [
       "quantitySemantics.canUseForPaymentAnswer",

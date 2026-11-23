@@ -4,7 +4,7 @@ const suiGrpcMocks = vi.hoisted(() => {
   const getChainIdentifier = vi.fn();
   const SuiGrpcClient = vi.fn().mockImplementation(function (_options: unknown) {
     return {
-      core: { getChainIdentifier }
+      ledgerService: { getServiceInfo: (_: unknown, options: { abort: AbortSignal }) => ({ response: getChainIdentifier(options.abort).then((r: { chainIdentifier: string }) => ({ chainId: r.chainIdentifier })) }) }
     };
   });
   return { getChainIdentifier, SuiGrpcClient };
@@ -91,7 +91,7 @@ describe("Sui endpoint guard", () => {
 
   it("times out endpoint verification deterministically", async () => {
     vi.useFakeTimers();
-    suiGrpcMocks.getChainIdentifier.mockReturnValue(new Promise(() => undefined));
+    suiGrpcMocks.getChainIdentifier.mockImplementation((signal: AbortSignal) => new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason))));
 
     const result = verifyMainnetGrpcEndpoint({
       url: "https://custom.sui.provider:9443",
@@ -120,7 +120,7 @@ describe("Sui endpoint guard", () => {
     });
     expect(suiGraphqlMocks.SuiGraphQLClient).toHaveBeenCalledWith({
       url: "https://graphql.mainnet.sui.io/graphql",
-      network: "mainnet"
+      network: "mainnet", fetch: expect.any(Function)
     });
   });
 
@@ -144,16 +144,23 @@ describe("Sui endpoint guard", () => {
     await expect(
       verifyMainnetGraphqlEndpoint({ url: "https://custom.sui.provider/graphql" })
     ).rejects.toMatchObject({
-      kind: "endpoint_unreachable",
+      kind: "endpoint_invalid_response",
       details: {
         url: "https://custom.sui.provider/graphql"
       }
     } satisfies Partial<SuiEndpointError>);
   });
 
+  it("keeps a failed GraphQL identity execution retryable while rejecting an incompatible schema", async () => {
+    for (const [code, kind] of [["INTERNAL_SERVER_ERROR", "endpoint_unreachable"], ["GRAPHQL_VALIDATION_FAILED", "endpoint_invalid_response"]]) {
+      suiGraphqlMocks.query.mockResolvedValue({ data: null, errors: [{ message: "identity query failed", extensions: { code } }] });
+      await expect(verifyMainnetGraphqlEndpoint({ url: "https://custom.sui.provider/graphql" })).rejects.toMatchObject({ kind });
+    }
+  });
+
   it("times out GraphQL endpoint verification deterministically", async () => {
     vi.useFakeTimers();
-    suiGraphqlMocks.query.mockReturnValue(new Promise(() => undefined));
+    suiGraphqlMocks.query.mockImplementation(({ signal }: { signal: AbortSignal }) => new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason))));
 
     const result = verifyMainnetGraphqlEndpoint({
       url: "https://custom.sui.provider/graphql",

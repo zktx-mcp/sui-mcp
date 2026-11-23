@@ -1,3 +1,4 @@
+import { matchesMinimumAbort, type ReviewedOutputGuard } from "./suiChainReceiptMapping.js";
 import { GrpcTypes } from "@mysten/sui/grpc";
 import { describeTransactionFunding, assertTransactionFundingMatches, transactionFundingDescriptionSchema } from "./transactionFunding.js";
 import type { SuiClientTypes } from "@mysten/sui/client";
@@ -158,9 +159,11 @@ export type ReviewTimeSimulationClient = {
 };
 
 export type ReviewTimeSimulationProducerInput = {
+  minimumOutputGuard?: ReviewedOutputGuard | undefined;
   transactionMaterial: LocalTransactionMaterialHandle;
   transactionMaterialDigest: LocalTransactionMaterialDigestCommitment;
   now: Date;
+  clock?: () => Date;
 };
 
 export type ReviewTimeSimulationProducerOutcome =
@@ -176,7 +179,7 @@ export type ReviewTimeSimulationProducerOutcome =
     }
   | {
       status: "refresh_required";
-      refreshReason: "quote_stale" | "simulation_transient_failure";
+      refreshReason: "quote_stale" | "quote_unavailable" | "simulation_transient_failure";
       checks: [ReviewCheck, ...ReviewCheck[]];
     };
 
@@ -202,11 +205,10 @@ export function verifyReviewTimeSimulationEvidence(input: {
   transactionMaterial: LocalTransactionMaterialHandle;
   transactionMaterialDigest: LocalTransactionMaterialDigestCommitment;
   evidence: ReviewTimeSimulationEvidence;
-  transactionBytes: Uint8Array;
   now?: Date | undefined;
-}): ReviewTimeSimulationEvidence {
+} & ({ transactionBytes: Uint8Array } | { verifiedMaterial: Awaited<ReturnType<typeof verifyLocalTransactionMaterialArtifacts>> })): ReviewTimeSimulationEvidence {
   const evidence = parseReviewTimeSimulationEvidence(input.evidence);
-  assertTransactionFundingMatches(describeTransactionFunding(Transaction.from(input.transactionBytes).getData(), input.transactionMaterial.account, evidence.transaction.funding.chainIdentifier), evidence.transaction.funding);
+  assertTransactionFundingMatches(describeTransactionFunding("verifiedMaterial" in input ? input.verifiedMaterial.transactionData : Transaction.from(input.transactionBytes).getData(), input.transactionMaterial.account, evidence.transaction.funding.chainIdentifier), evidence.transaction.funding);
   const now = input.now ?? new Date();
   const nowMs = now.getTime();
   if (!Number.isFinite(nowMs)) {
@@ -308,8 +310,8 @@ export function createReviewTimeSimulationProducer(
       return { status: "blocked", blockedReason: "object_resolution_failed", checks: [check] };
     }
 
-    const material = options.materialStore.getTransactionMaterial(parsed.transactionMaterial, input.now);
-    if (!material) {
+    const material = options.materialStore.getTransactionMaterial(parsed.transactionMaterial, input.clock?.() ?? input.now);
+    if (!material || !Buffer.from(parsed.transactionBytes).equals(material.transactionBytes)) {
       return {
         status: "refresh_required",
         refreshReason: "quote_stale",
@@ -366,6 +368,12 @@ export function createReviewTimeSimulationProducer(
       };
     }
 
+    const observedAt = input.clock?.() ?? input.now;
+    if (observedAt.getTime() >= Date.parse(material.expiresAt)) {
+      return { status: "refresh_required", refreshReason: "quote_stale", checks: [
+        failReviewCheck("review_time_simulation_quote_expired", "Quote expired", "The quote expired while awaiting simulation.", "quote")
+      ] };
+    }
     const simulatedTransaction = simulationResult;
     if (!simulatedTransaction?.effects?.status || typeof simulatedTransaction.effects.status.success !== "boolean") {
       return {
@@ -381,6 +389,22 @@ export function createReviewTimeSimulationProducer(
     }
     if (simulatedTransaction.effects.status.success === false) {
       const failureKind = simulatedTransaction.effects.status.error?.kind;
+      const failedCommand = simulatedTransaction.effects.status.error?.command;
+      const guard = input.minimumOutputGuard;
+      const detail = simulatedTransaction.effects.status.error?.errorDetails;
+      const abort = detail?.oneofKind === "abort" ? detail.abort : undefined;
+      const digest = input.transactionMaterialDigest.transactionDigest;
+      const returnedBytes = simulatedTransaction.transaction?.bcs?.value;
+      if (simulatedTransaction.effects.transactionDigest === digest && returnedBytes instanceof Uint8Array &&
+          Buffer.from(material.transactionBytes).equals(returnedBytes) && failedCommand !== undefined && guard?.transactionDigest === digest && (
+          (guard.commandFailure === "InsufficientCoinBalance" && Number(failedCommand) === guard.commandIndex && failureKind === GrpcTypes.ExecutionError_ExecutionErrorKind.INSUFFICIENT_COIN_BALANCE) ||
+          (failureKind === GrpcTypes.ExecutionError_ExecutionErrorKind.MOVE_ABORT && matchesMinimumAbort(guard, digest,
+            Number(failedCommand), abort?.location?.package, abort?.location?.module, abort?.abortCode?.toString())))) {
+        return { status: "refresh_required", refreshReason: "quote_unavailable", checks: [
+          failReviewCheck("minimum_output_not_met", "Minimum receive amount not reached",
+            "The checked transaction received less than the reviewed minimum. Refresh to obtain a new quote.", "simulation")
+        ] };
+      }
       const failureReason = failureKind === GrpcTypes.ExecutionError_ExecutionErrorKind.INSUFFICIENT_GAS
         ? "The checked simulation reported insufficient gas."
         : failureKind === GrpcTypes.ExecutionError_ExecutionErrorKind.INSUFFICIENT_COIN_BALANCE
@@ -401,41 +425,24 @@ export function createReviewTimeSimulationProducer(
       };
     }
 
-    let recomputedTransactionDigest: string;
-    try {
-      recomputedTransactionDigest = await Transaction.from(material.transactionBytes).getDigest();
-    } catch {
-      return {
-        status: "blocked",
-        blockedReason: "object_resolution_failed",
-        checks: [
-          failReviewCheck(
-            "review_time_simulation_result_invalid",
-            "Review-time simulation",
-            "Stored transaction material bytes could not produce a Sui transaction digest for the simulation binding.",
-            "simulation"
-          )
-        ]
-      };
-    }
-
     let evidence;
     try {
       evidence = createReviewTimeSimulationEvidenceFromTransaction({
         transactionMaterial: parsed.transactionMaterial,
         transactionMaterialDigest: parsed.transactionMaterialDigest,
-        recomputedTransactionDigest,
+        recomputedTransactionDigest: parsed.transactionMaterialDigest.transactionDigest,
+        verifiedData: parsed.transactionData,
         chainIdentifier: options.chainIdentifier,
         transaction: simulatedTransaction,
         submittedBytes: material.transactionBytes,
-        simulatedAt: input.now
+        simulatedAt: observedAt
       });
       verifyReviewTimeSimulationEvidence({
         transactionMaterial: parsed.transactionMaterial,
         transactionMaterialDigest: parsed.transactionMaterialDigest,
         evidence,
-        transactionBytes: material.transactionBytes,
-        now: input.now
+        verifiedMaterial: parsed,
+        now: observedAt
       });
     } catch {
       return {
@@ -471,6 +478,7 @@ function createReviewTimeSimulationEvidenceFromTransaction(input: {
   transactionMaterial: LocalTransactionMaterialHandle;
   transactionMaterialDigest: LocalTransactionMaterialDigestCommitment;
   recomputedTransactionDigest: string;
+  verifiedData: ReturnType<Transaction["getData"]>;
   chainIdentifier: string;
   submittedBytes: Uint8Array;
   transaction: GrpcTypes.ExecutedTransaction;
@@ -517,7 +525,7 @@ function createReviewTimeSimulationEvidenceFromTransaction(input: {
     }), changedObjectCount: objectChanges.length },
     balanceChanges: tx.balanceChanges.map((change) => ({ address: normalizeSimulationAddress(change.address!, "balance change address"),
       coinType: normalizeCoinType(change.coinType!), amount: change.amount })), objectChanges,
-    transaction: summarizeSimulatedTransaction(Transaction.from(returnedBytes).getData(), input.transactionMaterial.account, input.chainIdentifier)
+    transaction: summarizeSimulatedTransaction(input.verifiedData, input.transactionMaterial.account, input.chainIdentifier)
   });
 }
 

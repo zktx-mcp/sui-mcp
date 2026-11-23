@@ -1,8 +1,12 @@
+import { scanContinuitySchema } from "../../../core/activity/transactionActivityScanPolicy.js";
+import { MarketReadRequests, resumableReadInput, resumableReadOutput } from "./marketReadRequests.js";
+import { deepbookUsdcPriceHistoryQuantitySemanticsSchema, deepbookUsdcPriceHistoryResponseSummarySchema, deepbookUsdcPriceHistoryPairSchema, deepbookUsdcPriceHistorySourceSchema } from "./deepbookReadTools.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { buildAccountAssetTimeline } from "../../../core/activity/accountAssetTimeline.js";
 import {
-  attachDeepbookUsdcReferencesToTimeline
+  attachDeepbookUsdcReferencesToTimeline,
+  type AccountAssetTimelinePriceScope
 } from "../../../core/activity/accountAssetTimelineUsdcReferences.js";
 import {
   EXTERNAL_ACTIVITY_SCAN_MAX_LIMIT,
@@ -23,16 +27,15 @@ import type {
 } from "../../../core/activity/transactionActivityTypes.js";
 import { suiActivityAnalysisLimitations } from "../../../core/activity/transactionActivityAnalysis.js";
 import {
-  deepbookOfficialIndexerCandleSchema,
-  deepbookOfficialIndexerIntervalSchema
-} from "../../../core/read/deepbookOfficialIndexerSource.js";
+  deepbookTradeCandleSchema,
+  deepbookCandleIntervalSchema,
+  DEFAULT_DEEPBOOK_CANDLE_INTERVAL, marketIdentitySchema
+} from "../../../core/read/deepbookCandleSource.js";
 import {
-  DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE,
-  DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE,
-  DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE
+  DEEPBOOK_CANDLE_SOURCE_BASE,
+  DEEPBOOK_CANDLE_USDC_REFERENCE
 } from "../../../core/read/deepbookSourceOwners.js";
-import { DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS } from "../../../core/read/readServiceTypes.js";
+import { DEEPBOOK_USDC_CANDLE_AVAILABILITY, DEEPBOOK_USDC_PRICE_HISTORY_SOURCE_UNAVAILABLE_REASONS, DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS } from "../../../core/read/readServiceTypes.js";
 import { suiTransactionDigestSchema } from "../../../core/suiAddress.js";
 import { okToolResult } from "../../result.js";
 import { successOutputSchema } from "../../schemas.js";
@@ -55,7 +58,7 @@ import {
   liveSuiActivityUserAnswerUse,
   requestedAccountTransactionFactOutput,
   storedSuiActivityUserAnswerUse,
-  suiActivityQuantitySemantics,
+  suiActivityQuantitySemantics, SUI_ACTIVITY_QUANTITY_SEMANTICS,
   transactionDetailAvailability,
   transactionFactAuditOutput,
   transactionFactOutput
@@ -94,7 +97,7 @@ const accountAssetTimelineInputSchema = {
   account: z.string().min(1).optional(),
   start: utcTimestampInputSchema,
   end: utcTimestampInputSchema,
-  interval: deepbookOfficialIndexerIntervalSchema.optional()
+  interval: deepbookCandleIntervalSchema.optional()
 };
 
 const suiTransactionActivitySourceSchema = z.discriminatedUnion("transport", [
@@ -122,7 +125,7 @@ const accountBalanceChangeInferencePolicySchema = z.enum([
   "no_account_balance_changes_in_complete_details",
   "do_not_infer_from_transaction_context"
 ]);
-const transactionAccountRoleSchema = z.enum(["sender", "affected_only"]);
+const transactionAccountRoleSchema = z.enum(["sender", "affected_only", "unconfirmed"]);
 const transactionAccountEffectLimitationSchema = z.enum([
   "provider_balance_changes_truncated",
   "transaction_details_unavailable"
@@ -164,6 +167,7 @@ const requestedAccountActivitySchema = z.object({
   relationship: externalActivityRelationshipSchema,
   sentCount: z.number().int().nonnegative(),
   affectedOnlyCount: z.number().int().nonnegative(),
+  unconfirmedCount: z.number().int().nonnegative(),
   balanceChangeCompleteness: accountBalanceChangeCompletenessSchema,
   coinFlows: z.array(requestedAccountCoinFlowSchema)
 }).strict();
@@ -174,27 +178,8 @@ const suiActivityQuantitySemanticsSchema = z.object({
   displayConversionRequires: z.literal("verified_coin_metadata_decimals"),
   gasRawUnit: z.literal("MIST"),
   gasUnitSource: z.literal("@mysten/sui MIST_PER_SUI"),
-  gasDisplayFields: z.tuple([
-    z.literal("transaction.compact.gasCost.display"),
-    z.literal("requestedAccountTransactionFacts[].transactionContext.gasCost.display"),
-    z.literal("transactions[].transactionContext.gasCost.display"),
-    z.literal("analysis.gas.netGasCost.display")
-  ]),
-  rawAmountFields: z.tuple([
-    z.literal("transaction.details.balanceChanges[].amountRaw"),
-    z.literal("transaction.requestedAccountEffect.balanceChanges[].amountRaw"),
-    z.literal("transaction.requestedAccountEffect.coinFlows[].*Raw"),
-    z.literal("requestedAccount.coinFlows[].*Raw"),
-    z.literal("requestedAccountTransactionFacts[].accountBalanceChanges[].amountRaw"),
-    z.literal("requestedAccountTransactionFacts[].accountCoinFlows[].*Raw"),
-    z.literal("requestedAccountTransactionFacts[].requestedAccountEffect.balanceChanges[].amountRaw"),
-    z.literal("requestedAccountTransactionFacts[].requestedAccountEffect.coinFlows[].*Raw"),
-    z.literal("transactions[].requestedAccountEffect.balanceChanges[].amountRaw"),
-    z.literal("transactions[].requestedAccountEffect.coinFlows[].*Raw"),
-    z.literal("transactions[].details.balanceChanges[].amountRaw"),
-    z.literal("transactions[].compact.balanceChanges[].amountRaw"),
-    z.literal("analysis.coinFlows[].*Raw")
-  ]),
+  gasDisplayFields: z.array(z.enum(SUI_ACTIVITY_QUANTITY_SEMANTICS.gasDisplayFields)),
+  rawAmountFields: z.array(z.enum(SUI_ACTIVITY_QUANTITY_SEMANTICS.rawAmountFields)),
   notFor: z.tuple([
     z.literal("display_conversion_without_verified_decimals"),
     z.literal("fiat_usd_cash_out"),
@@ -265,6 +250,7 @@ const suiActivityAnalysisSchema = z.object({
       failure: z.number().int().nonnegative(),
       unknown: z.number().int().nonnegative()
     }).strict(),
+    relationshipObservationCounts: z.object({ affected: z.number().int().nonnegative(), sent: z.number().int().nonnegative() }).optional(),
     relationshipCounts: z.object({
       affected: z.number().int().nonnegative(),
       sent: z.number().int().nonnegative()
@@ -281,6 +267,7 @@ const suiActivityAnalysisSchema = z.object({
   protocols: z.array(z.object({
     protocolId: z.string(),
     displayName: z.string().optional(),
+    statusCounts: z.object({ success: z.number().int().nonnegative(), failure: z.number().int().nonnegative(), unknown: z.number().int().nonnegative() }).strict(),
     count: z.number().int().positive()
   }).strict()),
   coinFlows: z.array(z.object({
@@ -322,6 +309,8 @@ const externalActivityScanRecordSchema = z.object({
   account: z.string(),
   relationship: externalActivityRelationshipSchema,
   inputDigest: z.string().optional(),
+  continuity: scanContinuitySchema.optional(),
+  functionTarget: z.string().optional(), sourceUpperTimestamp: z.string().optional(), sourceUpperCheckpoint: z.string().optional(),
   fromCheckpoint: z.string().optional(),
   toCheckpoint: z.string().optional(),
   fromTimestamp: fetchedAtSchema.optional(),
@@ -334,6 +323,8 @@ const externalActivityScanRecordSchema = z.object({
   fetchedAt: fetchedAtSchema,
   storedCount: z.number().int().nonnegative(),
   skippedCount: z.number().int().nonnegative(),
+  skippedReasons: z.object({ outsideFilter: z.number().int().nonnegative(), unconfirmedRelation: z.number().int().nonnegative(),
+    repeatedDigest: z.number().int().nonnegative() }).optional(),
   hasMore: z.boolean(),
   windowComplete: z.boolean().nullable(),
   incompleteReason: externalActivityScanIncompleteReasonSchema.optional()
@@ -361,6 +352,7 @@ const externalActivityCoverageSchema = z.object({
   returnedScanCount: z.number().int().nonnegative(),
   scansTruncated: z.boolean(),
   storedTransactionCount: z.number().int().nonnegative(),
+  transactionsWithoutTime: z.number().int().nonnegative().optional(),
   storedTransactionRange: z.object({
     earliestTimestamp: fetchedAtSchema.optional(),
     latestTimestamp: fetchedAtSchema.optional(),
@@ -377,6 +369,7 @@ const externalActivityCoverageSchema = z.object({
 }).strict();
 
 const externalActivityTransactionRecordSchema = z.object({
+  conflictingMetadata: z.array(z.enum(["checkpoint","timestamp","knownSender"])).optional(),
   accountId: z.number().int().positive(),
   account: z.string(),
   digest: z.string(),
@@ -390,6 +383,7 @@ const externalActivityTransactionRecordSchema = z.object({
   firstFetchedAt: fetchedAtSchema,
   lastFetchedAt: fetchedAtSchema,
   lastScanIncompleteReason: externalActivityScanIncompleteReasonSchema.optional(),
+  lastObservationDetail: z.enum(["available","missing","size_limit"]).optional(), observationCount: z.number().int().positive().optional(),
   compact: externalActivityTransactionCompactFactsSchema.optional(),
   details: externalActivityTransactionDetailSchema.optional(),
   detailLookup: z.object({
@@ -457,116 +451,61 @@ const accountAssetTimelineNetFlowBarSchema = z.object({
   transactionCount: z.number().int().positive()
 }).strict();
 
+const timelinePriceScopeSchema = z.object({
+  coinType: z.string(),
+  range: z.object({ start: fetchedAtSchema, end: fetchedAtSchema }).strict()
+}).strict() satisfies z.ZodType<AccountAssetTimelinePriceScope>;
+
 const accountAssetTimelineUsdcReferenceSummarySchema = z.object({
   status: z.enum(["available", "partial", "unavailable", "no_timeline_bars"]),
-  quoteAsset: z.literal(DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE.quoteAsset),
-  priceConvention: z.literal(DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE.priceConvention),
-  usdcIsFiatUsd: z.literal(DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE.usdcIsFiatUsd),
-  usdPegGuaranteeAvailable: z.literal(DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE.usdPegGuaranteeAvailable),
-  source: z.literal(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind),
-  chainRecomputedBySuiMcp: z.literal(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.chainRecomputedBySuiMcp),
-  quantitySemantics: z.object({
-    kind: z.literal("deepbook_official_indexer_candles"),
-    allowedUse: z.literal(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.allowedUse),
-    source: z.literal(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.source),
-    quoteAsset: z.literal(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.quoteAsset),
-    priceConvention: z.literal(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.priceConvention),
-    usdcIsFiatUsd: z.literal(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.usdcIsFiatUsd),
-    usdPegGuaranteeAvailable: z.literal(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.usdPegGuaranteeAvailable),
-    chainRecomputedBySuiMcp: z.literal(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.chainRecomputedBySuiMcp),
-    liveQuoteAvailable: z.literal(false),
-    historicalMidPriceAvailable: z.literal(false),
-    globalMarketPriceAvailable: z.literal(false),
-    fiatUsdCashOutAvailable: z.literal(false),
-    routeRecommendationAvailable: z.literal(false),
-    transactionBuildingAvailable: z.literal(false),
-    signingReadinessAvailable: z.literal(false),
-    profitAndLossAvailable: z.literal(false),
-    costBasisAvailable: z.literal(false),
-    notFor: z.array(z.string())
-  }).strict(),
-  responseSummary: z.object({
-    questionKind: z.literal("deepbook_usdc_price_history"),
-    evidenceKind: z.literal("official_deepbook_indexer_candles"),
-    sourceStatement: z.string(),
-    usdcDisclaimer: z.literal(DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.usdcDisclaimer),
-    candleMeaning: z.literal("Each candle is returned by the DeepBookV3 official Indexer for the requested interval."),
-    excludedFromConclusion: z.array(z.enum(DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS))
-  }).strict(),
+  quoteAsset: z.literal(DEEPBOOK_CANDLE_USDC_REFERENCE.quoteAsset),
+  priceConvention: z.literal(DEEPBOOK_CANDLE_USDC_REFERENCE.priceConvention),
+  usdcIsFiatUsd: z.literal(DEEPBOOK_CANDLE_USDC_REFERENCE.usdcIsFiatUsd),
+  usdPegGuaranteeAvailable: z.literal(DEEPBOOK_CANDLE_USDC_REFERENCE.usdPegGuaranteeAvailable),
+  source: z.literal(DEEPBOOK_CANDLE_SOURCE_BASE.kind),
+  chainRecomputedBySuiMcp: z.literal(DEEPBOOK_CANDLE_SOURCE_BASE.chainRecomputedBySuiMcp),
+  quantitySemantics: deepbookUsdcPriceHistoryQuantitySemanticsSchema,
+  responseSummary: deepbookUsdcPriceHistoryResponseSummarySchema,
   unsupportedClaims: z.array(z.enum(DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS)),
   coinReferences: z.array(z.union([
-    z.object({
-      coinType: z.string(),
+    timelinePriceScopeSchema.extend({
       status: z.enum(["available", "partial"]),
-      pair: z.object({
-        poolName: z.string(),
-        poolId: z.string(),
-        baseAsset: z.object({
-          symbol: z.string(),
-          coinType: z.string(),
-          decimals: z.number().int().nonnegative()
-        }).strict(),
-        quoteAsset: z.object({
-          symbol: z.literal("USDC"),
-          coinType: z.string(),
-          decimals: z.number().int().nonnegative()
-        }).strict(),
-        priceConvention: z.literal(DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE.priceConvention)
-      }).strict(),
-      candleAvailability: z.enum(["available", "no_candles_in_range"]),
-      source: z.object({
-        kind: z.literal(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind),
-        baseUrl: z.string(),
-        sourceStatement: z.string(),
-        poolList: z.object({
-          url: z.string(),
-          fetchedAt: fetchedAtSchema
-        }).strict(),
-        candles: z.object({
-          url: z.string(),
-          fetchedAt: fetchedAtSchema,
-          poolName: z.string(),
-          interval: deepbookOfficialIndexerIntervalSchema,
-          startTimeMs: z.number().int().nonnegative(),
-          endTimeMs: z.number().int().nonnegative(),
-          limit: z.number().int().positive()
-        }).strict(),
-        chainRecomputedBySuiMcp: z.literal(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.chainRecomputedBySuiMcp)
-      }).strict(),
+      pair: deepbookUsdcPriceHistoryPairSchema,
+      candleAvailability: z.enum(DEEPBOOK_USDC_CANDLE_AVAILABILITY),
+      source: deepbookUsdcPriceHistorySourceSchema,
       barReferences: z.array(z.union([
         z.object({
           bucketStart: fetchedAtSchema,
           bucketEnd: fetchedAtSchema,
           status: z.literal("available"),
-          candle: deepbookOfficialIndexerCandleSchema
+          candle: deepbookTradeCandleSchema
         }).strict(),
         z.object({
           bucketStart: fetchedAtSchema,
           bucketEnd: fetchedAtSchema,
-          status: z.literal("missing_candle")
+          status: z.enum(["missing_candle", "source_unavailable"])
         }).strict()
       ]))
-    }).strict(),
-    z.object({
-      coinType: z.string(),
+    }),
+    timelinePriceScopeSchema.extend({
       status: z.literal("unsupported_asset"),
-      reason: z.enum(["selector_not_in_official_indexer", "selector_resolves_to_multiple_usdc_pools"]),
+      reason: z.enum(["market_not_in_mainnet_pool_catalog", "selector_resolves_to_multiple_usdc_pools"]),
       matchingPoolNames: z.array(z.string()),
+      candidates: z.array(marketIdentitySchema).optional(),
       availablePoolNames: z.array(z.string())
-    }).strict(),
-    z.object({
-      coinType: z.string(),
+    }),
+    timelinePriceScopeSchema.extend({
       status: z.literal("unsupported_range"),
       reason: z.literal("requested_range_exceeds_max_bars"),
       requested: z.unknown()
-    }).strict(),
-    z.object({
-      coinType: z.string(),
+    }),
+    timelinePriceScopeSchema.extend({
       status: z.literal("source_unavailable"),
-      reason: z.enum(["official_indexer_not_configured", "pool_list_unavailable", "candle_fetch_failed", "official_indexer_invalid_payload"]),
+      candidates: z.array(marketIdentitySchema).optional(),
+      reason: z.enum(DEEPBOOK_USDC_PRICE_HISTORY_SOURCE_UNAVAILABLE_REASONS),
       pair: z.unknown().optional(),
       source: z.unknown().optional()
-    }).strict()
+    })
   ]))
 }).strict();
 
@@ -603,7 +542,7 @@ const liveFunctionActivityScanOutputBase = {
   relationship: z.literal("sent")
 };
 
-export function registerTransactionActivityTools(server: McpServer, deps: McpServerDeps): void {
+export function registerTransactionActivityTools(server: McpServer, deps: McpServerDeps, reads: MarketReadRequests): void {
   server.registerTool(
     TOOL_NAMES.readInspectSuiTransaction,
     {
@@ -628,7 +567,7 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
           scan: externalActivityScanRecordSchema.optional()
         })
       }),
-      annotations: { readOnlyHint: false, openWorldHint: false }
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
     },
     async ({ digest, account }) => {
       try {
@@ -641,7 +580,7 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
             hasRequestedAccountEffect: transaction.requestedAccountEffect !== undefined,
             hasDetails: transaction.details !== undefined
           }),
-          quantitySemantics: suiActivityQuantitySemantics(),
+          quantitySemantics: suiActivityQuantitySemantics("inspect"),
           transaction
         });
       } catch (error) {
@@ -660,7 +599,7 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
         ...liveActivityScanOutputBase,
         transactions: z.array(suiTransactionAuditFactSchema),
       }),
-      annotations: { readOnlyHint: false, openWorldHint: false }
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
     },
     async (input) => {
       try {
@@ -682,7 +621,7 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
         ...liveFunctionActivityScanOutputBase,
         transactions: z.array(suiTransactionAuditFactSchema),
       }),
-      annotations: { readOnlyHint: false, openWorldHint: false }
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
     },
     async (input) => {
       try {
@@ -720,14 +659,18 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
             failure: z.number().int().nonnegative(),
             unknown: z.number().int().nonnegative()
           }),
-          relationshipCounts: z.object({
+          relationshipObservationCounts: z.object({ affected: z.number().int().nonnegative(), sent: z.number().int().nonnegative() }).optional(),
+    relationshipCounts: z.object({
             affected: z.number().int().nonnegative(),
             sent: z.number().int().nonnegative()
           }),
           earliestTimestamp: fetchedAtSchema.optional(),
           latestTimestamp: fetchedAtSchema.optional()
         }),
-        analysis: suiActivityAnalysisSchema,
+        analysis: suiActivityAnalysisSchema.omit({ coinFlows: true }),
+        accountCoinFlows: z.object({ scope: z.literal("complete_stored_balance_changes_in_returned_transactions"),
+          completeTransactions: z.number().int().nonnegative(), incompleteTransactions: z.number().int().nonnegative(),
+          rowsTruncated: z.boolean(), rows: suiActivityAnalysisSchema.shape.coinFlows }),
         transactionDetailAvailability: transactionDetailAvailabilitySchema,
         transactions: z.array(externalActivityTransactionRecordSchema)
       }),
@@ -744,8 +687,8 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
         const detailAvailability = transactionDetailAvailability(summary.transactions);
         return okToolResult({
           ...summary,
-          userAnswerUse: storedSuiActivityUserAnswerUse(detailAvailability),
-          quantitySemantics: suiActivityQuantitySemantics(),
+          userAnswerUse: storedSuiActivityUserAnswerUse(detailAvailability, summary.accountCoinFlows),
+          quantitySemantics: suiActivityQuantitySemantics("stored"),
           source: {
             transport: "local_db",
             method: "stored_normalized_facts"
@@ -763,9 +706,9 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
     TOOL_NAMES.readGetAccountAssetTimeline,
     {
       title: "Get account asset timeline",
-      description: "Return stored local account asset net-flow timeline evidence. Not complete wallet history, P&L, or held balances.",
-      inputSchema: accountAssetTimelineInputSchema,
-      outputSchema: successOutputSchema({
+      description: "Return stored local account asset net-flow timeline evidence or a continuation. Not complete wallet history, P&L, or held balances.",
+      inputSchema: resumableReadInput(accountAssetTimelineInputSchema),
+      outputSchema: resumableReadOutput(successOutputSchema({
         status: z.enum(["ok", "partial_coverage", "scan_needed", "account_not_known"]),
         fetchedAt: fetchedAtSchema,
         account: z.string(),
@@ -774,9 +717,9 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
           to: fetchedAtSchema
         }).strict(),
       bucket: z.object({
-          interval: deepbookOfficialIndexerIntervalSchema,
+          interval: deepbookCandleIntervalSchema,
           durationMs: z.number().int().positive(),
-          alignment: z.literal("utc_epoch")
+          alignment: z.enum(["utc_epoch", "utc_monday"])
         }).strict(),
         balanceStatus: z.literal("unavailable_no_balance_anchor"),
         coverage: externalActivityCoverageSchema,
@@ -791,6 +734,9 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
         analyzedTransactionCount: z.number().int().nonnegative(),
         skippedTransactionCount: z.number().int().nonnegative(),
         netFlowBars: z.array(accountAssetTimelineNetFlowBarSchema),
+        completeFlowBars: z.array(accountAssetTimelineNetFlowBarSchema),
+        incompleteBuckets: z.array(z.object({ start: fetchedAtSchema, transactionCount: z.number().int().positive() })),
+        completeTransactionCount: z.number().int().nonnegative(), incompleteTransactionCount: z.number().int().nonnegative(),
         balanceBars: z.tuple([]),
         quantitySemantics: accountAssetTimelineQuantitySemanticsSchema,
         usdcReferences: accountAssetTimelineUsdcReferenceSummarySchema,
@@ -803,72 +749,70 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
           fromTimestamp: fetchedAtSchema,
           toTimestamp: fetchedAtSchema
         }).strict().optional()
-      }),
-      annotations: { readOnlyHint: true, openWorldHint: false }
+      })),
+      annotations: { readOnlyHint: true, openWorldHint: true }
     },
-    async ({ account, start, end, interval }) => {
+    async (input) => {
+      const tool = TOOL_NAMES.readGetAccountAssetTimeline;
       try {
-        const coverage = await deps.activityStore.getExternalActivityCoverage({
-          account,
-          from: start,
-          to: end
-        });
-        const activityTransactions = await deps.activityStore.listExternalActivityEffectTransactions({
-          account: coverage.dataScope.account,
-          from: start,
-          to: end,
-          limit: REVIEW_ACTIVITY_LIST_MAX_LIMIT
-        });
-        const timeline = buildAccountAssetTimeline({
-          account: coverage.dataScope.account,
-          from: start,
-          to: end,
-          interval,
-          coverage,
-          transactions: activityTransactions.transactions,
-          transactionsTruncated: activityTransactions.truncated
-        });
-        const withUsdcReferences = await attachDeepbookUsdcReferencesToTimeline({
-          timeline,
-          getPriceHistory: (priceInput) => deps.readService.getDeepbookUsdcPriceHistory(priceInput)
-        });
-        const detailAvailability = transactionDetailAvailability(activityTransactions.transactions);
-        const scanNeeded = withUsdcReferences.status === "scan_needed";
-        const accountKnown = withUsdcReferences.status !== "account_not_known";
-        return okToolResult({
-          ...withUsdcReferences,
-          fetchedAt: new Date().toISOString(),
-          source: {
-            transport: "local_db",
-            method: "stored_normalized_facts"
-          },
-          sourceTransactions: {
-            storedTransactionCount: activityTransactions.transactionCount,
-            returnedTransactionCount: activityTransactions.transactions.length,
-            truncated: activityTransactions.truncated,
-            detailAvailability
-          },
-          quantitySemantics: accountAssetTimelineQuantitySemantics(),
-          userAnswerUse: accountAssetTimelineUserAnswerUse({
-            hasNetFlowBars: withUsdcReferences.netFlowBars.length > 0,
-            hasUsdcReferenceCandles: withUsdcReferences.usdcReferences.coinReferences.some((reference) =>
-              reference.status === "available" || reference.status === "partial"
-            ),
-            scanNeeded,
-            accountKnown
-          }),
-          ...(scanNeeded && accountKnown
-            ? {
-                scanNeeded: {
-                  tool: TOOL_NAMES.readScanSuiAccountActivity,
-                  account: coverage.dataScope.account,
-                  relationship: "affected",
-                  fromTimestamp: start,
-                  toTimestamp: end
+        if ("requestId" in input) return await reads.resume(tool, input.requestId);
+        const {start, end, interval} = input;
+        return await deps.activityStore.withActivityWindow({
+          account: input.account, from: start, to: end, limit: REVIEW_ACTIVITY_LIST_MAX_LIMIT
+        }, binding => reads.readSnapshot(tool,
+          JSON.stringify([binding.account, input.account !== undefined, start, end, interval ?? DEFAULT_DEEPBOOK_CANDLE_INTERVAL]),
+          binding, async ({ coverage, activityTransactions }, signal) => {
+          const timeline = buildAccountAssetTimeline({
+            account: coverage.dataScope.account,
+            from: start,
+            to: end,
+            interval,
+            coverage,
+            transactions: activityTransactions.transactions,
+            transactionsTruncated: activityTransactions.truncated
+          });
+          const withUsdcReferences = await attachDeepbookUsdcReferencesToTimeline({
+            timeline,
+            signal,
+            getPriceHistory: deps.readService.priceHistoryReaderForRequest(signal, [...new Set(timeline.netFlowBars.map(bar => bar.coinType))])
+          });
+          deps.assertCurrent?.();
+          const detailAvailability = transactionDetailAvailability(activityTransactions.transactions);
+          const scanNeeded = withUsdcReferences.status === "scan_needed";
+          const accountKnown = withUsdcReferences.status !== "account_not_known";
+          return okToolResult({
+            ...withUsdcReferences,
+            fetchedAt: new Date().toISOString(),
+            source: {
+              transport: "local_db",
+              method: "stored_normalized_facts"
+            },
+            sourceTransactions: {
+              storedTransactionCount: activityTransactions.transactionCount,
+              returnedTransactionCount: activityTransactions.transactions.length,
+              truncated: activityTransactions.truncated,
+              detailAvailability
+            },
+            quantitySemantics: accountAssetTimelineQuantitySemantics(),
+            userAnswerUse: accountAssetTimelineUserAnswerUse({
+              hasNetFlowBars: withUsdcReferences.netFlowBars.length > 0,
+              hasUsdcReferenceCandles: ["available", "partial"].includes(withUsdcReferences.usdcReferences.status),
+              scanNeeded,
+              accountKnown
+            }),
+            ...(scanNeeded && accountKnown
+              ? {
+                  scanNeeded: {
+                    tool: TOOL_NAMES.readScanSuiAccountActivity,
+                    account: coverage.dataScope.account,
+                    relationship: "affected",
+                    fromTimestamp: start,
+                    toTimestamp: end
+                  }
                 }
-              }
-            : {})
-        });
+              : {})
+          });
+        }));
       } catch (error) {
         return transactionActivityToolError(error, deps.logger);
       }
@@ -886,7 +830,7 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
         analysis: suiActivityAnalysisSchema,
         transactions: z.array(suiTransactionAuditFactSchema),
       }),
-      annotations: { readOnlyHint: false, openWorldHint: false }
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
     },
     async (input) => {
       try {
@@ -909,7 +853,7 @@ export function registerTransactionActivityTools(server: McpServer, deps: McpSer
         analysis: suiActivityAnalysisSchema,
         transactions: z.array(suiTransactionAuditFactSchema),
       }),
-      annotations: { readOnlyHint: false, openWorldHint: false }
+      annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false }
     },
     async (input) => {
       try {
@@ -948,7 +892,7 @@ function liveActivityScanToolOutput<TTransactionOutput>(
     requestedAccount: result.requestedAccount,
     requestedAccountTransactionFacts: requestedAccountTransactionFacts(result.transactions),
     transactionDetailAvailability: detailAvailability,
-    quantitySemantics: suiActivityQuantitySemantics(),
+    quantitySemantics: suiActivityQuantitySemantics("analysis" in result ? "analysis" : "scan"),
     source: result.source,
     ...("analysis" in result ? { analysis: result.analysis } : {}),
     transactions: result.transactions.map(transactionOutput),

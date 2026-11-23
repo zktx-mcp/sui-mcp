@@ -11,10 +11,10 @@ import { DEEPBOOK_PINNED_SDK_METADATA_SOURCE } from "../src/core/read/deepbookSo
 import { SuiReadService, type DeepBookCoinRegistry, type DeepBookReadClient } from "../src/core/read/readService.js";
 import { InMemorySessionStore } from "../src/core/session/sessionStore.js";
 import { createMcpServer } from "../src/mcp/server.js";
-import { EVIDENCE_POLICY, IMPLEMENTED_TOOLS, PACKAGE_NAME, SERVER_VERSION } from "../src/mcp/serverInfo.js";
+import { EVIDENCE_POLICY, PACKAGE_NAME, SERVER_VERSION } from "../src/mcp/serverInfo.js";
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
 import { DEFAULT_SUI_GRAPHQL_URL, DEFAULT_SUI_GRPC_URL } from "../src/runtime/config.js";
-import { InMemoryActivityStore } from "./fixtures/inMemoryActivityStore.js";
+import { TestSqliteActivityStore } from "./fixtures/sqliteActivity.js";
 import {
   InMemoryLocalSettingsService,
   InMemoryPreferencesRepository
@@ -62,7 +62,7 @@ async function connectScenarioClient(balanceRawAmount: string) {
 
 async function connectReplayClient(readService: SuiReadService) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const activityStore = new InMemoryActivityStore();
+  const activityStore = new TestSqliteActivityStore();
   const sessions = new InMemorySessionStore({
     activityStore,
     logger,
@@ -338,7 +338,7 @@ describe("intent evidence scenario replay", () => {
             packageName: PACKAGE_NAME,
             version: SERVER_VERSION,
             network: "mainnet",
-            implementedToolsCount: IMPLEMENTED_TOOLS.length,
+            implementedToolsCount: Object.values(TOOL_NAMES).length,
             evidencePolicy: {
               version: EVIDENCE_POLICY.version,
               releaseGate: "intent_evidence_v1",

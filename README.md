@@ -33,14 +33,14 @@ Install once with npm, then register the command in each AI app. You need [Node.
 
 Already used an earlier release? Follow [Updating an Existing Sui MCP Installation](docs/MCP_SETUP.md#updating-an-existing-sui-mcp-installation) first. New installations can continue below.
 
-This guide describes **0.8.2**. First confirm it is published, then install that exact version:
+This guide describes **0.9.0**. First confirm it is published, then install that exact version:
 
 ```sh
-npm view @zktx.io/sui-mcp@0.8.2 version
-npm install -g @zktx.io/sui-mcp@0.8.2
+npm view @zktx.io/sui-mcp@0.9.0 version
+npm install -g @zktx.io/sui-mcp@0.9.0
 ```
 
-The first command must return `0.8.2`. If it is unavailable, follow the [version availability guidance](docs/MCP_SETUP.md#npm-command-returns-404); do not drop the version and assume an older release matches this guide. Contributors can use the optional [developer checkout](docs/MCP_SETUP.md#developer-checkout-setup).
+The first command must return `0.9.0`. If it is unavailable, follow the [version availability guidance](docs/MCP_SETUP.md#npm-command-returns-404); do not drop the version and assume an older release matches this guide. Contributors can use the optional [developer checkout](docs/MCP_SETUP.md#developer-checkout-setup).
 
 Register the installed command in your app. This is the complete default configuration for Claude Desktop; Cursor's example is in the setup guide:
 
@@ -68,7 +68,7 @@ Keep existing settings and other servers when adding these entries. Choose your 
 - [Claude Code](docs/MCP_SETUP.md#claude-code)
 - [Cursor](docs/MCP_SETUP.md#cursor)
 
-After the app loads the registration, ask: **"Use Sui MCP to show its package name, server name, version and network."** Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.8.2` and `mainnet`. Then ask: **"Use Sui MCP to list the available DeepBook pools on Sui mainnet."** This first read needs no wallet or transaction. The [first-use tutorial](docs/MCP_SETUP.md#first-use-flow) explains expected results, optional cards and wallet connection. If the app cannot find `sui-mcp`, use [Command not found](docs/MCP_SETUP.md#command-not-found).
+After the app loads the registration, ask: **"Use Sui MCP to show its package name, server name, version and network."** Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.9.0` and `mainnet`. Then ask: **"Use Sui MCP to list the available DeepBook pools on Sui mainnet."** This first read needs no wallet or transaction. The [first-use tutorial](docs/MCP_SETUP.md#first-use-flow) explains expected results, optional cards and wallet connection. If the app cannot find `sui-mcp`, use [Command not found](docs/MCP_SETUP.md#command-not-found).
 
 ### Using several apps at once
 
@@ -84,8 +84,8 @@ your client registration.
 
 Use the full scoped package name: the unscoped `sui-mcp` package is a different
 project. Use `sui-mcp` as the default MCP registration name. A client-defined registration
-alias is a local label, not server identity or authorization. This is a
-pre-release: local data formats can change, and migration is not provided.
+alias is a local label, not server identity or authorization. Local data formats can change between releases.
+Preserve your existing data directory when upgrading from 0.8.2.
 Compatible updates preserve the current data directory. Incompatible databases
 and backups are rejected without conversion or automatic deletion. If startup
 reports a database format mismatch, follow the [recovery instructions](docs/MCP_SETUP.md#database-format-mismatch).
@@ -183,7 +183,7 @@ executed graph, observed asset changes and net network fee. Details supplements
 the same facts. Missing graph or receipt data is marked unavailable.
 
 **DeepBook USDC chart.** `ui_open_chart` opens an internal MCP Apps card with
-official DeepBookV3 Indexer candles and volume for one selected USDC pool.
+pool-bound DeepBook candles and volume for one selected USDC pool.
 The saved result shows the selected pair, interval, UTC period and source time. Limited and empty results are identified.
 
 ## Current Limits

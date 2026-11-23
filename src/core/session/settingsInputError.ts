@@ -12,6 +12,9 @@ export type SettingsInputFailure = {
 // Only authenticated Settings validation reaches this mapping. Return fixed
 // explanations and recovery categories, never imported values or exceptions.
 export function settingsInputError(error: unknown, kind?: SettingsDraft["kind"]): SettingsInputFailure | undefined {
+  if (kind === "download_backup" && error instanceof LocalDataError) return {
+    restoreReason: "check_failed", message: "Local records could not be read as a backup. Check the local data source before trying the download again."
+  };
   if (!(error instanceof SuiEndpointError) &&
       !(error instanceof LocalSettingsError && error.kind === "input_invalid") &&
       !(error instanceof LocalDataError && error.kind === "input_invalid")) return undefined;
@@ -19,9 +22,11 @@ export function settingsInputError(error: unknown, kind?: SettingsDraft["kind"])
   const failure = (restoreReason: SettingsInputFailure["restoreReason"], message: string): SettingsInputFailure => ({ restoreReason, message });
   if (kind === "import_local_data") {
     if (reason === "invalid_url" || reason === "chain_identifier_mismatch") return failure("invalid_backup", "A network address saved in this backup could not be verified for Sui mainnet. Choose another Sui MCP backup with valid mainnet network settings.");
-    if (reason === "endpoint_timeout" || reason === "endpoint_unreachable") return failure("check_failed", "Sui MCP could not reach a network address saved in this backup. Check that the service is reachable, then check this backup again.");
+    if (reason === "endpoint_timeout" || reason === "endpoint_unreachable") return failure("check_failed", "Sui MCP could not verify a network service saved in this backup. When the service is available, check the same backup again.");
   }
   switch (reason) {
+    case "endpoint_access_denied": return failure("check_failed", "Access to the selected network endpoint was denied. Correct its access settings or choose another address.");
+    case "endpoint_invalid_response": return failure("invalid_backup", "The selected network endpoint did not provide the required Sui service.");
     case "invalid_url": return failure("invalid_backup", "The network address is not a valid URL. Correct it and select it again.");
     case "chain_identifier_mismatch": return failure("invalid_backup", "The network check did not confirm Sui mainnet at this address. Select a Sui mainnet network address.");
     case "endpoint_timeout": return failure("check_failed", "The service at this network address did not respond in time. Check that it is reachable, then review the change again.");

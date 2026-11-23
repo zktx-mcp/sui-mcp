@@ -38,28 +38,7 @@ export function clonePrivateReviewArtifacts(
       ? { transactionMaterialDigest: { ...artifacts.transactionMaterialDigest } }
       : {}),
     ...(artifacts.swapQuotePolicy
-      ? {
-          swapQuotePolicy: {
-            ...artifacts.swapQuotePolicy,
-            quoteSource: { ...artifacts.swapQuotePolicy.quoteSource },
-            sourceAmount: {
-              ...artifacts.swapQuotePolicy.sourceAmount,
-              asset: { ...artifacts.swapQuotePolicy.sourceAmount.asset }
-            },
-            expectedOutput: {
-              ...artifacts.swapQuotePolicy.expectedOutput,
-              asset: { ...artifacts.swapQuotePolicy.expectedOutput.asset }
-            },
-            minimumOutput: {
-              ...artifacts.swapQuotePolicy.minimumOutput,
-              asset: { ...artifacts.swapQuotePolicy.minimumOutput.asset }
-            },
-            protocolFee: {
-              ...artifacts.swapQuotePolicy.protocolFee,
-              asset: { ...artifacts.swapQuotePolicy.protocolFee.asset }
-            }
-          }
-        }
+      ? { swapQuotePolicy: structuredClone(artifacts.swapQuotePolicy) }
       : {}),
     ...(artifacts.transactionObjectOwnership
       ? {

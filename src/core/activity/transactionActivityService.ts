@@ -11,6 +11,7 @@ import {
   type ExternalActivityTransactionInput
 } from "./activityStore.js";
 import {
+  compactExternalActivityTransactionDetails,
   externalActivityTransactionBalanceOwners,
   externalActivityTransactionTouchesAccount,
   sanitizeExternalActivityTransactionDetailsForKnownAccount
@@ -31,6 +32,8 @@ import {
   normalizeCheckpointBound,
   normalizeTimestampBound,
   transactionMatchesKnownStorageAccount,
+  scanPageFollows,
+  validScanPageBounds,
   windowCompletion
 } from "./transactionActivityScanPolicy.js";
 import { parseSuiFunctionTarget } from "./suiFunctionTarget.js";
@@ -106,6 +109,10 @@ type ActivityScanRunResult<
   relationship: TRelationship;
 } & TExtra;
 
+function withCompact<T extends { status: SuiTransactionActivityFact["status"]; details?: SuiTransactionActivityFact["details"] }>(transaction: T) {
+  return transaction.details ? { ...transaction, compact: compactExternalActivityTransactionDetails(transaction.details, transaction.status) } : transaction;
+}
+
 export class TransactionActivityService {
   private readonly now: () => Date;
   private readonly scanId: () => string;
@@ -120,7 +127,8 @@ export class TransactionActivityService {
     const explicitAccount = input.account === undefined ? undefined : parseAccount(input.account);
     const source = await this.verifySource();
     const fetchedAt = this.now().toISOString();
-    const transaction = await this.mapSourceCall(() => this.options.source.getTransaction(digest));
+    const received = await this.mapSourceCall(() => this.options.source.getTransaction(digest));
+    const transaction = received && withCompact(received);
     if (!transaction) {
       return {
         status: "ok",
@@ -131,6 +139,11 @@ export class TransactionActivityService {
       };
     }
 
+    if (transaction.digest !== digest) {
+      throw new TransactionActivityError("internal_error", "The activity provider returned a different transaction digest.", {
+        reason: "transaction_digest_mismatch"
+      });
+    }
     const transactionForExplicitAccount = explicitAccount === undefined
       ? transaction
       : {
@@ -242,15 +255,29 @@ export class TransactionActivityService {
     const source = await this.verifySource();
     const fetchedAt = this.now().toISOString();
 
+    const functionTarget = input.scanKind === "function_scan" ? parseSuiFunctionTarget((input.request as ScanSuiFunctionActivityInput).function).target : undefined;
+    const localCursorPrefix = "scan:";
+    const cursor = input.request.cursor;
+    const predecessorId = cursor?.startsWith(localCursorPrefix) ? cursor.slice(localCursorPrefix.length) : undefined;
+    const predecessor = knownAccount && predecessorId ? this.options.activityStore.findScanPredecessor?.({
+      accountId: knownAccount.id, scanId: predecessorId, kind: input.scanKind, relationship: input.relationship,
+      ...(functionTarget ? { functionTarget } : {}), fromCheckpoint, toCheckpoint, fromTimestamp, toTimestamp,
+      chainIdentifier: source.chainIdentifier, endpointHost: source.endpointHost
+    }) : undefined;
+    if (predecessorId !== undefined && !predecessor?.responseCursor) {
+      throw new TransactionActivityError("input_invalid", "Activity continuation does not belong to this scan.", { reason: "cursor_invalid" });
+    }
+    const requestCursor = predecessor?.responseCursor ?? cursor;
     let page: SuiTransactionActivityPage;
     try {
       page = await input.sourceCall({
         account: accountScope.account,
         relationship: input.relationship,
         limit,
-        cursor: input.request.cursor,
+        cursor: requestCursor,
         fromCheckpoint,
-        toCheckpoint
+        toCheckpoint: predecessor?.sourceUpperCheckpoint && (toCheckpoint === undefined ||
+          BigInt(predecessor.sourceUpperCheckpoint) < BigInt(toCheckpoint)) ? predecessor.sourceUpperCheckpoint : toCheckpoint
       });
     } catch (error) {
       if (error instanceof TransactionActivitySourceError && error.reason === "cursor_invalid") {
@@ -261,23 +288,33 @@ export class TransactionActivityService {
       throw this.sourceError(error);
     }
 
-    const orderingVerified = isMonotonicActivityOrder(page.transactions);
-    const orderedTransactions = [...page.transactions].sort(compareActivityFactsDescending);
-    const orderedPage = { ...page, transactions: orderedTransactions };
-    const windowComplete = windowCompletion(
-      {
-        account: input.request.account,
-        relationship: input.relationship,
-        limit: input.request.limit,
-        cursor: input.request.cursor,
-        fromCheckpoint,
-        toCheckpoint,
-        fromTimestamp,
-        toTimestamp
-      },
-      orderedPage,
-      orderingVerified
-    );
+    const orderingVerified = page.orderingVerified ?? isMonotonicActivityOrder(page.transactions);
+    const orderedTransactions = page.transactions.map(withCompact).sort(compareActivityFactsDescending);
+    const scanId = this.scanId();
+    const range = page.sourceRange;
+    const upper = predecessor?.sourceUpperCheckpoint ?? range?.last.checkpoint;
+    const upperTime = predecessor?.sourceUpperTimestamp ?? range?.last.timestamp;
+    const previous = predecessor?.continuity;
+    const previousLower = previous?.sourceLower;
+    const lower = range && previousLower && BigInt(previousLower.checkpoint) > BigInt(range.first.checkpoint)
+      ? previousLower : range?.first;
+    const newest = orderedTransactions[0], oldest = orderedTransactions.at(-1);
+    const pageProof = {
+      rootScanId: previous?.rootScanId ?? scanId,
+      ...(predecessor ? { predecessorScanId: predecessor.scanId } : {}),
+      ...(lower ? { sourceLower: lower } : {}),
+      ...(newest?.checkpoint && newest.timestamp ? { newestCheckpoint: newest.checkpoint, newestTimestamp: newest.timestamp } : {}),
+      ...(oldest?.checkpoint && oldest.timestamp ? { oldestCheckpoint: oldest.checkpoint, oldestTimestamp: oldest.timestamp } : {})
+    };
+    const contiguous = orderingVerified && range && lower && upper && upperTime &&
+      BigInt(range.last.checkpoint) >= BigInt(upper) && range.last.timestamp >= upperTime &&
+      validScanPageBounds(pageProof, upper, upperTime) &&
+      orderedTransactions.every(tx => tx.checkpoint !== undefined && tx.timestamp !== undefined &&
+        BigInt(tx.checkpoint) <= BigInt(upper) && tx.timestamp <= upperTime) &&
+      (!cursor || (previous?.sourceLower && scanPageFollows(previous, pageProof)));
+    const continuity = contiguous ? pageProof : undefined;
+    const windowComplete = windowCompletion({ scanId, requestCursor, continuity, hasMore: page.hasMore,
+      fromCheckpoint, toCheckpoint, fromTimestamp, toTimestamp, sourceUpperCheckpoint: upper, sourceUpperTimestamp: upperTime });
     const filteredTransactions = filterTransactionsForRequestedWindow(
       orderedTransactions,
       {
@@ -289,9 +326,10 @@ export class TransactionActivityService {
         toTimestamp
       }
     );
-    const accountScopedTransactions = attachRequestedAccountEffects(filteredTransactions, accountScope.account);
-    const cursor = page.hasMore ? page.cursor : undefined;
-    const incompleteReason = incompleteReasonForScan({ orderingVerified, windowComplete });
+    const accountScopedTransactions = attachRequestedAccountEffects(filteredTransactions, accountScope.account, input.scanKind === "account_scan" && input.relationship === "affected");
+    const responseCursor = page.hasMore ? page.cursor : undefined;
+    const continuationCursor = responseCursor && knownAccount && continuity ? localCursorPrefix + scanId : responseCursor;
+    const incompleteReason = incompleteReasonForScan({ orderingVerified, windowComplete, hasMore: page.hasMore });
     const resultBase = {
       status: "ok" as const,
       fetchedAt,
@@ -308,7 +346,7 @@ export class TransactionActivityService {
       source: { ...source, method: "Query.transactions" as const },
       transactions: accountScopedTransactions,
       hasMore: page.hasMore,
-      ...(cursor === undefined ? {} : { continuationCursor: cursor }),
+      ...(continuationCursor === undefined ? {} : { continuationCursor }),
       windowComplete,
       orderingVerified,
       ...(incompleteReason === undefined ? {} : { incompleteReason })
@@ -324,9 +362,12 @@ export class TransactionActivityService {
     const storageTransactions = accountScopedTransactions.filter((transaction) =>
       transactionMatchesKnownStorageAccount(transaction, knownAccount.address, input.relationship)
     );
+    const senders = new Map<string, Promise<AccountRecord | undefined>>();
     const scan = await this.options.activityStore.recordExternalActivityScan({
-      scanId: this.scanId(),
+      scanId,
       kind: input.scanKind,
+      sourceUpperTimestamp: upperTime, sourceUpperCheckpoint: upper, continuity,
+      functionTarget,
       account: knownAccount.address,
       relationship: input.relationship,
       fromCheckpoint,
@@ -334,20 +375,21 @@ export class TransactionActivityService {
       fromTimestamp,
       toTimestamp,
       limit,
-      requestCursor: input.request.cursor,
-      responseCursor: cursor,
+      requestCursor,
+      responseCursor,
       endpointHost: source.endpointHost,
       chainIdentifier: source.chainIdentifier,
       fetchedAt,
       hasMore: page.hasMore,
       windowComplete,
       incompleteReason,
-      skippedCount: page.transactions.length - storageTransactions.length,
+      outsideFilterCount: page.transactions.length - filteredTransactions.length,
+      unconfirmedRelationCount: filteredTransactions.length - storageTransactions.length,
       transactions: await Promise.all(
         storageTransactions.map((transaction) => this.transactionInputForKnownAccount(
           transaction,
           input.relationship,
-          knownAccount.address
+          knownAccount.address, senders
         ))
       )
     });
@@ -362,14 +404,16 @@ export class TransactionActivityService {
       ...filter,
       limit: filter.limit ?? REVIEW_ACTIVITY_LIST_DEFAULT_LIMIT
     });
-    return {
-      ...summary,
-      status: "ok" as const,
-      analysis: buildSuiActivityAnalysis(summary.transactions, {
-        truncated: summary.truncated,
-        summary: summary.summary
-      })
-    };
+    const transactions = summary.transactions.map(withCompact);
+    const { coinFlows, ...analysis } = buildSuiActivityAnalysis(transactions, {
+      truncated: summary.truncated, summary: summary.summary, storedAccountFlows: true
+    });
+    const completeTransactions = transactions.filter((tx) => tx.details && !tx.details.truncation.balanceChanges).length;
+    return { ...summary, transactions, status: "ok", analysis, accountCoinFlows: {
+      scope: "complete_stored_balance_changes_in_returned_transactions", completeTransactions,
+      incompleteTransactions: transactions.length - completeTransactions,
+      rowsTruncated: analysis.limitations.includes("coin_flows_truncated"), rows: coinFlows
+    } };
   }
 
   async summarizeSuiActivityScan(input: ScanSuiAccountActivityInput): Promise<SummarizeSuiActivityScanResult> {
@@ -470,9 +514,14 @@ export class TransactionActivityService {
   private async transactionInputForKnownAccount(
     transaction: SuiTransactionActivityFact,
     relationship: ExternalActivityRelationship,
-    storageAccount: string
+    storageAccount: string, senders?: Map<string, Promise<AccountRecord | undefined>>
   ): Promise<ExternalActivityTransactionInput> {
-    const sender = transaction.sender ? await this.options.activityStore.getKnownAccount(transaction.sender) : undefined;
+    let sender: AccountRecord | undefined;
+    if (transaction.sender) {
+      const lookup = senders?.get(transaction.sender) ?? this.options.activityStore.getKnownAccount(transaction.sender);
+      senders?.set(transaction.sender, lookup);
+      sender = await lookup;
+    }
     return {
       digest: transaction.digest,
       relationship,

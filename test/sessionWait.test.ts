@@ -44,6 +44,19 @@ describe("bounded stored-state waits", () => {
     await expect(wait).resolves.toMatchObject({ waitOutcome: "status_reached", status: "request_failed", request: { attemptId: "attempt" } });
     expect(vi.getTimerCount()).toBe(0);
   });
+  it("keeps the original attempt after a later revision becomes current", async () => {
+    let current = request, original = request;
+    const ids: Array<string | undefined> = [];
+    const result = await waitForExecutionResult(async (_id, _now, fixed) => {
+      ids.push(fixed);
+      return stateReader(async () => review, () => fixed === request.attemptId ? original : current)();
+    }, review.id, { sleep: async () => {
+      original = { ...request, requestStatus: "stopped" };
+      current = { ...request, attemptId: "replacement", reviewRevision: 2, requestStatus: "request_failed" };
+    } });
+    expect(ids).toEqual([undefined, request.attemptId]);
+    expect(result.request).toEqual(original);
+  });
   it("resolves concurrent observers from the same stored request", async () => {
     vi.useFakeTimers(); let current = request;
     const options = { timeoutMs: 4000 };

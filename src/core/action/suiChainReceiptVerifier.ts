@@ -1,16 +1,21 @@
-import type { SuiClientTypes } from "@mysten/sui/client";
+import { isEndpointAccessDenied, withRpcDeadline } from "../suiEndpoint.js";
+import { receiptObservationMessages } from "../session/transactionRequest.js";
+import { projectPublicChainReceipt, type PublicChainReceiptResult } from "./suiChainReceiptReader.js";
+import { TransactionError, type SuiClientTypes } from "@mysten/sui/client";
 import { assertNoForbiddenMcpFields } from "./forbiddenFields.js";
 import {
   SUI_CHAIN_RECEIPT_REQUIRED_INCLUDE,
   type SuiChainReceiptAccountBalanceChange,
   type SuiChainReceiptEvidence,
   type SuiChainReceiptIncludeField,
+  receiptDetailSchemas,
   suiChainReceiptEvidenceSchema
 } from "./suiChainReceiptEvidence.js";
 import { normalizeCoinType } from "../read/coinMetadata.js";
 import { parseSuiAddress, suiTransactionDigestSchema } from "../suiAddress.js";
 import {
-  effectsStatusFromSdk,
+  receiptEffectsStatus,
+  type ReviewedOutputGuard,
   isReceiptNotFoundError,
   objectTypesFromSdk,
   packageCallsFromTransaction,
@@ -30,9 +35,6 @@ export const SUI_CHAIN_RECEIPT_GET_TRANSACTION_INCLUDE = includeObjectFromFields
 // whether a prior submit (including one with a lost reply) executed.
 export const SUI_CHAIN_RECEIPT_WAIT_TIMEOUT_MS = 12_000;
 
-// waitForTransaction aborts with a DOMException named "TimeoutError" when its wait window elapses.
-// Treat that exactly like not_found — the transaction is simply not readable here yet — so the
-// session stays pending for a retry rather than being marked a verification failure.
 function isWaitTimeoutError(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { name?: unknown }).name === "TimeoutError";
 }
@@ -43,38 +45,42 @@ export type SuiChainReceiptVerifierClient = {
     getTransaction(
       options: SuiClientTypes.GetTransactionOptions<ChainReceiptInclude>
     ): Promise<SuiClientTypes.TransactionResult<ChainReceiptInclude>>;
-    waitForTransaction(
-      options: SuiClientTypes.WaitForTransactionOptions<ChainReceiptInclude>
-    ): Promise<SuiClientTypes.TransactionResult<ChainReceiptInclude>>;
   };
 };
 
 export type VerifySuiChainReceiptInput = {
+  guard?: ReviewedOutputGuard | undefined;
   txDigest: string;
   reviewedTransactionDigest: string;
   account: string;
   now: Date;
+  signal?: AbortSignal | undefined;
+  remainingMs?: number | undefined;
 };
 
 export type VerifySuiChainReceiptOptions = {
   client: SuiChainReceiptVerifierClient;
   network: "mainnet";
   expectedChainIdentifier: string;
+  readChainIdentifier?: (signal: AbortSignal) => Promise<string>;
+  includeDisplay?: boolean;
 };
 
 export type SuiChainReceiptVerificationResult =
   | {
       status: "verified_success";
       receipt: SuiChainReceiptEvidence;
+      display?: PublicChainReceiptResult;
     }
   | {
       status: "verified_failure";
       failureReason: "chain_execution_failed";
       message: string;
       receipt: SuiChainReceiptEvidence;
+      display?: PublicChainReceiptResult;
     }
   | {
-      status: "not_found";
+      status: "not_found" | "wait_timed_out" | "access_denied" | "source_unavailable" | "wrong_chain";
       failureReason: "chain_receipt_unavailable";
       message: string;
     }
@@ -98,56 +104,53 @@ export async function verifySuiChainReceipt(
   }
 
   let chainIdentifier: string;
-  try {
-    const chainIdentifierResult = await options.client.core.getChainIdentifier();
-    chainIdentifier = chainIdentifierResult.chainIdentifier;
-  } catch (error) {
-    return verificationFailed(receiptErrorMessage(error, "Sui mainnet chain identifier lookup failed."));
-  }
-  if (chainIdentifier !== options.expectedChainIdentifier) {
-    return verificationFailed("Chain receipt verification requires a verified Sui mainnet endpoint.");
-  }
-
   let result: SuiClientTypes.TransactionResult<ChainReceiptInclude>;
+  let readingDigest = false;
   try {
-    // The signed transaction was just submitted: it is on chain but may not yet be queryable on
-    // this server's fullnode (checkpoint-propagation lag). Wait for it instead of returning a
-    // premature not_found, so a single review-page poll resolves straight to the final receipt.
-    result = await options.client.core.waitForTransaction({
-      digest: parsedInput.txDigest,
-      include: SUI_CHAIN_RECEIPT_GET_TRANSACTION_INCLUDE,
-      timeout: SUI_CHAIN_RECEIPT_WAIT_TIMEOUT_MS
-    });
+    const read = await withRpcDeadline(Math.min(input.remainingMs ?? SUI_CHAIN_RECEIPT_WAIT_TIMEOUT_MS, SUI_CHAIN_RECEIPT_WAIT_TIMEOUT_MS), async signal => {
+      const chain = options.readChainIdentifier ? await options.readChainIdentifier(signal) : (await options.client.core.getChainIdentifier()).chainIdentifier;
+      if (chain !== options.expectedChainIdentifier) return undefined;
+      readingDigest = true;
+      const transaction = await options.client.core.getTransaction({ digest: parsedInput.txDigest,
+        include: { ...SUI_CHAIN_RECEIPT_GET_TRANSACTION_INCLUDE, ...(options.includeDisplay ? { events: true } : {}) }, signal });
+      return { chain, transaction };
+    }, input.signal);
+    if (!read) return { status: "wrong_chain", failureReason: "chain_receipt_unavailable", message: receiptObservationMessages.wrong_chain };
+    chainIdentifier = read.chain;
+    result = read.transaction;
   } catch (error) {
-    if (isReceiptNotFoundError(error) || isWaitTimeoutError(error)) {
-      return {
-        status: "not_found",
-        failureReason: "chain_receipt_unavailable",
-        message: "Sui mainnet did not return a transaction for the signed digest within the wait window."
-      };
-    }
-    return verificationFailed(receiptErrorMessage(error, "Sui mainnet transaction lookup failed."));
+    input.signal?.throwIfAborted();
+    if (error instanceof TransactionError && error.digest !== parsedInput.txDigest) return verificationFailed("The node reported a different transaction digest.");
+    const status = isEndpointAccessDenied(error) ? "access_denied"
+      : isWaitTimeoutError(error) || (error && typeof error === "object" && "code" in error && error.code === "DEADLINE_EXCEEDED") ? "wait_timed_out"
+      : readingDigest && isReceiptNotFoundError(error, parsedInput.txDigest) ? "not_found" : "source_unavailable";
+    return { status, failureReason: "chain_receipt_unavailable", message: receiptObservationMessages[status] };
   }
 
   try {
     const transaction = result.$kind === "Transaction" ? result.Transaction : result.FailedTransaction;
     const receipt = createSuiChainReceiptEvidenceFromTransaction({
-      transaction,
+      transaction, guard: input.guard,
       txDigest: parsedInput.txDigest,
       reviewedTransactionDigest: parsedInput.reviewedTransactionDigest,
       account: parsedInput.account,
       chainIdentifier,
       fetchedAt: parsedInput.now
     });
+    if (result.$kind === "FailedTransaction" && receipt.effectsStatus.success) throw new Error("Transaction status disagrees with its effects.");
+    const display = options.includeDisplay
+      ? { display: projectPublicChainReceipt(result as SuiClientTypes.TransactionResult<ChainReceiptInclude & { events: true }>, parsedInput.txDigest, chainIdentifier, parsedInput.now, input.guard) }
+      : {};
     if (!receipt.effectsStatus.success) {
       return {
+        ...display,
         status: "verified_failure",
         failureReason: "chain_execution_failed",
         message: "Sui mainnet verified the transaction receipt and reported failed execution effects.",
         receipt
       };
     }
-    return { status: "verified_success", receipt };
+    return { status: "verified_success", receipt, ...display };
   } catch (error) {
     return verificationFailed(receiptErrorMessage(error, "Sui mainnet transaction receipt could not be verified."));
   }
@@ -186,6 +189,7 @@ function parseVerifierInput(input: VerifySuiChainReceiptInput):
 
 function createSuiChainReceiptEvidenceFromTransaction(input: {
   transaction: SuiClientTypes.Transaction<ChainReceiptInclude>;
+  guard?: ReviewedOutputGuard | undefined;
   txDigest: string;
   reviewedTransactionDigest: string;
   account: string;
@@ -203,7 +207,7 @@ function createSuiChainReceiptEvidenceFromTransaction(input: {
     throw new Error("Sui mainnet receipt is missing parsed transaction data.");
   }
   const effects = input.transaction.effects;
-  if (!effects) {
+  if (!effects || typeof effects.status?.success !== "boolean") {
     throw new Error("Sui mainnet receipt is missing transaction effects.");
   }
   if (effects.transactionDigest !== input.txDigest) {
@@ -213,15 +217,15 @@ function createSuiChainReceiptEvidenceFromTransaction(input: {
   if (sender !== input.account) {
     throw new Error("Sui mainnet receipt sender does not match the reviewed account.");
   }
-  if (!input.transaction.balanceChanges) {
-    throw new Error("Sui mainnet receipt is missing balance changes.");
-  }
-  if (!input.transaction.objectTypes) {
-    throw new Error("Sui mainnet receipt is missing object type map.");
-  }
-
+  const optional = <T>(read: () => T): T | undefined => {
+    try { return read(); } catch { return undefined; }
+  };
+  const packageCalls = optional(() => receiptDetailSchemas.packageCalls.parse(packageCallsFromTransaction(transactionData)));
+  const accountBalanceChanges = input.transaction.balanceChanges && optional(() => receiptDetailSchemas.accountBalanceChanges.parse(accountBalanceChangesFromSdk(input.transaction.balanceChanges, input.account)));
+  const objectTypes = input.transaction.objectTypes && optional(() => receiptDetailSchemas.objectTypes.parse(objectTypesFromSdk(input.transaction.objectTypes)));
   const receipt = {
-    kind: "sui_chain_receipt_v1",
+    ...(packageCalls && accountBalanceChanges && objectTypes ? { kind: "sui_chain_receipt_v1" as const } :
+      { kind: "sui_chain_receipt_outcome_v2" as const, detailStatus: "incomplete" as const }),
     source: {
       method: "client.core.getTransaction",
       network: "sui:mainnet",
@@ -231,11 +235,9 @@ function createSuiChainReceiptEvidenceFromTransaction(input: {
     },
     txDigest: input.txDigest,
     sender,
-    effectsStatus: effectsStatusFromSdk(effects.status),
-    packageCalls: packageCallsFromTransaction(transactionData),
-    accountBalanceChanges: accountBalanceChangesFromSdk(input.transaction.balanceChanges, input.account),
-    objectTypes: objectTypesFromSdk(input.transaction.objectTypes)
-  } satisfies SuiChainReceiptEvidence;
+    effectsStatus: receiptEffectsStatus(effects, input.txDigest, input.guard),
+    ...(packageCalls && { packageCalls }), ...(accountBalanceChanges && { accountBalanceChanges }), ...(objectTypes && { objectTypes })
+  };
   const parsed = suiChainReceiptEvidenceSchema.parse(receipt);
   assertNoForbiddenMcpFields(parsed);
   return parsed;

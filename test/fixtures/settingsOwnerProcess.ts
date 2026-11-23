@@ -1,3 +1,4 @@
+import { verifyInstalledMinimum } from "../../src/adapters/reviewAdapters.js";
 import { seedCurrentReadAccount } from "./readAccount.js";
 import { randomUUID, createHash } from "node:crypto";
 import fs from "node:fs/promises";
@@ -9,7 +10,7 @@ import { LocalSessionStore } from "../../src/core/session/sessionStore.js";
 import { WalletWorkflow } from "../../src/core/session/walletWorkflow.js";
 import { SettingsWorkflow } from "../../src/core/session/settingsWorkflow.js";
 import { SettingsFileStore } from "../../src/core/session/settingsFileStore.js";
-import { createReadCardStore } from "../../src/mcp-ui/readCards.js";
+import { createCardStore } from "../../src/mcp-ui/readCards.js";
 import { createDeepbookUsdcChartService } from "../../src/core/read/deepbookUsdcChartService.js";
 import { RuntimeLocalSettingsService } from "../../src/runtime/localSettingsService.js";
 import { RuntimeDataAccess } from "../../src/runtime/shared/dataAccess.js";
@@ -32,7 +33,7 @@ if (!directory) throw new Error("A private test directory is required");
 const send = (value: unknown) => process.send?.(value);
 const hold = async (name: string) => { send({ event: "boundary", name }); await new Promise<void>(() => {}); };
 let creations = 0, publications = 0;
-const originalLink = fs.link, originalUnlink = fs.unlink, originalLstat = fs.lstat;
+const originalLink = fs.link, originalUnlink = fs.unlink;
 fs.link = async (...args) => {
   publications++;
   if (fault === "link_before") await hold(fault);
@@ -44,11 +45,6 @@ fs.unlink = async (...args) => {
   await originalUnlink(...args);
   if (String(args[0]).endsWith(".download") && fault === "cleanup_after") await hold(fault);
 };
-fs.lstat = (async (...args: Parameters<typeof fs.lstat>) => {
-  const result = await originalLstat(...args);
-  if (String(args[0]).endsWith(".download") && fault === "source_identity_before") await hold(fault);
-  return result;
-}) as typeof fs.lstat;
 const originalOpen = fs.open;
 fs.open = async (...args: Parameters<typeof fs.open>) => {
   const downloadWrite = String(args[0]).endsWith(".download") && typeof args[1] === "number" && (args[1] & (constants.O_RDWR | constants.O_WRONLY));
@@ -75,7 +71,7 @@ const activity = new SqliteActivityStore({ databasePath: join(directory, "activi
 const preferences = activity.createPreferencesRepository();
 await preferences.ensureDefaultLocalSettings({ suiGrpcUrl: DEFAULT_SUI_GRPC_URL, suiGraphqlUrl: DEFAULT_SUI_GRAPHQL_URL });
 const unexpected = async (): Promise<never> => { throw new Error("Unexpected external financial action"); };
-const transport: WalletTransport = { connect: unexpected, sign: unexpected, disconnect: unexpected, restore: async () => [],
+const transport: WalletTransport = { connect: unexpected, sign: unexpected, disconnect: unexpected, cleanupPairings: async () => {},
   session: () => undefined, inspect: (topic) => ({ topic, status: "absent" }), inspectAll: () => [], stop() {}, onSessionChanged: () => () => {} };
 const peers: WalletSdkPeer[] = [];
 const runtime = fault === "stopping" || fault === "starting" ? new WalletSdkProcess({ dataDirectory: directory,
@@ -83,7 +79,7 @@ const runtime = fault === "stopping" || fault === "starting" ? new WalletSdkProc
   spawn: () => { const peer = new WalletSdkPeer(fault === "starting" && peers.length ? "hold" : "ready"); peers.push(peer); return peer as unknown as ChildProcess; } })
   : new FixtureWalletRuntime(transport);
 const walletRecords = activity.createWalletWorkflowStore(ownerId, undefined, () => runtime.snapshot());
-const sessions = new LocalSessionStore({ ownerId, activityStore: activity, sessions: activity.createSessionRecordStore(), logger,
+const sessions = new LocalSessionStore({ verifySwapMinimum: verifyInstalledMinimum, ownerId, activityStore: activity, sessions: activity.createSessionRecordStore(), logger,
   artifacts: activity.createPrivateReviewArtifactStore(), transactionMaterialStore: activity.createTransactionMaterialStore(),
   validateAdapterLifecycle: validateSupportedAdapterLifecycle });
 const wallet = new WalletWorkflow({ records: walletRecords, sessions, ownerId, runtime,
@@ -101,9 +97,16 @@ const localData = activity.createLocalDataService({ suiGrpcUrl: DEFAULT_SUI_GRPC
 const settings = new SettingsWorkflow({ records, files, activity, preferences, localData, wallet,
   assertCurrent: access.assertCurrent, runMaintenance: (work) => access.run(work), resolveEndpoint: (input) => local.resolveEndpointChange(input), verifyEndpoint: (input) => local.prepareEndpointChange(input),
   interruptRun: (run) => walletRecords.invalidateWalletRun("wallet_service_restarted", new Date(), run),
-  readFacts: async () => records.transaction(() => ({ server: { name: "sui-mcp", version: SERVER_VERSION, network: "mainnet" },
-    localSettings: local.getLocalSettingsSync((key) => preferences.getLocalSettingSync(key)), counts: localData.getDataCountsSync(),
+  readFacts: async () => localData.readWithCounts(() => ({ server: { name: "sui-mcp", version: SERVER_VERSION, network: "mainnet" },
+    localSettings: local.getLocalSettingsSync((key) => preferences.getLocalSettingSync(key)),
     assetReadAccount: { status: "address_required" }, walletAvailability: wallet.walletAvailability() })) });
+if (fault === "source_identity_before") {
+  const publish = files.publishDownload.bind(files);
+  files.publishDownload = async (...args) => {
+    await hold("source_identity_before");
+    return publish(...args);
+  };
+}
 if (fault === "saved_before") {
   const inspect = files.inspectDownloadPublication.bind(files);
   files.inspectDownloadPublication = async (...args) => {
@@ -117,7 +120,7 @@ settings.recoverOwner();
 const recoveryResults = Object.fromEntries((records.db.prepare("SELECT id,result_json FROM live_read_cards WHERE kind='settings' AND state='closed'")
   .all() as Array<{ id: string; result_json: string }>).map((row) => [row.id, JSON.parse(row.result_json)]));
 await wallet.start();
-const cards = createReadCardStore({ ownerId, records: activity.createCardRecordStore(), workflow: wallet, settings, assertCurrent: access.assertCurrent,
+const cards = createCardStore({ ownerId, records: activity.createCardRecordStore(), workflow: wallet, settings, assertCurrent: access.assertCurrent,
   readService: { summarizeAccountInventory: unexpected }, publicChainReceiptReader: unexpected, chart: createDeepbookUsdcChartService() });
 access.ready();
 await access.run(() => settings.cleanupAfterOwnerChange());

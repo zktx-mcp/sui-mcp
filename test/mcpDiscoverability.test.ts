@@ -1,3 +1,6 @@
+import { activityIndexGenesis } from "./fixtures/sqliteActivity.js";
+import { z } from "zod";
+import { LocalSessionStore } from "../src/core/session/sessionStore.js";
 import { seedReadAddressCleared, seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { suiGrants } from "./fixtures/walletGrants.js";
 import type { ActivityStore } from "../src/core/activity/activityStore.js";
@@ -16,18 +19,18 @@ import {
   type DeepBookReadClient,
 } from "../src/core/read/readService.js";
 import {
-  DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT,
-  type DeepbookOfficialIndexerCandlesInput,
-  type DeepbookOfficialIndexerCandle,
-  type DeepbookOfficialIndexerFetchSource,
-  type DeepbookOfficialIndexerPool,
-  type DeepbookOfficialIndexerSourceClient
-} from "../src/core/read/deepbookOfficialIndexerSource.js";
+  DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
+  DEEPBOOK_CANDLE_SOURCE_STATEMENT,
+  type DeepbookCandleQuery,
+  type DeepbookTradeCandle,
+  type DeepbookCandleSourceEvidence,
+  type DeepbookCandlePool,
+  type DeepbookCandleSourceClient
+} from "../src/core/read/deepbookCandleSource.js";
 import {
   DEEPBOOK_ANSWER_USE,
-  DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE,
+  DEEPBOOK_CANDLE_RESPONSE_TEXT,
+  DEEPBOOK_CANDLE_SOURCE_BASE,
   DEEPBOOK_PINNED_SDK_METADATA_SOURCE,
   DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING
 } from "../src/core/read/deepbookSourceOwners.js";
@@ -43,13 +46,12 @@ import { CARD_METADATA_KEY, CARD_RESOURCE_URIS, CARD_TOOLS, cardSnapshotSchema }
 import {
   toolAvailability,
   EVIDENCE_POLICY,
-  IMPLEMENTED_TOOLS,
   PACKAGE_NAME,
   SERVER_INSTRUCTIONS,
   SERVER_VERSION
 } from "../src/mcp/serverInfo.js";
 import { TOOL_NAMES } from "../src/mcp/toolNames.js";
-import { InMemoryActivityStore } from "./fixtures/inMemoryActivityStore.js";
+import { TestSqliteActivityStore } from "./fixtures/sqliteActivity.js";
 import { MemoryCoinMetadataCache } from "./fixtures/memoryCoinMetadataCache.js";
 import {
   InMemoryLocalSettingsService,
@@ -144,14 +146,14 @@ async function connectTestClient(
   } = {}
 ) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const activityStore = options.activityStore ?? new InMemoryActivityStore();
+  const activityStore = options.activityStore ?? new TestSqliteActivityStore();
   const localSettings = options.localSettings ?? (await createDefaultLocalSettings());
-  const sessions = options.sessions ?? new InMemorySessionStore({
-    activityStore,
-    logger: testLogger,
-    validateAdapterLifecycle: validateSupportedAdapterLifecycle,
-    ...(options.sessionTtlMs === undefined ? {} : { ttlMs: options.sessionTtlMs })
-  });
+  const sessionOptions = { activityStore, logger: testLogger, validateAdapterLifecycle: validateSupportedAdapterLifecycle,
+    ...(options.sessionTtlMs === undefined ? {} : { ttlMs: options.sessionTtlMs }) };
+  const sessions = options.sessions ?? (activityStore instanceof TestSqliteActivityStore
+    ? new LocalSessionStore({ ...sessionOptions, sessions: activityStore.createSessionRecordStore(),
+      artifacts: activityStore.createPrivateReviewArtifactStore(), transactionMaterialStore: activityStore.createTransactionMaterialStore() })
+    : new InMemorySessionStore(sessionOptions));
   let scanCounter = 0;
   const server = createMcpServer({
     promptSurfaces: ADAPTER_PROMPT_SURFACES,
@@ -239,9 +241,10 @@ function createTestTransactionActivitySource(): SuiTransactionActivitySource {
 
 function createTestReadService(
   options: {
+    now?: () => Date;
     deepbook?: Partial<DeepBookReadClient>;
     deepbookCoins?: DeepBookCoinRegistry;
-    deepbookOfficialIndexerSource?: DeepbookOfficialIndexerSourceClient;
+    deepbookCandleSource?: DeepbookCandleSourceClient;
   } = {}
 ): SuiReadService {
   const deepbook: DeepBookReadClient = {
@@ -300,8 +303,8 @@ function createTestReadService(
     chainIdentifier: "4c78adac",
     coinMetadataCache: new MemoryCoinMetadataCache(),
     ...(options.deepbookCoins === undefined ? {} : { deepbookCoins: options.deepbookCoins }),
-    deepbookOfficialIndexerSource: options.deepbookOfficialIndexerSource ?? createTestDeepbookOfficialIndexerSource(),
-    now: () => new Date("2026-05-11T00:00:00.000Z"),
+    deepbookCandleSource: options.deepbookCandleSource ?? createTestDeepbookCandleSource(),
+    now: options.now ?? (() => new Date("2026-05-11T00:00:00.000Z")),
     deepbookFactory: () => deepbook,
     client: {
       core: {
@@ -329,42 +332,44 @@ function createTestReadService(
   });
 }
 
-function createTestDeepbookOfficialIndexerSource(): DeepbookOfficialIndexerSourceClient {
+function createTestDeepbookCandleSource(): DeepbookCandleSourceClient {
   return {
     async fetchPools() {
       return {
-        source: officialSource("get_pools"),
+        source: officialSource("pool_registry"),
         pools: [officialPoolFixture()]
       };
     },
     async fetchCandles(input) {
       return {
-        source: officialSource("ohclv", input),
-        candles: officialCandlesFixture()
+        source: { ...officialSource("order_fills", input), poolId: officialPoolFixture().pool_id },
+        candles: officialCandlesFixture().filter((c) =>
+          (input.startTimeMs === undefined || Date.parse(c.end) > input.startTimeMs) &&
+          (input.endTimeMs === undefined || c.timestampMs < input.endTimeMs))
       };
     }
   };
 }
 
-function officialPoolFixture(): DeepbookOfficialIndexerPool {
+function officialPoolFixture(): DeepbookCandlePool {
   return {
     pool_id: "0xe05dafb5133bcffb8d59f4e12465dc0e9faeaa05e3e342a08fe135800e3e4407",
     pool_name: "SUI_USDC",
     base_asset_id: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
     base_asset_symbol: "SUI",
     base_asset_decimals: 9,
-    quote_asset_id: DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE,
+    quote_asset_id: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
     quote_asset_symbol: "USDC",
     quote_asset_decimals: 6
   };
 }
 
-function officialCandlesFixture(): DeepbookOfficialIndexerCandle[] {
+function officialCandlesFixture(): DeepbookTradeCandle[] {
   return [
     {
-      timestampMs: Date.parse("2026-06-26T16:50:00.000Z"),
-      start: "2026-06-26T16:50:00.000Z",
-      end: "2026-06-26T17:05:00.000Z",
+      timestampMs: Date.parse("2026-06-26T16:45:00.000Z"),
+      start: "2026-06-26T16:45:00.000Z",
+      end: "2026-06-26T17:00:00.000Z",
       open: "0.69507",
       high: "0.69672",
       low: "0.69287",
@@ -372,9 +377,9 @@ function officialCandlesFixture(): DeepbookOfficialIndexerCandle[] {
       volume: "101444.802158"
     },
     {
-      timestampMs: Date.parse("2026-06-26T17:20:00.000Z"),
-      start: "2026-06-26T17:20:00.000Z",
-      end: "2026-06-26T17:35:00.000Z",
+      timestampMs: Date.parse("2026-06-26T17:15:00.000Z"),
+      start: "2026-06-26T17:15:00.000Z",
+      end: "2026-06-26T17:30:00.000Z",
       open: "0.69604",
       high: "0.69797",
       low: "0.69495",
@@ -405,18 +410,18 @@ function officialCandlesFixture(): DeepbookOfficialIndexerCandle[] {
 }
 
 function officialSource(
-  endpoint: "get_pools" | "ohclv",
-  input: Partial<DeepbookOfficialIndexerCandlesInput> = {}
-): DeepbookOfficialIndexerFetchSource {
+  endpoint: "pool_registry" | "order_fills",
+  input: Partial<DeepbookCandleQuery> = {}
+): DeepbookCandleSourceEvidence {
   return {
     baseUrl: "https://deepbook-indexer.mainnet.mystenlabs.com",
     endpoint,
     url:
-      endpoint === "get_pools"
+      endpoint === "pool_registry"
         ? "https://deepbook-indexer.mainnet.mystenlabs.com/get_pools"
         : `https://deepbook-indexer.mainnet.mystenlabs.com/ohclv/${input.poolName}?interval=${input.interval}`,
     fetchedAt: "2026-06-27T00:00:00.000Z",
-    sourceStatement: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT,
+    sourceStatement: DEEPBOOK_CANDLE_SOURCE_STATEMENT,
     poolName: input.poolName,
     interval: input.interval,
     startTimeMs: input.startTimeMs,
@@ -426,7 +431,9 @@ function officialSource(
 }
 
 function textPayload(result: Awaited<ReturnType<Client["callTool"]>>): unknown {
-  return JSON.parse((result.content as Array<{ text?: string }>)[0]?.text ?? "");
+  const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+  if (!text.startsWith("{")) throw new Error(text);
+  return JSON.parse(text);
 }
 
 describe("MCP discoverability", () => {
@@ -435,6 +442,7 @@ describe("MCP discoverability", () => {
     try {
       expect(client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
       expect(client.getInstructions()).toContain("mainnet-only");
+      expect(client.getInstructions()).toMatch(/DeepBook candles from finalized mainnet fills by pool ID/);
       expect(client.getInstructions()).toContain("Ordinary MCP tools return evidence or internal cards");
       expect(client.getInstructions()).toContain("never signing authority, bytes or signatures");
       expect(client.getInstructions()).toContain("Only user card input and wallet approval authorize WalletConnect");
@@ -449,7 +457,7 @@ describe("MCP discoverability", () => {
   });
 
   it("marks response-local answer source status unusable when a required tool is missing", () => {
-    expect(toolAvailability([TOOL_NAMES.readGetServerStatus, "missing.tool"])).toMatchObject({
+    expect(toolAvailability([TOOL_NAMES.readGetServerStatus, "missing.tool"], new Set([TOOL_NAMES.readGetServerStatus]))).toMatchObject({
       requiredTools: expect.arrayContaining([
         { name: TOOL_NAMES.readGetServerStatus, available: true },
         { name: "missing.tool", available: false }
@@ -595,17 +603,13 @@ describe("MCP discoverability", () => {
           network: "mainnet",
           runtime: "local_stdio",
           transport: "grpc_graphql",
-          implementedToolsCount: IMPLEMENTED_TOOLS.length,
+          implementedToolsCount: Object.values(TOOL_NAMES).length,
           protocolsTool: TOOL_NAMES.readListSupportedProtocols,
           resources: {
-            count: MCP_RESOURCES.length,
-            uris: MCP_RESOURCES.map((resource) => resource.uri),
-            items: MCP_RESOURCES.map((resource) => ({
-              name: resource.name,
-              uri: resource.uri,
-              title: resource.title,
-              description: resource.description
-            }))
+            count: MCP_RESOURCES.length + Object.keys(CARD_RESOURCE_URIS).length,
+            uris: [...MCP_RESOURCES.map((r) => r.uri), ...Object.values(CARD_RESOURCE_URIS)],
+            items: expect.arrayContaining(MCP_RESOURCES.map(({name, uri, title, description}) => ({name, uri, title, description})))
+
           }
         }
       });
@@ -616,9 +620,9 @@ describe("MCP discoverability", () => {
       };
       expect(payload.data.packageName).toBe(PACKAGE_NAME);
       const limitations = (payload.data.limitations as string[] | undefined)?.join("\n") ?? "";
-      expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.officialIndexerCandleData);
-      expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.officialIndexerCandleReferences);
-      expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.officialIndexerUsdcDenominatedCandles);
+      expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.chainCandleData);
+      expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.chainCandleReferences);
+      expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.chainUsdcDenominatedCandles);
       expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.pinnedSdkSnapshots);
       expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.usdcNotFiatUsdAndNotPeg);
       expect(limitations).not.toMatch(
@@ -696,21 +700,21 @@ describe("MCP discoverability", () => {
       ]) {
         expect(toolsByName.get(toolName)?.annotations).toMatchObject({
           readOnlyHint: false,
-          openWorldHint: false
+          openWorldHint: ![TOOL_NAMES.sessionOpenWalletConnectionCard, TOOL_NAMES.sessionGetWalletConnectionCard, TOOL_NAMES.sessionWaitWalletConnectionCard].some((name) => name === toolName)
         });
       }
 
       expect(toolsByName.get(TOOL_NAMES.readSummarizeWalletAssets)?.annotations).toMatchObject({
         readOnlyHint: false,
-        openWorldHint: false
+        openWorldHint: true
       });
       expect(toolsByName.get(TOOL_NAMES.readClassifyWalletAssets)?.annotations).toMatchObject({
         readOnlyHint: false,
-        openWorldHint: false
+        openWorldHint: true
       });
       expect(toolsByName.get(TOOL_NAMES.readPreviewIntentEvidence)?.annotations).toMatchObject({
-        readOnlyHint: true,
-        openWorldHint: false
+        readOnlyHint: false,
+        openWorldHint: true
       });
       expect(JSON.stringify(toolsByName.get(TOOL_NAMES.readPreviewIntentEvidence)?.inputSchema)).toContain(
         "targetAssetSelectionSource"
@@ -724,15 +728,15 @@ describe("MCP discoverability", () => {
       });
       expect(toolsByName.get(TOOL_NAMES.readSummarizeSettlementAssetGroupParity)?.annotations).toMatchObject({
         readOnlyHint: true,
-        openWorldHint: false
+        openWorldHint: true
       });
       expect(toolsByName.get(TOOL_NAMES.readSummarizeDeepbookAccountInventory)?.annotations).toMatchObject({
-        readOnlyHint: true,
-        openWorldHint: false
+        readOnlyHint: false,
+        openWorldHint: true
       });
       expect(toolsByName.get(TOOL_NAMES.readQuoteDeepbookDisplayAmount)?.annotations).toMatchObject({
         readOnlyHint: true,
-        openWorldHint: false
+        openWorldHint: true
       });
 
       expect(toolsByName.get(TOOL_NAMES.accountGetActiveAccount)?.annotations).toMatchObject({
@@ -880,7 +884,9 @@ describe("MCP discoverability", () => {
   it("exposes live read-only tools through MCP", async () => {
     const walletFixture = await walletWorkflowFixture();
     try { await walletFixture.run(async () => {
-    const { client, server } = await connectTestClient({ activityStore: walletFixture.activity, workflow: walletFixture.workflow });
+    let observation = "2026-05-11T00:00:00.000Z";
+    const { client, server } = await connectTestClient({ activityStore: walletFixture.activity, workflow: walletFixture.workflow,
+      readService: createTestReadService({ now: () => new Date(observation) }) });
     try {
       const tools = await client.listTools();
       const deepbookReadToolNames = new Set<string>([
@@ -1069,7 +1075,7 @@ describe("MCP discoverability", () => {
             version: SERVER_VERSION,
             evidencePolicyVersion: EVIDENCE_POLICY.version,
             network: "mainnet",
-            implementedToolsCount: IMPLEMENTED_TOOLS.length,
+            implementedToolsCount: Object.values(TOOL_NAMES).length,
             requiredTools: expect.arrayContaining([
               { name: TOOL_NAMES.readGetServerStatus, available: true },
               { name: TOOL_NAMES.readListSettlementAssetGroups, available: true },
@@ -1179,7 +1185,7 @@ describe("MCP discoverability", () => {
             version: SERVER_VERSION,
             evidencePolicyVersion: EVIDENCE_POLICY.version,
             network: "mainnet",
-            implementedToolsCount: IMPLEMENTED_TOOLS.length,
+            implementedToolsCount: Object.values(TOOL_NAMES).length,
             requiredTools: expect.arrayContaining([
               { name: TOOL_NAMES.readGetServerStatus, available: true },
               { name: TOOL_NAMES.readListSettlementAssetGroups, available: true },
@@ -1586,6 +1592,7 @@ describe("MCP discoverability", () => {
         }
       });
 
+      observation = officialSource("pool_registry").fetchedAt;
       const priceHistory = await client.callTool({
         name: TOOL_NAMES.readGetDeepbookUsdcPriceHistory,
         arguments: {
@@ -1614,7 +1621,7 @@ describe("MCP discoverability", () => {
             poolName: "SUI_USDC",
             quoteAsset: {
               symbol: "USDC",
-              coinType: DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE,
+              coinType: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
               decimals: 6
             },
             priceConvention: "USDC_PER_BASE"
@@ -1622,7 +1629,7 @@ describe("MCP discoverability", () => {
           candleAvailability: "available",
           barCount: 2,
           source: {
-            kind: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind,
+            kind: DEEPBOOK_CANDLE_SOURCE_BASE.kind,
             baseUrl: "https://deepbook-indexer.mainnet.mystenlabs.com",
             poolList: {
               url: "https://deepbook-indexer.mainnet.mystenlabs.com/get_pools"
@@ -1631,10 +1638,10 @@ describe("MCP discoverability", () => {
               poolName: "SUI_USDC",
               interval: "15m"
             },
-            chainRecomputedBySuiMcp: false
+            chainRecomputedBySuiMcp: true
           },
           userAnswerUse: {
-            canAnswer: expect.arrayContaining([DEEPBOOK_ANSWER_USE.officialUsdcCandleHistory]),
+            canAnswer: expect.arrayContaining([DEEPBOOK_ANSWER_USE.poolUsdcCandleHistory]),
             cannotAnswer: expect.arrayContaining([
               "fiat_usd_cash_out",
               "usd_peg_assumption",
@@ -1643,14 +1650,14 @@ describe("MCP discoverability", () => {
             answerFields: expect.arrayContaining(["bars", "source.candles", "responseSummary"])
           },
           quantitySemantics: {
-            kind: "deepbook_official_indexer_candles",
-            allowedUse: DEEPBOOK_ANSWER_USE.officialUsdcCandleHistory,
-            source: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind,
+            kind: "deepbook_pool_fill_candles",
+            allowedUse: DEEPBOOK_ANSWER_USE.poolUsdcCandleHistory,
+            source: DEEPBOOK_CANDLE_SOURCE_BASE.kind,
             quoteAsset: "USDC",
             priceConvention: "USDC_PER_BASE",
             usdcIsFiatUsd: false,
             usdPegGuaranteeAvailable: false,
-            chainRecomputedBySuiMcp: false,
+            chainRecomputedBySuiMcp: true,
             liveQuoteAvailable: false,
             historicalMidPriceAvailable: false,
             routeRecommendationAvailable: false,
@@ -1673,9 +1680,9 @@ describe("MCP discoverability", () => {
             ])
           },
           responseSummary: {
-            sourceStatement: DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.sourceStatement,
-            usdcDisclaimer: DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.usdcDisclaimer,
-            candleMeaning: "Each candle is returned by the DeepBookV3 official Indexer for the requested interval.",
+            sourceStatement: DEEPBOOK_CANDLE_RESPONSE_TEXT.sourceStatement,
+            usdcDisclaimer: DEEPBOOK_CANDLE_RESPONSE_TEXT.usdcDisclaimer,
+            candleMeaning: "Each candle aggregates finalized DeepBook fills for the identified Sui mainnet pool and UTC interval.",
             excludedFromConclusion: expect.arrayContaining(["fiat_usd_cash_out", "usd_peg_assumption"])
           },
           unsupportedClaims: expect.arrayContaining([
@@ -1687,7 +1694,6 @@ describe("MCP discoverability", () => {
             "signing_readiness",
             "profit_or_pnl",
             "cost_basis",
-            "independent_chain_recomputation"
           ])
         }
       });
@@ -1729,8 +1735,8 @@ describe("MCP discoverability", () => {
             }
           },
           matchedCandle: {
-            start: "2026-06-26T16:50:00.000Z",
-            end: "2026-06-26T17:05:00.000Z",
+            start: "2026-06-26T16:45:00.000Z",
+            end: "2026-06-26T17:00:00.000Z",
             close: "0.69316"
           },
           userAnswerUse: {
@@ -1739,14 +1745,14 @@ describe("MCP discoverability", () => {
             answerFields: expect.arrayContaining(["match.representativePrice", "matchedCandle.close", "responseSummary"])
           },
           quantitySemantics: {
-            kind: "deepbook_official_indexer_candles",
+            kind: "deepbook_pool_fill_candles",
             usdcIsFiatUsd: false,
-            chainRecomputedBySuiMcp: false,
+            chainRecomputedBySuiMcp: true,
             liveQuoteAvailable: false,
             globalMarketPriceAvailable: false
           },
           responseSummary: {
-            usdcDisclaimer: DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.usdcDisclaimer
+            usdcDisclaimer: DEEPBOOK_CANDLE_RESPONSE_TEXT.usdcDisclaimer
           },
           unsupportedClaims: expect.arrayContaining(["fiat_usd_cash_out", "usd_peg_assumption"])
         }
@@ -2124,7 +2130,7 @@ describe("MCP discoverability", () => {
               protocolMatches: [
                 expect.objectContaining({
                   protocolId: "cetus-clmm",
-                  primaryAction: "swap",
+                  declaredAction: "swap",
                   matchBasis: "direct_move_call"
                 })
               ]
@@ -2287,7 +2293,7 @@ describe("MCP discoverability", () => {
                 protocolMatches: [
                   expect.objectContaining({
                     protocolId: "cetus-clmm",
-                    primaryAction: "swap",
+                    declaredAction: "swap",
                     matchBasis: "direct_move_call"
                   })
                 ]
@@ -2510,7 +2516,7 @@ describe("MCP discoverability", () => {
                 protocolMatches: [
                   expect.objectContaining({
                     protocolId: "cetus-clmm",
-                    primaryAction: "swap"
+                    declaredAction: "swap"
                   })
                 ]
               })
@@ -2629,17 +2635,17 @@ describe("MCP discoverability", () => {
             account: walletAccount
           },
           summary: {
-            transactionCount: 2
+            transactionCount: 1
           },
           analysis: {
             overview: {
-              transactionCount: 2,
-              analyzedTransactionCount: 2
+              transactionCount: 1,
+              analyzedTransactionCount: 1
             },
             protocols: [
               expect.objectContaining({
                 protocolId: "cetus-clmm",
-                count: 2
+                count: 1
               })
             ]
           },
@@ -2655,7 +2661,7 @@ describe("MCP discoverability", () => {
                 protocolMatches: [
                   expect.objectContaining({
                     protocolId: "cetus-clmm",
-                    primaryAction: "swap",
+                    declaredAction: "swap",
                     matchBasis: "direct_move_call"
                   })
                 ]
@@ -2750,7 +2756,7 @@ describe("MCP discoverability", () => {
       expect(unknownAccountPayload.data.scanNeeded).toBeUndefined();
 
       await activityStore.recordExternalActivityScan({
-        scanId: "timeline_scan",
+        scanId: "timeline_scan", continuity: { sourceLower: activityIndexGenesis, rootScanId: "timeline_scan" },
         kind: "account_scan",
         account: walletAccount,
         relationship: "affected",
@@ -2761,6 +2767,7 @@ describe("MCP discoverability", () => {
         chainIdentifier: "mainnet-chain",
         fetchedAt: "2026-06-26T20:10:01.000Z",
         hasMore: false,
+        sourceUpperTimestamp: "2026-12-01T00:00:00.000Z", sourceUpperCheckpoint: "10000000",
         windowComplete: true,
         transactions: [
           {
@@ -2769,7 +2776,14 @@ describe("MCP discoverability", () => {
             checkpoint: "1000",
             timestamp: "2026-06-26T19:45:00.000Z",
             status: "success",
-            details: transactionDetails
+            details: {
+              ...transactionDetails,
+              balanceChanges: [
+                ...transactionDetails.balanceChanges,
+                { index: 1, owner: walletAccount, coinType: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
+                  amountRaw: "673", direction: "increase" }
+              ]
+            }
           }
         ]
       });
@@ -2816,6 +2830,11 @@ describe("MCP discoverability", () => {
               decreaseRaw: "1000",
               netRaw: "-1000",
               transactionCount: 1
+            },
+            {
+              bucketStart: "2026-06-26T19:45:00.000Z", bucketEnd: "2026-06-26T20:00:00.000Z",
+              coinType: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
+              increaseRaw: "673", decreaseRaw: "0", netRaw: "673", transactionCount: 1
             }
           ],
           quantitySemantics: {
@@ -2832,15 +2851,16 @@ describe("MCP discoverability", () => {
             ])
           },
           usdcReferences: {
-            status: "available",
+            status: "partial",
             quoteAsset: "USDC",
             usdcIsFiatUsd: false,
             usdPegGuaranteeAvailable: false,
-            chainRecomputedBySuiMcp: false,
+            chainRecomputedBySuiMcp: true,
             coinReferences: [
               expect.objectContaining({
                 coinType: "0x2::sui::SUI",
                 status: "available",
+                range: { start: "2026-06-26T19:45:00.000Z", end: "2026-06-26T20:00:00.000Z" },
                 barReferences: [
                   expect.objectContaining({
                     bucketStart: "2026-06-26T19:45:00.000Z",
@@ -2848,10 +2868,15 @@ describe("MCP discoverability", () => {
                     status: "available"
                   })
                 ]
+              }),
+              expect.objectContaining({
+                coinType: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
+                status: "unsupported_asset",
+                range: { start: "2026-06-26T19:45:00.000Z", end: "2026-06-26T20:00:00.000Z" }
               })
             ],
             responseSummary: {
-              usdcDisclaimer: DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.usdcDisclaimer
+              usdcDisclaimer: DEEPBOOK_CANDLE_RESPONSE_TEXT.usdcDisclaimer
             }
           },
           userAnswerUse: {
@@ -3072,7 +3097,7 @@ describe("MCP discoverability", () => {
   it("logs unexpected read service failures without leaking provider details to tool output", async () => {
     const logger = { error: vi.fn() };
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const activityStore = new InMemoryActivityStore();
+    const activityStore = new TestSqliteActivityStore();
     const sessions = new InMemorySessionStore({
       activityStore,
       logger,
@@ -3191,7 +3216,7 @@ describe("MCP discoverability", () => {
 
   it("maps activity store failures to MCP error payloads instead of handler rejections", async () => {
     const logger = { error: vi.fn() };
-    const activityStore = new InMemoryActivityStore();
+    const activityStore = new TestSqliteActivityStore();
     const getActiveAccount = vi
       .spyOn(activityStore, "getActiveAccount")
       .mockRejectedValue(new Error("local database unavailable"));
@@ -3257,7 +3282,7 @@ describe("MCP discoverability", () => {
 
   it("maps session store failures to MCP error payloads instead of handler rejections", async () => {
     const logger = { error: vi.fn() };
-    const activityStore = new InMemoryActivityStore();
+    const activityStore = new TestSqliteActivityStore();
     // Account-bound prepare needs an active account to reach the (mocked)
     // session store call this test exercises.
     await seedCurrentReadAccount(activityStore, walletAccount, new Date("2026-05-11T00:00:00.000Z"));
@@ -3324,7 +3349,8 @@ describe("MCP discoverability", () => {
         const result = await client.callTool(call);
         expect(textPayload(result)).toMatchObject({
           ok: false,
-          error: { kind: "internal_error", details: { message: "Session store call failed" } }
+          error: { kind: "internal_error", details: call.name === TOOL_NAMES.actionCreateProposalReview
+            ? { reason: "Card service unavailable." } : { message: "Session store call failed" } }
         });
       }
       expect(logger.error).toHaveBeenCalledWith("session store call failed");
@@ -3441,9 +3467,10 @@ it("asks for an explicit address across activity reads after Clear without chang
 });
 
 it("normalizes UTC inputs across all ten read tools before strict domain validation", async () => {
-  const store = new InMemoryActivityStore();
+  const store = new TestSqliteActivityStore();
   await store.seedReadAccount(walletAccount, new Date("2026-06-26T00:00:00.000Z"));
-  const { client, server } = await connectTestClient({ activityStore: store });
+  const { client, server } = await connectTestClient({ activityStore: store,
+    readService: createTestReadService({ now: () => new Date(officialSource("pool_registry").fetchedAt) }) });
   const start = "2026-06-26T19:40:00", end = "2026-06-26T20:10:00";
   const scope = { from: `${start}.000Z`, to: `${end}.000Z` };
   const calls = [
@@ -3477,7 +3504,7 @@ it("normalizes UTC inputs across all ten read tools before strict domain validat
 });
 
 it("keeps reversed read ranges rejected after fractional seconds are normalized", async () => {
-  const store = new InMemoryActivityStore();
+  const store = new TestSqliteActivityStore();
   await store.seedReadAccount(walletAccount);
   const { client, server } = await connectTestClient({ activityStore: store });
   const from = "2026-06-26T19:40:00.9Z", to = "2026-06-26T19:40:00.1Z";
@@ -3521,3 +3548,82 @@ it("reports an unrecorded wallet session through the review gateway without crea
     } finally { createSession.mockRestore(); createCard.mockRestore(); await client.close(); await server.close(); }
   }); } finally { f.close(); }
 });
+
+it("resumes one market read on its owning MCP connection and never replays a lost handle", async () => {
+  const market = createTestDeepbookCandleSource();
+  const readPools = market.fetchPools.bind(market);
+  const started = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+  const source = vi.spyOn(market, "fetchPools").mockImplementation(async (...args) => {
+    started.resolve(); await gate.promise; return readPools(...args);
+  });
+  const service = createTestReadService({ deepbookCandleSource: market, now: () => new Date(officialSource("pool_registry").fetchedAt) });
+  const { client, server } = await connectTestClient({readService:service});
+  const second = await connectTestClient({readService:service});
+  const name = TOOL_NAMES.readGetDeepbookUsdcPriceHistory;
+  try {
+    const { tools } = await client.listTools();
+    for (const [tool, times] of [
+      [name, { start: "2026-06-26T00:00:00Z", end: "2026-06-26T01:00:00Z" }],
+      [TOOL_NAMES.readGetDeepbookUsdcPriceAtTime, { targetTime: "2026-06-26T00:00:00Z" }]
+    ] as const) {
+      const wireSchema = tools.find(entry => entry.name === tool)!.inputSchema;
+      const published = z.fromJSONSchema(wireSchema as Parameters<typeof z.fromJSONSchema>[0]);
+      expect(published.safeParse({ ...times, poolId: officialPoolFixture().pool_id.toUpperCase() }).success).toBe(true);
+      expect(published.safeParse({ ...times, poolId: "0x" + "zz".repeat(32) }).success).toBe(false);
+    }
+    const input = {poolName:"SUI_USDC", start:"2026-06-26T00:00:00Z", end:"2026-06-26T01:00:00Z"};
+    const reading = client.callTool({name,arguments:input});
+    await started.promise;
+    const equivalent = client.callTool({name,arguments:{...input,poolName:"sui_usdc",interval:"15m"}});
+    const first = await reading;
+    const pending = z.object({data:z.object({status:z.literal("running"),requestId:z.uuid(),nextRead:z.object({
+      tool:z.literal(name),arguments:z.object({requestId:z.uuid()})
+    })})}).parse(first.structuredContent).data;
+    expect(pending.nextRead.arguments.requestId).toBe(pending.requestId);
+    expect((await equivalent).structuredContent).toMatchObject({data:{status:"running",requestId:pending.requestId}});
+    const poll = {name, arguments:pending.nextRead.arguments};
+    expect((await second.client.callTool(poll)).structuredContent).toMatchObject({data:{status:"request_unavailable"}});
+    expect((await client.callTool({...poll,name:TOOL_NAMES.readGetDeepbookUsdcPriceAtTime})).structuredContent).toMatchObject({data:{status:"request_unavailable"}});
+    expect((await client.callTool({name,arguments:{...input,...poll.arguments}})).isError).toBe(true);
+    gate.resolve();
+    const result = await client.callTool(poll);
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ok:true,data:{status:expect.not.stringMatching(/running|request_unavailable/)}});
+    expect((await client.callTool(poll)).structuredContent).toEqual(result.structuredContent);
+    expect(source).toHaveBeenCalledTimes(1);
+  } finally {
+    gate.resolve(); await client.close(); await server.close(); await second.client.close(); await second.server.close();
+  }
+}, 12000);
+
+it("binds a new timeline to the current account and resumes an earlier account only by handle", async () => {
+  const service = createTestReadService();
+  const readerForRequest = service.priceHistoryReaderForRequest.bind(service);
+  const gate = Promise.withResolvers<void>();
+  const read = vi.spyOn(service,"priceHistoryReaderForRequest").mockImplementation((...args) => {
+    const reader = readerForRequest(...args);
+    return async input => { await gate.promise; return reader(input); };
+  });
+  const {client,server,activityStore} = await connectTestClient({readService:service});
+  const name = TOOL_NAMES.readGetAccountAssetTimeline;
+  const input = {start:"2026-06-26T19:40:00.000Z",end:"2026-06-26T20:10:00.000Z"};
+  try {
+    await seedCurrentReadAccount(activityStore,walletAccount);
+    await activityStore.recordExternalActivityScan({
+      scanId:"pending", continuity:{sourceLower:activityIndexGenesis,rootScanId:"pending"}, account:walletAccount, kind:"account_scan", relationship:"affected",
+      fromTimestamp:input.start,toTimestamp:input.end,limit:1,endpointHost:"graphql.mainnet.sui.io",chainIdentifier:"mainnet-chain",
+      fetchedAt:input.end,hasMore:false,windowComplete:true,sourceUpperTimestamp:input.end,sourceUpperCheckpoint:"123",
+      transactions:[{digest:"7".repeat(44),relationship:"affected",checkpoint:"123",timestamp:input.start,status:"success",details:transactionDetails}]
+    });
+    const pending = await client.callTool({name,arguments:input});
+    const {requestId} = z.object({data:z.object({status:z.literal("running"),requestId:z.uuid()})}).parse(pending.structuredContent).data;
+    await seedReadAddressCleared(activityStore);
+    expect((await client.callTool({name,arguments:input})).isError).toBe(true);
+    await seedCurrentReadAccount(activityStore,replacementWalletAccount);
+    expect((await client.callTool({name,arguments:input})).structuredContent).toMatchObject({data:{account:replacementWalletAccount,netFlowBars:[]}});
+    gate.resolve();
+    expect((await client.callTool({name,arguments:{requestId}})).structuredContent).toMatchObject({data:{account:walletAccount,netFlowBars:[{coinType:"0x2::sui::SUI"}]}});
+  } finally {
+    gate.resolve();read.mockRestore();await client.close();await server.close();
+  }
+},12000);

@@ -1,8 +1,9 @@
-import type { SuiClientTypes } from "@mysten/sui/client";
+import { bcs } from "@mysten/sui/bcs";
+import { TransactionError, type SuiClientTypes } from "@mysten/sui/client";
 import { describe, expect, it } from "vitest";
 import {
   SUI_CHAIN_RECEIPT_GET_TRANSACTION_INCLUDE,
-  SUI_CHAIN_RECEIPT_WAIT_TIMEOUT_MS,
+
   type SuiChainReceiptVerifierClient,
   verifySuiChainReceipt
 } from "../src/core/action/suiChainReceiptVerifier.js";
@@ -16,7 +17,7 @@ type ChainReceiptInclude = {
 };
 
 type FixtureClient = SuiChainReceiptVerifierClient & {
-  calls: SuiClientTypes.WaitForTransactionOptions<ChainReceiptInclude>[];
+  calls: SuiClientTypes.GetTransactionOptions<ChainReceiptInclude>[];
   chainIdentifierCalls: string[];
 };
 
@@ -49,12 +50,6 @@ function createClient(
         return kind === "Transaction"
           ? { $kind: "Transaction", Transaction: transaction }
           : { $kind: "FailedTransaction", FailedTransaction: transaction };
-      },
-      async waitForTransaction(options) {
-        calls.push(options);
-        return kind === "Transaction"
-          ? { $kind: "Transaction", Transaction: transaction }
-          : { $kind: "FailedTransaction", FailedTransaction: transaction };
       }
     }
   };
@@ -72,10 +67,6 @@ function createThrowingClient(error: unknown): FixtureClient {
         return { chainIdentifier: "mainnet-chain" };
       },
       async getTransaction(options) {
-        calls.push(options);
-        throw error;
-      },
-      async waitForTransaction(options) {
         calls.push(options);
         throw error;
       }
@@ -200,7 +191,7 @@ describe("Sui chain receipt verifier", () => {
       {
         digest,
         include: SUI_CHAIN_RECEIPT_GET_TRANSACTION_INCLUDE,
-        timeout: SUI_CHAIN_RECEIPT_WAIT_TIMEOUT_MS
+        signal: expect.any(AbortSignal)
       }
     ]);
     expect(Object.keys(SUI_CHAIN_RECEIPT_GET_TRANSACTION_INCLUDE)).toEqual(SUI_CHAIN_RECEIPT_REQUIRED_INCLUDE);
@@ -310,6 +301,27 @@ describe("Sui chain receipt verifier", () => {
     });
   });
 
+  it.each([
+    { command: 2, code: "12", module: "pool", matched: true },
+    { command: 1, code: "12", module: "pool", matched: false },
+    { command: 2, code: "11", module: "pool", matched: false },
+    { command: 2, code: "12", module: "other", matched: false }
+  ])("attributes only the reviewed Move abort at $module/$code, command $command", async sample => {
+    const error = { MoveAbort: [{ module: { address: packageId, name: sample.module }, function: 0, instruction: 0, functionName: null }, sample.code] } as const;
+    const failure = { success: false as const, error: { $kind: "Unknown" as const, Unknown: null, message: "Move call failed" } };
+    const base = transactionFixture();
+    const bytes = bcs.TransactionEffects.serialize({ V2: {
+      status: { Failure: { command: sample.command, error: { MoveAbort: [error.MoveAbort[0], error.MoveAbort[1]] } } },
+      executedEpoch: 1, gasUsed: base.effects.gasUsed, transactionDigest: digest, gasObjectIndex: null, eventsDigest: null,
+      dependencies: [], lamportVersion: 1, changedObjects: [], unchangedConsensusObjects: [], auxDataDigest: null
+    } }).toBytes();
+    const result = await verifyWith(createClient(transactionFixture({ status: failure, effects: { ...base.effects, status: failure, bcs: bytes } })),
+      { guard: { transactionDigest: digest, commandIndex: 3, protocolAbort: { commandIndex: 2, packageId, moduleOrigin: packageId, module: "pool", code: "12" } } });
+    expect(result.status).toBe("verified_failure");
+    if (result.status !== "verified_failure" || result.receipt.effectsStatus.success) throw Error("Expected verified failed effects");
+    expect(!!result.receipt.effectsStatus.minimumReceiveFailure).toBe(sample.matched);
+  });
+
   it("verifies failed SDK transaction response shapes", async () => {
     const failedStatus = {
       success: false,
@@ -346,6 +358,33 @@ describe("Sui chain receipt verifier", () => {
     });
   });
 
+  it("records the verified outcome when an object type exceeds the optional detail schema", async () => {
+    // A coin of nested pool shares can have a long type tag with short Move identifiers.
+    const asset = (name: string) => `${packageId}::asset::${name}`;
+    const share = (base: string, quote: string) => `${packageId}::pool::LP<${base},${quote}>`;
+    const nestedShare = share(share(asset("A"), asset("B")), share(asset("C"), asset("D")));
+    const objectType = `0x2::coin::Coin<${nestedShare}>`;
+    const result = await verifyWith(createClient(transactionFixture({ objectTypes: { [objectId]: objectType } })));
+    expect(result).toMatchObject({
+      status: "verified_success",
+      receipt: {
+        kind: "sui_chain_receipt_outcome_v2",
+        txDigest: digest,
+        detailStatus: "incomplete",
+        effectsStatus: { success: true },
+        accountBalanceChanges: expect.arrayContaining([
+          { index: 0, coinType: normalizedSuiCoinType, amountRaw: "-1000", direction: "decrease" }
+        ])
+      }
+    });
+    expect(result).not.toHaveProperty("receipt.objectTypes");
+  });
+
+  it("keeps a timed-out same-digest wait distinct from an absent transaction", async () => {
+    expect(await verifyWith(createThrowingClient(new DOMException("Elapsed", "TimeoutError")))).toMatchObject({
+      status: "wait_timed_out", failureReason: "chain_receipt_unavailable" });
+  });
+
   it("reports not_found when Sui mainnet has not indexed the digest", async () => {
     const error = Object.assign(new Error("transaction not found"), { code: "NOT_FOUND" });
     const client = createThrowingClient(error);
@@ -355,8 +394,13 @@ describe("Sui chain receipt verifier", () => {
     expect(result).toEqual({
       status: "not_found",
       failureReason: "chain_receipt_unavailable",
-      message: "Sui mainnet did not return a transaction for the signed digest within the wait window."
+      message: "This node has not returned the transaction. Check the same digest again."
     });
+  });
+
+  it("recognizes the pinned SDK's absent digest and rejects a different digest", async () => {
+    expect(await verifyWith(createThrowingClient(new TransactionError("notFound", digest)))).toMatchObject({ status: "not_found" });
+    expect(await verifyWith(createThrowingClient(new TransactionError("notFound", otherDigest)))).toMatchObject({ status: "verification_failed" });
   });
 
   it("fails verification when the returned digest does not match the signed digest", async () => {
@@ -430,8 +474,8 @@ describe("Sui chain receipt verifier", () => {
     );
 
     expect(result).toMatchObject({
-      status: "verification_failed",
-      failureReason: "receipt_verification_failed"
+      status: "wrong_chain",
+      failureReason: "chain_receipt_unavailable"
     });
     expect(client.calls).toHaveLength(0);
   });

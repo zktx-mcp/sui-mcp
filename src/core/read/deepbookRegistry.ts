@@ -16,7 +16,9 @@ import {
   type DeepbookTokenRegistryEntry
 } from "./readServiceTypes.js";
 
-export const PINNED_DEEPBOOK_COINS = mainnetCoins as DeepBookCoinRegistry;
+export const PINNED_DEEPBOOK_COINS: DeepBookCoinRegistry = Object.freeze(Object.fromEntries(
+  Object.entries(mainnetCoins).map(([symbol, coin]) => [symbol, Object.freeze({ ...coin })])
+));
 
 // Curated DeepBook USDC chart pairs: the meaningful Sui-ecosystem base tokens worth
 // featuring against USDC, in display order. This is a deliberate editorial allowlist
@@ -36,20 +38,18 @@ const CURATED_USDC_CHART_BASE_ORDER: ReadonlyMap<string, number> = new Map(
   ["SUI", "DEEP", "WAL", "NS", "IKA", "XBTC", "USDT"].map((symbol, index) => [symbol, index])
 );
 
-// Filter the chart pool list to the curated base tokens (by symbol) in curated
-// display order. Matching is by base SYMBOL because the indexer's pool name can
-// differ from the SDK pool key (e.g. BWETH_USDC vs BETH_USDC).
-export function curateUsdcChartPools<T extends { baseAsset: { symbol: string } }>(pools: readonly T[]): T[] {
-  return pools
-    .filter((pool) => CURATED_USDC_CHART_BASE_ORDER.has(pool.baseAsset.symbol))
-    .sort(
-      (left, right) =>
-        (CURATED_USDC_CHART_BASE_ORDER.get(left.baseAsset.symbol) ?? 0) -
-        (CURATED_USDC_CHART_BASE_ORDER.get(right.baseAsset.symbol) ?? 0)
-    );
+export const curatedChartCoinTypes = [...CURATED_USDC_CHART_BASE_ORDER.keys()].map(symbol => normalizeCoinType(PINNED_DEEPBOOK_COINS[symbol]!.type));
+
+// A display symbol is not an asset identity. Select the exact registered
+// mainnet coin types and keep the established display order.
+export function curateUsdcChartPools<T extends { baseAsset: { coinType: string } }>(pools: readonly T[]): T[] {
+  const ranks = new Map(curatedChartCoinTypes.map((type, index) => [type, index]));
+  return pools.filter(pool => ranks.has(normalizeCoinType(pool.baseAsset.coinType)))
+    .sort((a,b) => ranks.get(normalizeCoinType(a.baseAsset.coinType))! - ranks.get(normalizeCoinType(b.baseAsset.coinType))!);
 }
 
 type DeepbookCoinEntry = { symbol: string; coin: Coin };
+let pinnedIndex: Map<string, DeepbookCoinEntry> | undefined;
 
 export function listDeepbookTokenRegistry(
   coins: DeepBookCoinRegistry = PINNED_DEEPBOOK_COINS
@@ -92,23 +92,13 @@ export function findDeepbookCoinEntry(
   // Validate the whole pinned token unit registry before using any DeepBook
   // coin match so one bad scalar cannot make the registry look partially trustworthy.
   assertDeepbookScalars(coins);
+  if (coins === PINNED_DEEPBOOK_COINS) return pinnedIndex!.get(normalizedCoinType);
   for (const [symbol, coin] of Object.entries(coins)) {
     if (normalizeCoinType(coin.type) === normalizedCoinType) {
       return { symbol, coin };
     }
   }
   return undefined;
-}
-
-export function getDeepbookCoinEntryBySymbol(symbol: string, coins: DeepBookCoinRegistry): DeepbookCoinEntry {
-  assertDeepbookScalars(coins);
-  const coin = coins[symbol];
-  if (!coin) {
-    throw new ReadServiceInputError("registry_miss", "DeepBook pool coin is missing from the pinned token registry", {
-      symbol
-    });
-  }
-  return { symbol, coin };
 }
 
 export function canonicalDeepbookSymbol(
@@ -129,6 +119,18 @@ export function getKnownPool(poolKey: string): Pool {
     throw new ReadServiceInputError("registry_miss", "Unknown DeepBook mainnet pool key", { poolKey });
   }
   return pool;
+}
+
+export function deepbookQuoteAssets(poolKey: string, coins: DeepBookCoinRegistry = PINNED_DEEPBOOK_COINS) {
+  const pool = getKnownPool(poolKey);
+  assertDeepbookScalars(coins);
+  const asset = (symbol: string) => {
+    const coin = coins[symbol];
+    if (!coin) throw new ReadServiceInputError("registry_miss", "Missing DeepBook quote asset", { poolKey, symbol });
+    return { symbol, coinType: normalizeCoinType(coin.type), decimals: decimalsFromScalar(coin.scalar)!,
+      unitSource: DEEPBOOK_SCALAR_UNIT_SOURCE };
+  };
+  return { base: asset(pool.baseCoin), quote: asset(pool.quoteCoin), deep: asset("DEEP") };
 }
 
 export type DeepbookSymbolPairResolution = {
@@ -208,9 +210,13 @@ function toDeepbookTokenRegistryEntry(symbol: string, coin: Coin, poolKeys: stri
 }
 
 function assertDeepbookScalars(coins: DeepBookCoinRegistry): void {
+  if (coins === PINNED_DEEPBOOK_COINS && pinnedIndex) return;
+  const index = coins === PINNED_DEEPBOOK_COINS ? new Map<string, DeepbookCoinEntry>() : undefined;
   for (const [symbol, coin] of Object.entries(coins)) {
     if (decimalsFromScalar(coin.scalar) === undefined) {
       throw invalidDeepbookScalar(symbol, coin.scalar);
     }
+    index?.set(normalizeCoinType(coin.type), { symbol, coin });
   }
+  if (index) pinnedIndex = index;
 }

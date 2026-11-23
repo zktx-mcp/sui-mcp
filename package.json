@@ -1,6 +1,6 @@
 {
   "name": "@zktx.io/sui-mcp",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "mcpName": "io.github.zktx-mcp/sui-mcp",
   "description": "Sui MCP is a local-first toolkit for helping AI applications and users inspect Sui DeFi actions before execution.",
   "license": "MIT",
@@ -56,13 +56,13 @@
     "generate:deepbook-registry": "tsx scripts/generate-deepbook-registry.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "2.3.1",
-    "@modelcontextprotocol/core": "2.3.1",
+    "@modelcontextprotocol/client": "2.4.0",
+    "@modelcontextprotocol/core": "2.4.0",
     "@modelcontextprotocol/ext-apps": "2.0.3",
-    "@modelcontextprotocol/node": "2.1.1",
-    "@modelcontextprotocol/server": "2.3.1",
-    "@mysten/deepbook-v3": "2.6.4",
-    "@mysten/sui": "2.35.0",
+    "@modelcontextprotocol/node": "2.1.2",
+    "@modelcontextprotocol/server": "2.4.0",
+    "@mysten/deepbook-v3": "2.13.0",
+    "@mysten/sui": "2.39.1",
     "@noble/hashes": "2.4.0",
     "@scure/bip39": "2.4.0",
     "@walletconnect/sign-client": "2.26.0",
@@ -72,7 +72,7 @@
     "better-sqlite3": "13.0.3",
     "lightweight-charts": "5.2.1",
     "qrcode": "1.5.4",
-    "zod": "4.6.5"
+    "zod": "4.6.7"
   },
   "overrides": {
     "mermaid@12.1.0": {

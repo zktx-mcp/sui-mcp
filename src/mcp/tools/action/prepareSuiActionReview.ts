@@ -1,4 +1,4 @@
-import { cardMetadata, createWorkflowCard, supportsCards } from "../../../mcp-ui/tools.js";
+import { cardMetadata, cardUnavailableResult, createdWorkflowCardResult, supportsCards } from "../../../mcp-ui/tools.js";
 import { cardSnapshotSchema } from "../../../mcp-ui/contracts.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
@@ -43,7 +43,7 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
     },
     async ({ intent }) => {
-      if (!supportsCards(server)) return errorToolResult({ kind: "ui_unavailable", details: { reason: "An internal review card is required." } });
+      if (!supportsCards(server)) return cardUnavailableResult();
       const now = new Date();
       const { protocol: protocolSlug, ...swapIntent } = intent;
       const resolution = resolveIntentPlanFactory(INTENT_PLAN_FACTORIES, swapIntent.type, protocolSlug);
@@ -74,7 +74,8 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
           : target.reason === "connection_required" ? "active_account_not_set" : "input_invalid",
           details: { reason: target?.reason ?? "wallet_unavailable", action: "check_exact_wallet_account",
             message: "A fixed, currently usable Sui account and its exact connection are required for this review." } });
-        const { session } = await deps.sessions.createReviewSession([plan], now);
+        if (!deps.cards) return errorToolResult({ kind: "internal_error", details: { reason: "Card service unavailable." } });
+        const { session, card } = await deps.cards.store.createFirstReview(deps.sessions, plan, target);
         const preliminaryChecks: ReviewCheck[] = plan.preliminaryChecks ?? [];
         const hasBlockingPreliminaryChecks = preliminaryChecks.some((check) => check.status === "fail");
         const payload: Omit<McpActionResponse, "card"> = {
@@ -83,7 +84,7 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
           preliminaryChecks,
           userAnswerUse: prepareActionReviewUserAnswerUse({ hasBlockingPreliminaryChecks })
         };
-        return await createWorkflowCard(server, deps, "review", { reviewSessionId: session.id, connectionId: target.connectionId, account: target.account }, payload);
+        return createdWorkflowCardResult(card, payload);
       } catch (error) {
         return sessionStoreToolError(error, deps.logger);
       }
@@ -110,12 +111,13 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
     },
     async ({ proposal }) => {
-      if (!supportsCards(server)) return errorToolResult({ kind: "ui_unavailable", details: { reason: "An internal review card is required." } });
+      if (!supportsCards(server)) return cardUnavailableResult();
       const now = new Date();
       const plan = externalProposalToActionPlan(proposal, now);
 
       try {
-        const { session } = await deps.sessions.createReviewSession([plan], now);
+        if (!deps.cards) return errorToolResult({ kind: "internal_error", details: { reason: "Card service unavailable." } });
+        const { session, card } = await deps.cards.store.createFirstReview(deps.sessions, plan);
         const preliminaryChecks: ReviewCheck[] = plan.preliminaryChecks ?? [];
         const payload: Omit<McpActionResponse, "card"> = {
           reviewSessionId: session.id,
@@ -123,7 +125,7 @@ export function registerActionTools(server: McpServer, deps: Pick<McpServerDeps,
           preliminaryChecks,
           userAnswerUse: prepareExternalProposalReviewUserAnswerUse()
         };
-        return await createWorkflowCard(server, deps, "review", { reviewSessionId: session.id }, payload);
+        return createdWorkflowCardResult(card, payload);
       } catch (error) {
         return sessionStoreToolError(error, deps.logger);
       }

@@ -1,3 +1,6 @@
+import { simulationWithinSwapLimits } from "../action/swapSimulationLimits.js";
+import { canTransitionReview, reviewStatusAfterBinding } from "./reviewTransitions.js";
+import type { FirstReviewCard } from "../activity/activityStore.js";
 import { ZodError } from "zod";
 import { decideReviewEvaluation, needsReviewMaterial, type ReviewEvaluationCandidate, type ValidatedReviewMaterial } from "./reviewValidity.js";
 import { randomUUID } from "node:crypto";
@@ -27,7 +30,7 @@ import {
   verifyTransactionObjectOwnershipEvidence
 } from "../action/transactionObjectOwnershipEvidence.js";
 import {
-  verifySwapQuotePolicyEvidence
+  verifySwapQuotePolicyEvidence, type VerifySwapMinimum
 } from "../action/swapQuotePolicyEvidence.js";
 import {
   publicHumanReadableReviewFromEvidence
@@ -107,7 +110,7 @@ export type CreatedReviewSession = {
 };
 
 export interface SessionStore {
-  createReviewSession(plans: ActionPlan[], now?: Date): Promise<CreatedReviewSession>;
+  createReviewSession(plans: ActionPlan[], now?: Date, withCard?: (id: string) => FirstReviewCard): Promise<CreatedReviewSession>;
   getReviewSession(id: string, clock?: () => Date): Promise<ReviewSession | undefined>;
   inspectReview(id: string, now?: Date): Promise<ReviewEvaluationCandidate | undefined>;
   recordEvaluationEvents(events: EventLogRecord[]): void;
@@ -141,11 +144,12 @@ export type InMemorySessionStoreOptions = {
   activityStore: ActivityStore;
   transactionMaterialStore?: Pick<
     LocalTransactionMaterialStore,
-    "deleteReviewSessionTransactionMaterials" | "getTransactionMaterial"
+    "deleteReviewSessionTransactionMaterials" | "deleteTransactionMaterial" | "getTransactionMaterial"
   >;
   logger: {
     error(message: string, meta?: Record<string, unknown>): void;
   };
+  verifySwapMinimum?: VerifySwapMinimum;
   validateAdapterLifecycle: AdapterLifecycleValidator;
 };
 
@@ -157,23 +161,6 @@ export type LocalSessionStoreOptions = InMemorySessionStoreOptions & {
 export { SessionStoreError } from "./sessionErrors.js";
 export type { SessionStoreErrorCode } from "./sessionErrors.js";
 
-const REVIEW_STATE_RECOMPUTE_STATUSES = new Set<InternalSessionStatus>([
-  "wallet_connected",
-  "ready_for_wallet_review",
-  "refresh_required",
-  "blocked"
-]);
-
-const ALLOWED_TRANSITIONS: Record<InternalSessionStatus, InternalSessionStatus[]> = {
-  proposed: ["awaiting_wallet", "expired"],
-  awaiting_wallet: ["wallet_connected", "expired"],
-  wallet_connected: ["ready_for_wallet_review", "refresh_required", "blocked", "expired"],
-  ready_for_wallet_review: ["refresh_required", "blocked", "expired"],
-  refresh_required: ["ready_for_wallet_review", "blocked", "expired"],
-  blocked: ["ready_for_wallet_review", "refresh_required", "expired"],
-  expired: []
-};
-
 export class LocalSessionStore implements SessionStore {
   private readonly sessions: SessionRecordStore;
   private readonly privateReviewArtifacts: PrivateReviewArtifactStore;
@@ -184,9 +171,10 @@ export class LocalSessionStore implements SessionStore {
   private readonly activityStore: ActivityStore;
   private readonly transactionMaterialStore: Pick<
     LocalTransactionMaterialStore,
-    "deleteReviewSessionTransactionMaterials" | "getTransactionMaterial"
+    "deleteReviewSessionTransactionMaterials" | "deleteTransactionMaterial" | "getTransactionMaterial"
   > | undefined;
   private readonly logger: InMemorySessionStoreOptions["logger"];
+  private readonly verifyMinimum: VerifySwapMinimum | undefined;
   private readonly validateAdapterLifecycle: InMemorySessionStoreOptions["validateAdapterLifecycle"];
 
   constructor(options: LocalSessionStoreOptions) {
@@ -199,10 +187,11 @@ export class LocalSessionStore implements SessionStore {
     this.activityStore = options.activityStore;
     this.transactionMaterialStore = options.transactionMaterialStore;
     this.logger = options.logger;
+    this.verifyMinimum = options.verifySwapMinimum;
     this.validateAdapterLifecycle = options.validateAdapterLifecycle;
   }
 
-  async createReviewSession(plans: ActionPlan[], now = new Date()): Promise<CreatedReviewSession> {
+  async createReviewSession(plans: ActionPlan[], now = new Date(), withCard?: (id: string) => FirstReviewCard): Promise<CreatedReviewSession> {
     if (plans.length !== 1) {
       throw new SessionStoreError("input_invalid", "Exactly one action plan is required per review session");
     }
@@ -222,9 +211,13 @@ export class LocalSessionStore implements SessionStore {
       currentStatus: session.status,
       createdAt: session.createdAt
     };
+    if (withCard && (!this.canUseActivityStoreLiveSessionMutations() || !this.activityStore.recordReviewSessionWithLiveSession)) {
+      throw new SessionStoreError("invalid_session_transition", "The shared SQLite review and card store is required.");
+    }
     await this.commitLiveReviewSessionProcess({
       sessionId: session.id,
       nextSession: session,
+      ...(withCard ? { liveSideEffects: { firstCard: withCard(session.id) } } : {}),
       commitWithLiveSession: this.activityStore.recordReviewSessionWithLiveSession
         ? (live) => this.activityStore.recordReviewSessionWithLiveSession!(reviewSessionInput, live)
         : undefined,
@@ -278,7 +271,7 @@ export class LocalSessionStore implements SessionStore {
   async getReviewSession(id: string, clock: () => Date = this.clock): Promise<ReviewSession | undefined> {
     const candidate = await this.inspectReview(id, clock());
     if (!candidate) return undefined;
-    if (this.activityStore.finalizeReviewEvaluation) {
+    if (this.canUseActivityStoreLiveSessionMutations() && this.activityStore.finalizeReviewEvaluation) {
       const result = this.activityStore.finalizeReviewEvaluation(candidate, clock);
       this.recordEvaluationEvents(result.events);
       return cloneLocalSession(result.session);
@@ -339,20 +332,14 @@ export class LocalSessionStore implements SessionStore {
     }
     const knownAccount = await this.activityStore.getKnownAccount(normalizedAccount);
     if (!knownAccount) throw new SessionStoreError("active_account_not_set", "Review account binding requires a known Sui account");
-    if (nextSession.status === "proposed") {
-      // Explicit backend account binding follows the preparation lifecycle.
-      // Stored account history is not wallet approval; the workflow checks
-      // the live wallet connection before invoking this operation.
-      transition(nextSession, "awaiting_wallet");
-      transition(nextSession, "wallet_connected");
-    } else if (nextSession.status === "awaiting_wallet") {
-      transition(nextSession, "wallet_connected");
-    } else if (!REVIEW_STATE_RECOMPUTE_STATUSES.has(nextSession.status)) {
+    const boundStatus = reviewStatusAfterBinding(nextSession.status);
+    if (boundStatus === undefined) {
       throw new SessionStoreError(
         "invalid_session_transition",
         `Invalid session transition: ${nextSession.status} -> wallet_connected`
       );
     }
+    nextSession.status = boundStatus;
     nextSession.account = normalizedAccount;
     nextSession.lastActivityAt = now.toISOString();
     await this.recordReviewTransitionWithLiveSession({
@@ -386,7 +373,25 @@ export class LocalSessionStore implements SessionStore {
     if (this.sessions.hasUnsettledRequest(id, now)) {
       throw new SessionStoreError("invalid_session_transition", "The previous wallet request is still being settled.");
     }
-    return this.recordReviewStateInternal(id, state, privateArtifacts, now, preparation);
+    const expiry = privateArtifacts?.swapQuotePolicy?.expiresAt;
+    if (!preparation || !expiry) return this.recordReviewStateInternal(id, state, privateArtifacts, now, preparation);
+
+    if (now.getTime() < Date.parse(expiry)) {
+      try {
+        return await this.recordReviewStateInternal(id, state, privateArtifacts, now, preparation);
+      } catch (error) {
+        if (!(error instanceof SessionStoreError) || error.details.reason !== "quote_expired_before_publication") throw error;
+      }
+    }
+    const expiredAt = this.clock();
+    return this.recordReviewStateInternal(id, {
+      reviewSessionId: id, planId: state.planId, account: state.account, updatedAt: expiredAt.toISOString(),
+      status: "refresh_required", refreshReason: "quote_stale",
+      checks: [...state.checks.filter((check) => check.source === "quote"), {
+        id: "quote_expired_before_publication", label: "Quote expired", status: "fail", source: "quote",
+        message: "The quote expired before the review was saved. Refresh to obtain current amounts."
+      }]
+    }, undefined, expiredAt, preparation);
   }
 
   private async recordReviewStateInternal(
@@ -417,7 +422,10 @@ export class LocalSessionStore implements SessionStore {
     let verified;
     try { verified = await this.assertReviewSessionPrivateArtifacts(id, parsedState, privateArtifacts, now); }
     catch (error) {
-      if (isDeepStrictEqual(this.sessions.get(id), session)) this.deleteReviewSessionTransactionMaterials(id);
+      const candidate = privateArtifacts?.transactionMaterial;
+      if (candidate && this.privateReviewArtifacts.get(id)?.transactionMaterial?.materialId !== candidate.materialId) {
+        this.transactionMaterialStore?.deleteTransactionMaterial({ ...candidate, planId: state.planId, account: state.account, reviewSessionId: id });
+      }
       throw error;
     }
     const nextSession = cloneLocalSession(session);
@@ -449,8 +457,8 @@ export class LocalSessionStore implements SessionStore {
       });
       return cloneLocalSession(nextSession);
     } catch (error) {
-      if (privateArtifacts && !this.isStaleReviewSessionCommitError(error) && isDeepStrictEqual(this.sessions.get(id), session)) {
-        this.deleteReviewSessionTransactionMaterials(id);
+      if (privateArtifacts?.transactionMaterial && this.privateReviewArtifacts.get(id)?.transactionMaterial?.materialId !== privateArtifacts.transactionMaterial.materialId) {
+        this.transactionMaterialStore?.deleteTransactionMaterial(privateArtifacts.transactionMaterial);
       }
       throw error;
     }
@@ -482,6 +490,10 @@ export class LocalSessionStore implements SessionStore {
     if (state.account !== parseSuiAddress(account)) throw new SessionStoreError("input_invalid", "Reviewed transaction account does not match the reviewed account");
     const material = candidate.material;
     if (!material) throw new SessionStoreError("handoff_unavailable", "Reviewed transaction material is unavailable.");
+    if (material.review.reviewState?.transactionReviewData?.slippageOrMinOut.status === "required_and_verified" &&
+        !material.artifacts.swapQuotePolicy?.enforcement) {
+      throw new SessionStoreError("handoff_unavailable", "A new review with a verified transaction minimum is required.");
+    }
     if (material.reviewedTransactionDigest !== state.transactionReviewData.reviewedTransactionDigest) {
       throw new SessionStoreError("handoff_commitment_mismatch", "Reviewed transaction digest differs from the reviewed commitment.");
     }
@@ -641,14 +653,6 @@ export class LocalSessionStore implements SessionStore {
     );
   }
 
-  private isStaleReviewSessionCommitError(error: unknown): boolean {
-    return (
-      error instanceof SessionStoreError &&
-      error.code === "invalid_session_transition" &&
-      error.message.includes("changed before transition committed")
-    );
-  }
-
   private async expireReviewSession(
     id: string,
     session: ReviewSession,
@@ -741,7 +745,7 @@ export class LocalSessionStore implements SessionStore {
           transactionMaterial: parsed.transactionMaterial,
           transactionMaterialDigest: parsed.transactionMaterialDigest,
           evidence: privateArtifacts.transactionObjectOwnership,
-          transactionBytes: parsed.transactionBytes,
+          verifiedMaterial: parsed,
           now
         })
       : undefined;
@@ -752,6 +756,17 @@ export class LocalSessionStore implements SessionStore {
           now
         })
       : undefined;
+    if (swapQuotePolicy?.enforcement) {
+      const guard = swapQuotePolicy.enforcement;
+      if (guard.transactionDigest !== parsed.transactionMaterialDigest.transactionDigest ||
+          guard.recipient !== state.account || guard.raw !== swapQuotePolicy.minimumOutput.raw ||
+          guard.coinType !== swapQuotePolicy.minimumOutput.asset.coinType) throw new ReviewEvidenceMismatch("Unbound swap minimum");
+      if (!this.verifyMinimum) throw new ReviewEvidenceMismatch("No verifier registered for the reviewed minimum");
+      this.verifyMinimum(parsed.transactionData, swapQuotePolicy);
+      if (state.transactionReviewData && !isDeepStrictEqual(guard, state.transactionReviewData.slippageOrMinOut.enforcement)) {
+        throw new ReviewEvidenceMismatch("Published minimum enforcement differs from private evidence");
+      }
+    }
     const humanReadableReview = privateArtifacts.humanReadableReview
       ? verifySupportedHumanReadableReviewEvidence({
           transactionMaterial: parsed.transactionMaterial,
@@ -767,10 +782,13 @@ export class LocalSessionStore implements SessionStore {
           transactionMaterial: parsed.transactionMaterial,
           transactionMaterialDigest: parsed.transactionMaterialDigest,
           evidence: privateArtifacts.reviewTimeSimulation,
-          transactionBytes: parsed.transactionBytes,
+          verifiedMaterial: parsed,
           now
         })
       : undefined;
+    if (reviewTimeSimulation && swapQuotePolicy?.enforcement && !simulationWithinSwapLimits(reviewTimeSimulation, swapQuotePolicy)) {
+      throw new ReviewEvidenceMismatch("Stored simulation differs from the reviewed amount limits");
+    }
     const verifiedArtifacts = {
       transactionMaterial: parsed.transactionMaterial,
       transactionMaterialDigest: parsed.transactionMaterialDigest,
@@ -821,12 +839,7 @@ function assertPrivateDerivedReviewStateProjections(
 }
 
 export function transition(session: ReviewSession, next: InternalSessionStatus): void {
-  if (session.status === next) {
-    return;
-  }
-
-  const allowed = ALLOWED_TRANSITIONS[session.status] ?? [];
-  if (!allowed.includes(next)) {
+  if (!canTransitionReview(session.status, next)) {
     throw new SessionStoreError(
       "invalid_session_transition",
       `Invalid session transition: ${session.status} -> ${next}`

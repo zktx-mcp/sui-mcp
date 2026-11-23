@@ -5,21 +5,20 @@ on:
     types: [published]
 
 permissions:
-  id-token: write # required for npm provenance attestation
   contents: read
 
 jobs:
-  publish-npm:
-    name: Publish @zktx.io/sui-mcp
+  verify-package:
+    name: Verify the release artifact
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Setup Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -30,6 +29,7 @@ jobs:
 
       - name: Verify the package is publishable and matches the release tag
         env:
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
           SUI_MCP_RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           node <<'NODE'
@@ -39,6 +39,11 @@ jobs:
             throw new Error(`${pkg.name} is marked private and cannot be published`);
           }
           const tag = process.env.SUI_MCP_RELEASE_TAG ?? '';
+          const prerelease = pkg.version.split('+')[0].includes('-');
+          if (String(prerelease) !== process.env.RELEASE_PRERELEASE ||
+              pkg.publishConfig.tag !== (prerelease ? 'next' : 'latest')) {
+            throw Error('Release channel disagrees with the package version');
+          }
           const accepted = new Set([`v${pkg.version}`, pkg.version]);
           if (!accepted.has(tag)) {
             throw new Error(
@@ -49,34 +54,65 @@ jobs:
           console.log(`Publishing ${pkg.name}@${pkg.version} for release "${tag}"`);
           NODE
 
+      - name: Verify mainnet activity package lineage
+        run: node --import tsx scripts/check-activity-lineages.ts
+
       - name: Build and verify the publishable package
-        # JS-DevTools/npm-publish does not run npm lifecycle scripts, so the build
-        # and gate run here explicitly. release:check typechecks, runs tests,
-        # builds dist/, and asserts the packed tarball contents (including
-        # dist/runtime/start.js) with a packed-tarball smoke install.
+        env:
+          SUI_MCP_RELEASE_OUTPUT: ${{ runner.temp }}/release
         run: npm run release:check
 
-      - name: Publish to npm
-        uses: JS-DevTools/npm-publish@v3
+      - name: Save the tested tarball and registry metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: package.json
-          access: public
-          # Build provenance needs a public repository, so it is enabled only when
-          # the repo is public; on a private repo it stays off so the publish still runs.
-          provenance: ${{ !github.event.repository.private }}
-          # Already-public versions are skipped. A version still being scanned
-          # is not public yet; retry the downstream Registry job, not this upload.
-          strategy: upgrade
-          # Prerelease GitHub releases publish under the `next` dist-tag; stable
-          # (non-prerelease) releases publish under `latest`.
-          tag: ${{ github.event.release.prerelease && 'next' || 'latest' }}
-          # dist/ is built and gated by the release:check step above; this step
-          # only packs (per the package "files" field) and publishes that output.
+          name: verified-release
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+
+  publish-npm:
+    needs: verify-package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-release
+          path: release
+      - name: Publish the verified tarball
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.prerelease && 'next' || 'latest' }}
+          PUBLIC_REPOSITORY: ${{ github.event.repository.visibility == 'public' }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          const r = JSON.parse(readFileSync('release/release.json', 'utf8'));
+          const integrity = 'sha512-' + createHash('sha512').update(readFileSync('release/package.tgz')).digest('base64');
+          if (integrity !== r.integrity) throw Error('Unexpected release bytes');
+          const response = await fetch('https://registry.npmjs.org/' + encodeURIComponent(r.name) + '/' + encodeURIComponent(r.version));
+          if (response.ok) {
+            const known = await response.json();
+            if (known.name !== r.name || known.version !== r.version || known.mcpName !== r.mcpName || known.dist?.integrity !== integrity) throw Error('Published version differs from verified release');
+          } else if (response.status === 404) {
+            execFileSync('npm', ['publish', 'release/package.tgz', '--access', 'public', '--ignore-scripts', '--tag', process.env.RELEASE_TAG,
+              ...(process.env.PUBLIC_REPOSITORY === 'true' ? ['--provenance'] : [])], { stdio: 'inherit' });
+          } else throw Error('Cannot verify public version before publish');
+          NODE
 
   publish-mcp-registry:
     name: Register on the MCP Registry
     needs: publish-npm
+    permissions:
+      contents: read
+      id-token: write
     # Only stable releases create an MCP Registry entry; prereleases still
     # publish to npm under the "next" dist-tag (handled by the job above).
     if: ${{ !github.event.release.prerelease }}
@@ -87,12 +123,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Setup Node for the public npm check
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-release
+          path: release
 
       # Publish exactly the metadata that passed the package release check.
       - name: Verify MCP Registry package metadata
@@ -100,7 +141,9 @@ jobs:
           node <<'NODE'
           const fs = require('node:fs');
           const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          const server = JSON.parse(fs.readFileSync('server.json', 'utf8'));
+          const checked = fs.readFileSync('release/server.json');
+          if (!checked.equals(fs.readFileSync('server.json'))) throw Error('Registry metadata differs from the verified artifact');
+          const server = JSON.parse(checked);
           if (server.name !== pkg.mcpName || server.version !== pkg.version ||
               server.packages[0].identifier !== pkg.name || server.packages[0].version !== pkg.version) {
             throw new Error('MCP Registry metadata differs from the verified package');
@@ -108,11 +151,13 @@ jobs:
           NODE
 
       - name: Wait for the published npm version to become public
-        run: node scripts/wait-for-npm-publication.ts
+        run: node scripts/wait-for-npm-publication.ts release/release.json
 
       - name: Install mcp-publisher
         run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          curl --fail --location --retry 3 -o publisher.tar.gz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.12/mcp-publisher_linux_amd64.tar.gz
+          echo 'ed3446e4caf067764cc13d35208b73ed68869958e32bc3842d0a863102912dcb  publisher.tar.gz' | sha256sum --check
+          tar -xzf publisher.tar.gz mcp-publisher
 
       # GitHub OIDC authorizes the io.github.zktx-mcp/* namespace from this
       # repository, so no token or secret is needed (it reuses the workflow-level

@@ -1,3 +1,5 @@
+import { activityIndexGenesis } from "./fixtures/sqliteActivity.js";
+import { transactionFactFromNode } from "../src/runtime/suiTransactionGraphqlMapping.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   TransactionActivityError,
@@ -6,7 +8,7 @@ import {
   type SuiTransactionActivityFact,
   type SuiTransactionActivitySource
 } from "../src/core/activity/transactionActivityService.js";
-import { InMemoryActivityStore } from "./fixtures/inMemoryActivityStore.js";
+import { TestSqliteActivityStore } from "./fixtures/sqliteActivity.js";
 
 const walletAccount = `0x${"a".repeat(64)}`;
 const otherWalletAccount = `0x${"b".repeat(64)}`;
@@ -122,7 +124,7 @@ function source(overrides: Partial<SuiTransactionActivitySource> = {}): SuiTrans
   };
 }
 
-function serviceFor(store: InMemoryActivityStore, activitySource = source()): TransactionActivityService {
+function serviceFor(store: TestSqliteActivityStore, activitySource = source()): TransactionActivityService {
   return new TransactionActivityService({
     activityStore: store,
     source: activitySource,
@@ -135,7 +137,7 @@ function serviceFor(store: InMemoryActivityStore, activitySource = source()): Tr
 
 describe("TransactionActivityService", () => {
   it("stores digest lookups only when the sender is a known wallet", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(store);
 
@@ -148,8 +150,8 @@ describe("TransactionActivityService", () => {
         relationship: "sent"
       }
     });
-    expect(store.externalActivityTransactions).toHaveLength(1);
-    expect(store.externalActivityTransactions[0]).toMatchObject({
+    expect(store.storedTransactions).toHaveLength(1);
+    expect(store.storedTransactions[0]).toMatchObject({
       digest,
       account: walletAccount,
       relationship: "sent",
@@ -162,7 +164,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("does not store digest lookups when no known wallet relation is confirmed", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -185,11 +187,11 @@ describe("TransactionActivityService", () => {
         reason: "no_known_wallet_relation"
       }
     });
-    expect(store.externalActivityTransactions).toEqual([]);
+    expect(store.storedTransactions).toEqual([]);
   });
 
   it("returns requested-account effects for explicit digest lookups without storing unknown accounts", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     const service = serviceFor(
       store,
       source({
@@ -245,11 +247,11 @@ describe("TransactionActivityService", () => {
         reason: "no_known_wallet_relation"
       }
     });
-    expect(store.externalActivityTransactions).toEqual([]);
+    expect(store.storedTransactions).toEqual([]);
   });
 
   it("stores digest lookups when a returned balance-change owner is a known wallet", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -294,19 +296,19 @@ describe("TransactionActivityService", () => {
         relationship: "affected"
       }
     });
-    expect(store.externalActivityTransactions).toHaveLength(1);
-    expect(store.externalActivityTransactions[0]).toMatchObject({
+    expect(store.storedTransactions).toHaveLength(1);
+    expect(store.storedTransactions[0]).toMatchObject({
       account: walletAccount,
       relationship: "affected",
       details: {
         balanceChanges: [{ owner: walletAccount, amountRaw: "1000" }]
       }
     });
-    expect(store.externalActivityTransactions[0]?.details?.events[0]).not.toHaveProperty("sender");
+    expect(store.storedTransactions[0]?.details?.events[0]).not.toHaveProperty("sender");
   });
 
   it("stores digest lookups for known non-active sender accounts without storing unknown parties", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     await store.seedReadAccount(otherWalletAccount, new Date("2026-05-11T00:01:00.000Z"));
     const service = serviceFor(
@@ -331,7 +333,7 @@ describe("TransactionActivityService", () => {
         relationship: "sent"
       }
     });
-    expect(store.externalActivityTransactions).toEqual([
+    expect(store.storedTransactions).toEqual([
       expect.objectContaining({
         account: walletAccount,
         knownSenderAccountId: 1
@@ -340,7 +342,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("stores bounded scans for known accounts and leaves recent-N windows unclaimed", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -384,11 +386,11 @@ describe("TransactionActivityService", () => {
         }
       }
     });
-    expect(store.externalActivityTransactions).toHaveLength(1);
+    expect(store.storedTransactions).toHaveLength(1);
   });
 
   it("summarizes a live bounded scan through the existing scan path", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(store);
 
@@ -423,7 +425,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("separates requested-account raw flows from transaction-wide compact aggregates", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     const rwaCoinType = `0x${"c".repeat(64)}::rwa::RWA`;
     const service = serviceFor(
       store,
@@ -474,6 +476,7 @@ describe("TransactionActivityService", () => {
     const result = await service.summarizeSuiActivityScan({ account: walletAccount });
 
     expect(result.requestedAccount).toEqual({
+      unconfirmedCount: 0,
       account: walletAccount,
       relationship: "affected",
       sentCount: 0,
@@ -527,7 +530,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("marks requested-account balance changes as truncated when provider detail pages are truncated", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     const service = serviceFor(
       store,
       source({
@@ -576,7 +579,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("scans sent function activity and stores only sender-matching known rows", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const scanFunction = vi.fn(async () => ({
       transactions: [
@@ -643,7 +646,7 @@ describe("TransactionActivityService", () => {
       fromCheckpoint: "90",
       toCheckpoint: "110"
     });
-    expect(store.externalActivityTransactions).toEqual([
+    expect(store.storedTransactions).toEqual([
       expect.objectContaining({
         digest,
         account: walletAccount,
@@ -653,7 +656,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("summarizes sent function activity without full details and without storing unknown explicit accounts", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     const service = serviceFor(
       store,
       source({
@@ -710,11 +713,11 @@ describe("TransactionActivityService", () => {
       }
     });
     expect(store.externalActivityScans).toEqual([]);
-    expect(store.externalActivityTransactions).toEqual([]);
+    expect(store.storedTransactions).toEqual([]);
   });
 
   it("validates function targets before issuing function scans", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const scanFunction = vi.fn(source().scanFunction);
     const service = serviceFor(store, source({ scanFunction }));
@@ -745,7 +748,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("summarizes explicit unknown account scans without storing local facts", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     const service = serviceFor(
       store,
       source({
@@ -792,11 +795,11 @@ describe("TransactionActivityService", () => {
       }
     });
     expect(store.externalActivityScans).toEqual([]);
-    expect(store.externalActivityTransactions).toEqual([]);
+    expect(store.storedTransactions).toEqual([]);
   });
 
   it("does not persist non-known party addresses inside normalized transaction details", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -848,14 +851,14 @@ describe("TransactionActivityService", () => {
 
     await service.scanSuiAccountActivity({});
 
-    expect(store.externalActivityTransactions).toHaveLength(1);
-    expect(store.externalActivityTransactions[0]?.details?.balanceChanges[0]).toMatchObject({ owner: walletAccount });
-    expect(store.externalActivityTransactions[0]?.details?.balanceChanges[1]).not.toHaveProperty("owner");
-    expect(store.externalActivityTransactions[0]?.details?.events[0]).not.toHaveProperty("sender");
+    expect(store.storedTransactions).toHaveLength(1);
+    expect(store.storedTransactions[0]?.details?.balanceChanges[0]).toMatchObject({ owner: walletAccount });
+    expect(store.storedTransactions[0]?.details?.balanceChanges).toHaveLength(1);
+    expect(store.storedTransactions[0]?.details?.events[0]).not.toHaveProperty("sender");
   });
 
   it("filters sent scans to transactions whose sender matches the known account", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -894,16 +897,16 @@ describe("TransactionActivityService", () => {
         }
       }
     });
-    expect(store.externalActivityTransactions).toHaveLength(1);
-    expect(store.externalActivityTransactions[0]).toMatchObject({
+    expect(store.storedTransactions).toHaveLength(1);
+    expect(store.storedTransactions[0]).toMatchObject({
       digest,
       account: walletAccount,
       relationship: "sent"
     });
   });
 
-  it("skips affected scan storage when returned rows do not prove a known wallet relation", async () => {
-    const store = new InMemoryActivityStore();
+  it("returns affected-filter discoveries and stores only independently related account transactions", async () => {
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -965,20 +968,67 @@ describe("TransactionActivityService", () => {
         stored: true,
         scan: {
           storedCount: 1,
-          skippedCount: 1
+          skippedCount: 1,
+          skippedReasons: { outsideFilter: 0, unconfirmedRelation: 1, repeatedDigest: 0 }
         }
       }
     });
-    expect(store.externalActivityTransactions).toHaveLength(1);
-    expect(store.externalActivityTransactions[0]).toMatchObject({
+    expect(store.storedTransactions.map(row => row.digest)).toEqual([digest]);
+    expect(store.storedTransactions.find((row) => row.digest === digest)).toMatchObject({
       digest,
       account: walletAccount,
       relationship: "affected"
     });
   });
 
+  it("joins two ordered pages on the pinned checkpoint and keeps the proof beyond the recent-scan display limit", async () => {
+    const store = new TestSqliteActivityStore();
+    const from = "2026-05-11T02:00:00.000Z", to = "2026-05-11T04:00:00.000Z";
+    await store.seedReadAccount(walletAccount, new Date(from));
+    const fact = (hour: number) => ({ digest: String(hour).repeat(44), timestamp: to.replace("T04", `T0${hour}`),
+      checkpoint: String(hour), status: "success" as const, sender: walletAccount });
+    const scanAccount: SuiTransactionActivitySource["scanAccount"] = async options => {
+      if (options.cursor) expect(options.toCheckpoint).toBe("4");
+      return { transactions: options.cursor ? [fact(1), fact(2)] : [fact(3), fact(4)], hasMore: true,
+        sourceRange: { first: activityIndexGenesis, last: { checkpoint: "4", timestamp: to } }, cursor: options.cursor ? "older" : "next" };
+    };
+    let id = 0;
+    const service = new TransactionActivityService({ activityStore: store, source: source({ scanAccount }),
+      now: () => new Date(Date.parse(to) - id * 1000), scanId: () => `scan_${++id}` });
+    const filter = { account: walletAccount, fromTimestamp: from, toTimestamp: to };
+    const first = await service.scanSuiAccountActivity(filter);
+    const repeated = await service.scanSuiAccountActivity(filter);
+    expect(repeated.continuationCursor).not.toBe(first.continuationCursor);
+    expect(first.windowComplete).toBe(false);
+    expect((await service.scanSuiAccountActivity({ ...filter, cursor: first.continuationCursor! })).windowComplete).toBe(true);
+    // All 100 visible slots must belong to later scans, leaving the completion proof off-screen.
+    const visibleScans = 100;
+    for (let i = 0; i < visibleScans; i++) await store.recordExternalActivityScan({ ...filter, kind: "account_scan", relationship: "sent",
+      scanId: `later-${i}`, limit: 1, hasMore: false, windowComplete: null, chainIdentifier: "mainnet-chain",
+      fetchedAt: "2026-05-12T00:00:00.000Z", endpointHost: "graphql.mainnet.sui.io", transactions: [] });
+    const result = await store.getExternalActivityCoverage({ account: walletAccount, from, to });
+    expect(result).toMatchObject({ coverageStatus: "complete", scanCount: 3 + visibleScans, scansTruncated: true, returnedScanCount: visibleScans,
+      coverageEvidence: { completeAffectedAccountScanIds: ["scan_3"] } });
+    expect(result.scans.every(scan => scan.relationship === "sent")).toBe(true);
+  });
+
+  it("distinguishes exhaustion within retained checkpoints from exhaustion outside the index", async () => {
+    const store = new TestSqliteActivityStore(), account = walletAccount;
+    const first = { checkpoint: "8", timestamp: "2026-05-11T08:00:00.000Z" };
+    const last = { checkpoint: "15", timestamp: "2026-05-11T15:00:00.000Z" };
+    const service = new TransactionActivityService({ activityStore: store, source: source({
+      scanAccount: async () => ({ transactions: [], hasMore: false, sourceRange: { first, last } })
+    }) });
+    for (const [fromCheckpoint,toCheckpoint,expected] of [["8","15",true],["7","15",false],["8","16",false]] as const) {
+      expect((await service.scanSuiAccountActivity({ account,fromCheckpoint,toCheckpoint })).windowComplete).toBe(expected);
+    }
+    expect((await service.scanSuiAccountActivity({ account, fromTimestamp: first.timestamp, toTimestamp: last.timestamp })).windowComplete).toBe(false);
+    expect((await service.scanSuiAccountActivity({ account, fromCheckpoint: "16" })).windowComplete).toBe(false);
+    expect((await service.scanSuiAccountActivity({ account, fromTimestamp: "2026-05-11T16:00:00.000Z" })).windowComplete).toBe(false);
+  });
+
   it("applies timestamp windows as page filters and reports incomplete coverage while more pages remain", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -1020,7 +1070,7 @@ describe("TransactionActivityService", () => {
       persistence: {
         scan: {
           storedCount: 1,
-          skippedCount: 1,
+          skippedCount: 1, skippedReasons: { outsideFilter: 1, unconfirmedRelation: 0, repeatedDigest: 0 },
           windowComplete: false,
           incompleteReason: "limit_reached"
         }
@@ -1029,7 +1079,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("allows explicit account filters but stores only known wallet scans", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(store);
 
@@ -1042,11 +1092,11 @@ describe("TransactionActivityService", () => {
         reason: "account_not_known"
       }
     });
-    expect(store.externalActivityTransactions).toEqual([]);
+    expect(store.storedTransactions).toEqual([]);
   });
 
   it("returns ephemeral explicit-address scans when provider ordering is unverified", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -1080,11 +1130,11 @@ describe("TransactionActivityService", () => {
         reason: "account_not_known"
       }
     });
-    expect(store.externalActivityTransactions).toEqual([]);
+    expect(store.storedTransactions).toEqual([]);
   });
 
   it("returns a locally ordered page when the provider returns the latest page oldest-first", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -1113,11 +1163,11 @@ describe("TransactionActivityService", () => {
         }
       }
     });
-    expect(store.externalActivityTransactions.map((row) => row.digest)).toEqual(["7".repeat(44), "6".repeat(44)]);
+    expect(store.storedTransactions.map((row) => row.digest)).toEqual(["7".repeat(44), "6".repeat(44)]);
   });
 
   it("marks stored scans incomplete when provider order is not monotonic", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -1161,7 +1211,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("maps invalid provider cursors to input errors without writing continuation state", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -1181,11 +1231,11 @@ describe("TransactionActivityService", () => {
       details: { reason: "cursor_invalid" }
     } satisfies Partial<TransactionActivityError>);
     expect(store.externalActivityScans).toEqual([]);
-    expect(store.externalActivityTransactions).toEqual([]);
+    expect(store.storedTransactions).toEqual([]);
   });
 
   it("maps invalid provider cursors for function scans without writing continuation state", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -1209,11 +1259,11 @@ describe("TransactionActivityService", () => {
       details: { reason: "cursor_invalid" }
     } satisfies Partial<TransactionActivityError>);
     expect(store.externalActivityScans).toEqual([]);
-    expect(store.externalActivityTransactions).toEqual([]);
+    expect(store.storedTransactions).toEqual([]);
   });
 
   it("maps rejected function filters to source evidence errors", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(
       store,
@@ -1242,7 +1292,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("validates checkpoint bounds before issuing account scans", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const scanAccount = vi.fn(source().scanAccount);
     const service = serviceFor(store, source({ scanAccount }));
@@ -1258,7 +1308,7 @@ describe("TransactionActivityService", () => {
   });
 
   it("rejects reversed checkpoint and timestamp windows before issuing account scans", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const scanAccount = vi.fn(source().scanAccount);
     const service = serviceFor(store, source({ scanAccount }));
@@ -1277,8 +1327,31 @@ describe("TransactionActivityService", () => {
     expect(scanAccount).not.toHaveBeenCalled();
   });
 
+  it("distinguishes incomplete transaction balances from a capped asset list", async () => {
+    const store = new TestSqliteActivityStore();
+    await store.seedReadAccount(walletAccount);
+    const time = (hour: number) => `2026-05-11T0${hour}:00:00.000Z`;
+    const transaction = (hour: number, first: number, count: number, partial = false): SuiTransactionActivityFact => ({
+      digest: String(hour).repeat(44), timestamp: time(hour), checkpoint: String(hour), status: "success", sender: walletAccount,
+      details: { ...transactionDetails, truncation: { ...transactionDetails.truncation, balanceChanges: partial },
+        balanceChanges: Array.from({ length: count }, (_, index) => ({
+          owner: walletAccount, index, coinType: `0x2::asset::T${first + index}`, amountRaw: "1", direction: "increase"
+        })) },
+    });
+    const transactions = [transaction(6, 50, 1), transaction(5, 25, 25), transaction(4, 0, 25), transaction(3, 51, 1, true)];
+    const service = serviceFor(store, source({ scanAccount: async () => ({ transactions, hasMore: false }) }));
+    await service.scanSuiAccountActivity({ account: walletAccount, relationship: "affected" });
+    const atLimit = await service.summarizeSuiAccountActivity({ account: walletAccount, to: time(5) });
+    expect(atLimit.accountCoinFlows).toMatchObject({ completeTransactions: 2, incompleteTransactions: 1, rowsTruncated: false });
+    expect(atLimit.accountCoinFlows.rows).toHaveLength(50);
+    const over = await service.summarizeSuiAccountActivity({ account: walletAccount });
+    expect(over.accountCoinFlows).toMatchObject({ completeTransactions: 3, incompleteTransactions: 1, rowsTruncated: true });
+    expect(over.accountCoinFlows.rows).toHaveLength(50);
+    expect(over.truncated).toBe(false);
+  });
+
   it("summarizes stored normalized facts without reading GraphQL", async () => {
-    const store = new InMemoryActivityStore();
+    const store = new TestSqliteActivityStore();
     await store.seedReadAccount(walletAccount, new Date("2026-05-11T00:00:00.000Z"));
     const service = serviceFor(store);
     await service.scanSuiAccountActivity({});
@@ -1303,4 +1376,58 @@ describe("TransactionActivityService", () => {
       transactions: [{ digest }]
     });
   });
+});
+
+it("retains a created object's output type across repeated GraphQL observations and flags a changed type", async () => {
+  const db = new TestSqliteActivityStore();
+  await db.seedReadAccount(walletAccount, new Date(0));
+  let type = "0x42::game::Hat";
+  const service = new TransactionActivityService({ activityStore: db, source: source({ getTransaction: async () => {
+    const pageInfo = { hasNextPage: false };
+    return transactionFactFromNode({ digest, sender: { address: walletAccount },
+      kind: { __typename: "ProgrammableTransaction", commands: { nodes: [], pageInfo } },
+      effects: { status: "SUCCESS", timestamp: "2026-11-22T00:00:00.000Z", checkpoint: { sequenceNumber: 100 },
+        balanceChanges: { nodes: [], pageInfo }, events: { nodes: [], pageInfo },
+        objectChanges: { nodes: [{ address: "0x2", idCreated: true, inputState: null,
+          outputState: { asMoveObject: { contents: { type: { repr: type } } } } }], pageInfo } } });
+  } }) });
+  async function observe() {
+    await service.inspectSuiTransaction({ account: walletAccount, digest });
+    return (await db.summarizeExternalActivity({ account: walletAccount })).transactions[0]?.details;
+  }
+  const first = await observe();
+  expect(first?.objectChanges).toHaveLength(1);
+  expect((await observe())?.objectChanges).toEqual(first?.objectChanges);
+  type = "0x42::game::Coat";
+  expect((await observe())?.partialReasons?.objectChanges).toContain("conflicting_observations");
+});
+
+it("keeps independent event facts when one observed event type conflicts, including after reread", async () => {
+  const db = new TestSqliteActivityStore();
+  await db.seedReadAccount(walletAccount, new Date(0));
+  let firstType = "0x42::game::Hat";
+  const service = new TransactionActivityService({ activityStore: db, source: source({ getTransaction: async () => {
+    const pageInfo = { hasNextPage: false };
+    const event = (sequenceNumber: number, repr: string) => ({
+      sequenceNumber, sender: { address: walletAccount }, contents: { type: { repr } }
+    });
+    return transactionFactFromNode({ digest, sender: { address: walletAccount }, effects: {
+      status: "SUCCESS", timestamp: "2026-11-22T00:00:00.000Z", checkpoint: { sequenceNumber: 100 },
+      events: { nodes: [event(0, firstType), event(1, "0x42::game::Score")], pageInfo }
+    } });
+  } }) });
+  const observe = async () => {
+    await service.inspectSuiTransaction({ account: walletAccount, digest });
+    return (await db.summarizeExternalActivity({ account: walletAccount })).transactions[0]!.details!;
+  };
+  await observe();
+  firstType = "0x42::game::Coat";
+  for (const next of ["0x42::game::Coat", "0x42::game::Hat"]) {
+    firstType = next;
+    const detail = await observe();
+    expect(detail.events).toMatchObject([{ sequenceNumber: "0", sender: walletAccount },
+      { sequenceNumber: "1", eventType: "0x42::game::Score" }]);
+    expect(detail.events[0]).not.toHaveProperty("eventType");
+    expect(detail.partialReasons?.events).toContain("conflicting_observations");
+  }
 });

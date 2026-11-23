@@ -1,7 +1,4 @@
-import {
-  type HumanReadableReviewEvidence,
-  verifyHumanReadableReviewEvidence
-} from "./humanReadableReviewEvidence.js";
+import type { HumanReadableReviewEvidence } from "./humanReadableReviewEvidence.js";
 import {
   verifySwapHumanReadableReviewEvidence
 } from "./swapHumanReadableReviewProjection.js";
@@ -20,13 +17,7 @@ export function verifySupportedHumanReadableReviewEvidence(input: {
   evidence: HumanReadableReviewEvidence;
   now?: Date | undefined;
 }): HumanReadableReviewEvidence {
-  const evidence = verifyHumanReadableReviewEvidence({
-    transactionMaterial: input.transactionMaterial,
-    transactionMaterialDigest: input.transactionMaterialDigest,
-    evidence: input.evidence,
-    now: input.now
-  });
-
+  const evidence = input.evidence;
   switch (evidence.review.kind) {
     case "swap_human_readable_review":
       return verifySwapHumanReadableReviewEvidence({

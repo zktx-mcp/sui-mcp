@@ -1,5 +1,6 @@
+import { mergeSwapRefundsIntoFunding, verifyDeepbookSwapCommands } from "./deepbookSwapCommands.js";
 import { SimulationError } from "@mysten/sui/client";
-import { DeepBookClient, mainnetCoins } from "@mysten/deepbook-v3";
+import { DeepBookClient } from "@mysten/deepbook-v3";
 import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Transaction } from "@mysten/sui/transactions";
 import type { DeepbookDisplayQuoteSummary } from "../../core/read/readServiceTypes.js";
@@ -25,20 +26,23 @@ import {
 export type DeepbookSwapPoolResolution = ReturnType<typeof resolveDeepbookPoolForSymbols>;
 
 export type DeepbookSwapTransactionMaterialProducerInput = {
+  preparationId?: string | undefined;
   reviewSessionId: string;
   plan: DeepbookSwapActionPlanIdentity;
   account: string;
   requestedIntent: DeepbookSwapRequestedIntent;
   poolResolution: DeepbookSwapPoolResolution;
   quote: DeepbookDisplayQuoteSummary;
-  quotePolicy: DeepbookSwapQuotePolicyOk;
+  quotePolicy: DeepbookSwapQuotePolicyOk & { feeBudgetRaw: string };
   now: Date;
+  clock?: () => Date;
 };
 
 export type DeepbookSwapTransactionMaterialProducerOutcome =
   | {
       status: "completed";
       evidence: LocalTransactionMaterialHandle;
+      guardCommand?: number;
       checks: ReviewCheck[];
     }
   | {
@@ -173,7 +177,7 @@ export function createDeepbookSwapTransactionMaterialProducer(
       };
     }
 
-    const quoteExpiresAt = quotePolicyExpiresAt(input.quotePolicy);
+    const quoteExpiresAt = new Date(input.quotePolicy.expiresAt);
     if (quoteExpiresAt.getTime() <= input.now.getTime()) {
       return {
         status: "refresh_required",
@@ -195,7 +199,7 @@ export function createDeepbookSwapTransactionMaterialProducer(
     try {
       sourceAmountRaw = parseDeepbookRawU64(input.quotePolicy.sourceAmountRaw, "sourceAmountRaw", { positive: true });
       minOutRaw = parseDeepbookRawU64(input.quotePolicy.minOutRaw, "minOutRaw", { positive: true });
-      deepAmountRaw = parseDeepbookRawU64(input.quotePolicy.deepAmountRaw, "deepAmountRaw");
+      deepAmountRaw = parseDeepbookRawU64(input.quotePolicy.feeBudgetRaw, "deepAmountRaw");
     } catch (error) {
       return {
         status: "blocked",
@@ -252,39 +256,24 @@ export function createDeepbookSwapTransactionMaterialProducer(
       // setGasBudgetIfNotSet fallback (0.25 SUI). This is not a cost estimate;
       // funding and checks-enabled simulation must validate each transaction.
       transaction.setGasBudget(DEEPBOOK_SWAP_GAS_BUDGET_MIST);
-      // input_coin fee mode swaps with an explicit zero DEEP coin; the Move
-      // entry point then charges the taker fee in the source coin at the
-      // protocol penalty. The explicit zero coin avoids SDK coin selection,
-      // which cannot resolve a zero balance for accounts holding no DEEP.
-      const inputFeeMode = input.quotePolicy.feeMode === "input_coin";
-      const zeroDeepCoin = inputFeeMode
-        ? transaction.moveCall({
-            target: "0x2::coin::zero",
-            typeArguments: [mainnetCoins.DEEP!.type]
-          })
-        : undefined;
-      const swapDeepAmountRaw = inputFeeMode ? 0n : deepAmountRaw;
-      const [baseCoinResult, quoteCoinResult, deepCoinResult] =
-        input.quotePolicy.direction === "base_to_quote"
-          ? deepbook.deepBook.swapExactBaseForQuote({
-              poolKey: input.poolResolution.poolKey,
-              amount: sourceAmountRaw,
-              minOut: minOutRaw,
-              deepAmount: swapDeepAmountRaw,
-              ...(zeroDeepCoin ? { deepCoin: zeroDeepCoin } : {})
-            })(transaction)
-          : deepbook.deepBook.swapExactQuoteForBase({
-              poolKey: input.poolResolution.poolKey,
-              amount: sourceAmountRaw,
-              minOut: minOutRaw,
-              deepAmount: swapDeepAmountRaw,
-              ...(zeroDeepCoin ? { deepCoin: zeroDeepCoin } : {})
-            })(transaction);
-      transaction.transferObjects([baseCoinResult, quoteCoinResult, deepCoinResult], input.account);
+      const swapDeepAmountRaw = input.quotePolicy.feeMode === "input_coin" ? 0n : deepAmountRaw;
+      const limits = { account: input.account, poolId: input.poolResolution.pool.address, poolKey: input.poolResolution.poolKey,
+        baseType: input.quote.rawQuote.baseOut.coinType, quoteType: input.quote.rawQuote.quoteOut.coinType,
+        deepType: input.quote.rawQuote.deepRequired.coinType, direction: input.quotePolicy.direction,
+        principal: sourceAmountRaw, deepBudget: swapDeepAmountRaw, minimum: minOutRaw };
+      appendGuardedSwap(transaction, deepbook, limits);
       const transactionBytes = await transaction.build({ client: options.client });
-      options.materialStore.deleteReviewSessionTransactionMaterials(input.reviewSessionId);
+      const guardCommand = verifyDeepbookSwapCommands(Transaction.from(transactionBytes).getData(), limits);
+      const builtAt = input.clock?.() ?? input.now;
+      if (builtAt >= quoteExpiresAt) {
+        return { status: "refresh_required", refreshReason: "quote_stale", checks: [
+          failReviewCheck("deepbook_transaction_material_quote_expired", "Quote expired",
+            "The quote expired while building the transaction.", "quote")
+        ] };
+      }
       const handle = options.materialStore.recordTransactionMaterial(
         {
+          preparationId: input.preparationId,
           reviewSessionId: input.reviewSessionId,
           planId: input.plan.id,
           account: input.account,
@@ -293,6 +282,7 @@ export function createDeepbookSwapTransactionMaterialProducer(
           transactionBytes,
           expiresAt: quoteExpiresAt,
           redactedDiagnostics: {
+            guardCommand,
             protocol: input.plan.protocol,
             adapterId: input.plan.adapterId,
             actionKind: input.plan.actionKind,
@@ -302,15 +292,16 @@ export function createDeepbookSwapTransactionMaterialProducer(
             quoteExpiresAt: quoteExpiresAt.toISOString(),
             sourceAmountRaw: input.quotePolicy.sourceAmountRaw,
             minOutRaw: input.quotePolicy.minOutRaw,
-            deepAmountRaw: input.quotePolicy.deepAmountRaw
+            feeBudgetRaw: input.quotePolicy.feeBudgetRaw
           }
         },
-        input.now
+        builtAt
       );
 
       return {
         status: "completed",
         evidence: handle,
+        guardCommand,
         checks: [
           passReviewCheck(
             "deepbook_transaction_material_built",
@@ -335,6 +326,49 @@ export function createDeepbookSwapTransactionMaterialProducer(
       };
     }
   };
+}
+
+export function appendGuardedSwap(transaction: Transaction, deepbook: DeepBookClient,
+  limits: Parameters<typeof verifyDeepbookSwapCommands>[1] & { poolKey: string }) {
+  const inputFeeMode = limits.deepBudget === 0n;
+  const zeroDeepCoin = inputFeeMode
+    ? transaction.moveCall({
+        target: "0x2::coin::zero",
+        typeArguments: [limits.deepType]
+      })
+    : undefined;
+  const [baseCoinResult, quoteCoinResult, deepCoinResult] =
+    limits.direction === "base_to_quote"
+      ? deepbook.deepBook.swapExactBaseForQuote({
+          poolKey: limits.poolKey,
+          amount: limits.principal,
+          minOut: limits.minimum,
+          deepAmount: limits.deepBudget,
+          ...(zeroDeepCoin ? { deepCoin: zeroDeepCoin } : {})
+        })(transaction)
+      : deepbook.deepBook.swapExactQuoteForBase({
+          poolKey: limits.poolKey,
+          amount: limits.principal,
+          minOut: limits.minimum,
+          deepAmount: limits.deepBudget,
+          ...(zeroDeepCoin ? { deepCoin: zeroDeepCoin } : {})
+        })(transaction);
+  // The pool returns early below its minimum order size. Enforce the
+  // reviewed floor on the output alone, before refunding any DEEP.
+  const received = limits.direction === "base_to_quote" ? quoteCoinResult : baseCoinResult;
+  const [minimum] = transaction.splitCoins(received, [limits.minimum]);
+  transaction.mergeCoins(received, [minimum]);
+  const returns = [baseCoinResult, quoteCoinResult];
+  if (inputFeeMode) {
+    transaction.moveCall({ target: "0x2::coin::destroy_zero", typeArguments: [limits.deepType], arguments: [deepCoinResult] });
+  } else if (limits.baseType === limits.deepType || limits.quoteType === limits.deepType) {
+    const sameAsset = limits.baseType === limits.deepType ? baseCoinResult : quoteCoinResult;
+    transaction.mergeCoins(sameAsset, [deepCoinResult]);
+  } else {
+    returns.push(deepCoinResult);
+  }
+  transaction.transferObjects(returns, limits.account);
+  mergeSwapRefundsIntoFunding(transaction, limits.direction);
 }
 
 export function createDeepbookSwapTransactionMaterialDigestProducer(
@@ -415,10 +449,6 @@ export function createDeepbookSwapTransactionMaterialDigestProducer(
       ]
     };
   };
-}
-
-function quotePolicyExpiresAt(policy: DeepbookSwapQuotePolicyOk): Date {
-  return new Date(Date.parse(policy.fetchedAt) + policy.staleAfterMs);
 }
 
 function buildFailureMessage(error: unknown): string {

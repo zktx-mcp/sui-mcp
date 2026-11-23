@@ -86,7 +86,7 @@ const suiChainReceiptAccountBalanceChangeSchema = z.object({
   }
 });
 
-const suiChainReceiptEffectsStatusSchema = z.discriminatedUnion("success", [
+export const suiChainReceiptEffectsStatusSchema = z.discriminatedUnion("success", [
   z.object({
     success: z.literal(true),
     errorKind: z.never().optional(),
@@ -95,11 +95,13 @@ const suiChainReceiptEffectsStatusSchema = z.discriminatedUnion("success", [
   z.object({
     success: z.literal(false),
     errorKind: z.string().min(1).max(200).optional(),
+    failedCommand: z.number().int().nonnegative().optional(),
+    minimumReceiveFailure: z.literal(true).optional(),
     errorMessage: z.string().min(1).max(2000).optional()
   }).strict()
 ]);
 
-export const suiChainReceiptEvidenceSchema = z.object({
+const fullReceipt = z.object({
   kind: z.literal("sui_chain_receipt_v1"),
   source: z.object({
     method: z.literal("client.core.getTransaction"),
@@ -116,8 +118,22 @@ export const suiChainReceiptEvidenceSchema = z.object({
   objectTypes: z.record(suiAddressStringSchema, z.string().min(1).max(512))
 }).strict();
 
+export const receiptDetailSchemas = fullReceipt.shape;
+
+// Existing public receipts keep the full v1 contract. A verified outcome can
+// also be recorded when optional on-chain detail was absent or malformed.
+export const suiChainReceiptEvidenceSchema = z.discriminatedUnion("kind", [
+  fullReceipt,
+  fullReceipt.extend({ kind: z.literal("sui_chain_receipt_outcome_v2"),
+    packageCalls: fullReceipt.shape.packageCalls.optional(),
+    accountBalanceChanges: fullReceipt.shape.accountBalanceChanges.optional(),
+    objectTypes: fullReceipt.shape.objectTypes.optional(),
+    detailStatus: z.literal("incomplete")
+  })
+]);
+
 export type SuiChainReceiptEvidence = z.infer<typeof suiChainReceiptEvidenceSchema>;
 export type SuiChainReceiptSource = SuiChainReceiptEvidence["source"];
 export type SuiChainReceiptEffectsStatus = SuiChainReceiptEvidence["effectsStatus"];
-export type SuiChainReceiptPackageCall = SuiChainReceiptEvidence["packageCalls"][number];
-export type SuiChainReceiptAccountBalanceChange = SuiChainReceiptEvidence["accountBalanceChanges"][number];
+export type SuiChainReceiptPackageCall = z.infer<typeof suiChainReceiptPackageCallSchema>;
+export type SuiChainReceiptAccountBalanceChange = z.infer<typeof suiChainReceiptAccountBalanceChangeSchema>;

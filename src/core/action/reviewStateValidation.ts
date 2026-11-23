@@ -8,8 +8,11 @@ export function parseReviewStateStructuralInvariants(input: unknown): ReviewStat
 
 export function parseLifecycleValidatedReviewState(
   input: unknown,
-  validateAdapterLifecycle: AdapterLifecycleValidator
+  validateAdapterLifecycle: AdapterLifecycleValidator,
+  externalBackup = false
 ): ReviewState {
+  // Bound diagnostics for external input before producing the canonical stored projection.
+  if (externalBackup && !reviewStateStructuralInvariantSchema.validate(input)) throw new Error("Invalid backup review state");
   const parsed = parseReviewStateStructuralInvariants(input);
   if (parsed.adapterLifecycle) {
     validateAdapterLifecycle(parsed.adapterLifecycle);

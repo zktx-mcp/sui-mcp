@@ -11,6 +11,7 @@ describe("wallet asset row formatting", () => {
     };
     // The display quantity is grounded in verified decimals.
     expect(formatWalletAssetRow(entry)).toEqual({
+      coinType: entry.coinType,
       symbol: "SUI",
       total: "1.180514208"
     });
@@ -26,6 +27,7 @@ describe("wallet asset row formatting", () => {
       display: { amount: "1426.505546346", symbol: "SUI" }
     };
     expect(formatWalletAssetRow(entry)).toEqual({
+      coinType: entry.coinType,
       symbol: "SUI",
       total: "1426.505546346"
     });
@@ -41,6 +43,7 @@ describe("wallet asset row formatting", () => {
     };
     // No display block: the total is computed from the raw balance with the decimals.
     expect(formatWalletAssetRow(entry)).toEqual({
+      coinType: entry.coinType,
       symbol: "USDC",
       total: "3"
     });
@@ -56,6 +59,7 @@ describe("wallet asset row formatting", () => {
     };
     // Raw 4344929000 does not establish a display quantity without decimals.
     expect(formatWalletAssetRow(entry)).toEqual({
+      coinType: entry.coinType,
       symbol: "WAL",
       total: "Amount unavailable"
     });
@@ -64,6 +68,7 @@ describe("wallet asset row formatting", () => {
   it("prefers the unit symbol when there is no display block", () => {
     const entry = { balance: "5", coinType: "0xabc::foo::FOO", unit: { status: "available", symbol: "FOOBAR" } };
     expect(formatWalletAssetRow(entry)).toEqual({
+      coinType: entry.coinType,
       symbol: "FOOBAR",
       total: "Amount unavailable"
     });
@@ -71,6 +76,7 @@ describe("wallet asset row formatting", () => {
 
   it("reports amount unavailable when neither a display amount nor a raw balance is present", () => {
     expect(formatWalletAssetRow({ coinType: "0xabc::foo::FOO" })).toEqual({
+      coinType: "0xabc::foo::FOO",
       symbol: "FOO",
       total: "Amount unavailable"
     });

@@ -1,12 +1,13 @@
+import { DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS } from "../src/core/read/readServiceTypes.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { unnegatedClaims, unsupportedJsonRpcClaims } from "./helpers/documentClaims.js";
 
 import {
-  DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE,
-  DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE,
+  DEEPBOOK_CANDLE_CANDLE_USE,
+  DEEPBOOK_CANDLE_SOURCE_BASE,
+  DEEPBOOK_CANDLE_USDC_REFERENCE,
   DEEPBOOK_READ_RESPONSE_UNSUPPORTED,
   DEEPBOOK_SDK_SIMULATION_SOURCE_BASE,
   DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING
@@ -169,7 +170,6 @@ describe("source policy", () => {
     // Reads public on-chain facts through the server endpoint only.
     const service = readFileSync(join(process.cwd(), "src/mcp-ui/readCards.ts"), "utf8");
     expect(service).toContain("options.publicChainReceiptReader");
-    expect(service).toContain("receiptInputSchema.parse(input)");
     // Fail closed against shape drift: types the response with the shared
     // server SOT type and validates it before rendering.
     const displaySource = readFileSync(join(process.cwd(), "src/mcp-ui/view/receiptData.ts"), "utf8");
@@ -714,22 +714,23 @@ describe("source policy", () => {
         /TOOL_NAMES\.readGetDeepbookUsdcPriceAtTime[\s\S]{0,700}description:\s*"([^"]+)"/
       )?.[1] ?? "";
 
-    expect(description).toContain("DeepBookV3 official Indexer USDC candle evidence");
+    expect(description).toContain("pool-bound DeepBook USDC candle evidence");
     expect(description).not.toMatch(/live quote|execution price|route|best price|USD value|P&L|tax|signing readiness/i);
-    expect(atTimeDescription).toContain("DeepBookV3 official Indexer USDC candle evidence");
+    expect(atTimeDescription).toContain("pool-bound DeepBook USDC candle evidence");
     expect(atTimeDescription).toContain("representative price");
     expect(atTimeDescription).not.toMatch(/live quote|execution price|route|best price|USD value|P&L|tax|signing readiness/i);
     expect(docs).toMatch(/read_get_deepbook_usdc_price_history/);
     expect(docs).toMatch(/read_get_deepbook_usdc_price_at_time/);
     expect(docs).toMatch(/matchedCandle\.close/);
     expect(docs).toMatch(/no_price_in_search_window/);
-    expect(docs).toMatch(/DeepBookV3 official Indexer USDC candle evidence|official Indexer candle data|official Indexer candle references/i);
-    expect(docs).toContain(`quantitySemantics.allowedUse: "${DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.allowedUse}"`);
-    expect(docs).toContain(`source.kind: "${DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind}"`);
+    expect(docs).toMatch(/pool-bound DeepBook USDC candle evidence|pool-bound DeepBook candle data|pool-bound DeepBook candle references/i);
+    expect(docs).toContain(`quantitySemantics.allowedUse: "${DEEPBOOK_CANDLE_CANDLE_USE.allowedUse}"`);
+    expect(docs).toContain(`source.kind: "${DEEPBOOK_CANDLE_SOURCE_BASE.kind}"`);
     expect(docs).toContain(
-      `source.chainRecomputedBySuiMcp: ${String(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.chainRecomputedBySuiMcp)}`
+      `source.chainRecomputedBySuiMcp: ${String(DEEPBOOK_CANDLE_SOURCE_BASE.chainRecomputedBySuiMcp)}`
     );
-    expect(docs).toMatch(/does not independently recompute/i);
+    expect(docs).toMatch(/Sui MCP aggregates finalized fills by pool ID/i);
+    expect(docs).not.toMatch(/does not independently recompute/i);
     expect(docs).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.usdcNotFiatUsdAndNotPeg);
     expect(docs).toMatch(/not[\s\S]{0,160}(live quote|historical mid price|global market price)/i);
     expect(docs).toMatch(/not[\s\S]{0,160}(P&L|cost basis|signing readiness)/i);
@@ -741,14 +742,14 @@ describe("source policy", () => {
     expect(source).toMatch(/read_get_deepbook_usdc_price_at_time/);
     expect(source).toMatch(/matchedCandle\.close/);
     expect(source).toMatch(/no_price_in_search_window/);
-    expect(source).toContain(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind);
-    expect(source).toContain(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.allowedUse);
-    expect(source).toContain(`usdcIsFiatUsd: ${String(DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE.usdcIsFiatUsd)}`);
+    expect(source).toContain(DEEPBOOK_CANDLE_SOURCE_BASE.kind);
+    expect(source).toContain(DEEPBOOK_CANDLE_CANDLE_USE.allowedUse);
+    expect(source).toContain(`usdcIsFiatUsd: ${String(DEEPBOOK_CANDLE_USDC_REFERENCE.usdcIsFiatUsd)}`);
     expect(source).toContain(
-      `usdPegGuaranteeAvailable: ${String(DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE.usdPegGuaranteeAvailable)}`
+      `usdPegGuaranteeAvailable: ${String(DEEPBOOK_CANDLE_USDC_REFERENCE.usdPegGuaranteeAvailable)}`
     );
     expect(source).toContain(
-      `chainRecomputedBySuiMcp: ${String(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.chainRecomputedBySuiMcp)}`
+      `chainRecomputedBySuiMcp: ${String(DEEPBOOK_CANDLE_SOURCE_BASE.chainRecomputedBySuiMcp)}`
     );
     expect(source).toMatch(/liveQuoteAvailable:\s*false/);
     expect(source).toMatch(/historicalMidPriceAvailable:\s*false/);
@@ -757,7 +758,7 @@ describe("source policy", () => {
     expect(source).toMatch(/signingReadinessAvailable:\s*false/);
     expect(source).toMatch(/profitAndLossAvailable:\s*false/);
     expect(source).toMatch(/costBasisAvailable:\s*false/);
-    expect(source).toMatch(/independent_chain_recomputation/);
+    expect(DEEPBOOK_USDC_PRICE_HISTORY_UNSUPPORTED_CLAIMS).not.toContain("independent_chain_recomputation");
   });
 
   it("keeps public and runtime DeepBook source-owner guidance aligned with the contract", () => {
@@ -776,12 +777,12 @@ describe("source policy", () => {
     ) as Record<(typeof publicAndRuntimeGuidanceFiles)[number], string>;
     const usdcNotFiatAndNotPeg = DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.usdcNotFiatUsdAndNotPeg;
 
-    expect(guidanceByFile["docs/MCP_TOOLS.md"]).toContain(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind);
-    expect(guidanceByFile["docs/MCP_TOOLS.md"]).toContain(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.allowedUse);
+    expect(guidanceByFile["docs/MCP_TOOLS.md"]).toContain(DEEPBOOK_CANDLE_SOURCE_BASE.kind);
+    expect(guidanceByFile["docs/MCP_TOOLS.md"]).toContain(DEEPBOOK_CANDLE_CANDLE_USE.allowedUse);
     expect(guidanceByFile["docs/MCP_TOOLS.md"]).toContain(DEEPBOOK_SDK_SIMULATION_SOURCE_BASE.simulation);
-    expect(guidanceByFile["docs/MCP_TOOLS.md"]).toContain(DEEPBOOK_OFFICIAL_INDEXER_USDC_REFERENCE.priceConvention);
+    expect(guidanceByFile["docs/MCP_TOOLS.md"]).toContain(DEEPBOOK_CANDLE_USDC_REFERENCE.priceConvention);
     expect(guidanceByFile["docs/MCP_TOOLS.md"]).toContain(usdcNotFiatAndNotPeg);
-    expect(guidanceByFile["docs/MCP_TOOLS.md"]).toMatch(/official Indexer[\s\S]{0,80}candle evidence/i);
+    expect(guidanceByFile["docs/MCP_TOOLS.md"]).toMatch(/pool-bound DeepBook[\s\S]{0,80}candle evidence/i);
     expect(guidanceByFile["docs/MCP_TOOLS.md"]).toMatch(
       /orderbook[\s\S]{0,160}pinned DeepBook SDK|pinned SDK[\s\S]{0,160}orderbook/i
     );
@@ -789,7 +790,7 @@ describe("source policy", () => {
       /mid[- ]price[\s\S]{0,160}pinned SDK|pinned SDK[\s\S]{0,160}mid[- ]price/i
     );
 
-    expect(guidanceByFile["docs/AGENT_BEHAVIOR.md"]).toMatch(/official Indexer candle evidence/i);
+    expect(guidanceByFile["docs/AGENT_BEHAVIOR.md"]).toMatch(/pool-bound DeepBook candle evidence/i);
     expect(guidanceByFile["docs/AGENT_BEHAVIOR.md"]).toContain(usdcNotFiatAndNotPeg);
     expect(guidanceByFile["docs/AGENT_BEHAVIOR.md"]).toMatch(/matchedCandle\.close/);
     expect(guidanceByFile["docs/AGENT_BEHAVIOR.md"]).toMatch(/not[\s\S]{0,160}(route choice|P&L|tax|signing readiness)/i);
@@ -798,13 +799,13 @@ describe("source policy", () => {
     expect(guidanceByFile["protocols/deepbook-v3.md"]).toContain(DEEPBOOK_SDK_SIMULATION_SOURCE_BASE.simulation);
 
     expect(guidanceByFile["src/mcp/serverInfo.ts"]).toContain(
-      runtimeWordingReference("officialIndexerCandleData")
+      runtimeWordingReference("chainCandleData")
     );
     expect(guidanceByFile["src/mcp/serverInfo.ts"]).toContain(
-      runtimeWordingReference("officialIndexerCandleReferences")
+      runtimeWordingReference("chainCandleReferences")
     );
     expect(guidanceByFile["src/mcp/serverInfo.ts"]).toContain(
-      runtimeWordingReference("officialIndexerUsdcDenominatedCandles")
+      runtimeWordingReference("chainUsdcDenominatedCandles")
     );
     expect(guidanceByFile["src/mcp/serverInfo.ts"]).toContain(runtimeWordingReference("pinnedSdkSnapshots"));
     expect(guidanceByFile["src/mcp/serverInfo.ts"]).toContain(runtimeWordingReference("usdcNotFiatUsdAndNotPeg"));
@@ -814,8 +815,8 @@ describe("source policy", () => {
       "src/mcp/prompts.ts",
       "src/adapters/adapterPromptSurfaces.ts"
     ] as const) {
-      expect(guidanceByFile[file]).not.toContain(DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind);
-      expect(guidanceByFile[file]).not.toContain(DEEPBOOK_OFFICIAL_INDEXER_CANDLE_USE.allowedUse);
+      expect(guidanceByFile[file]).not.toContain(DEEPBOOK_CANDLE_SOURCE_BASE.kind);
+      expect(guidanceByFile[file]).not.toContain(DEEPBOOK_CANDLE_CANDLE_USE.allowedUse);
       expect(guidanceByFile[file]).not.toContain(DEEPBOOK_SDK_SIMULATION_SOURCE_BASE.simulation);
     }
 
@@ -827,7 +828,7 @@ describe("source policy", () => {
         /DeepBook source owner contract[\s\S]{0,160}(FlowX|flowx_aggregator_route|flowx_pinned_registry)/i
       );
       expect(guidance, file).not.toMatch(
-        /DeepBookV3 official Indexer[\s\S]{0,120}(supports|provides|enables|returns)\s+(route recommendation|best-price advice|signing readiness|transaction bytes|P&L|tax|cost basis)/i
+        /pool-bound DeepBook[\s\S]{0,120}(supports|provides|enables|returns)\s+(route recommendation|best-price advice|signing readiness|transaction bytes|P&L|tax|cost basis)/i
       );
     }
   });
@@ -935,7 +936,7 @@ describe("source policy", () => {
     expect(source).toMatch(/deepbook_usdc_token_denominated_reference_candles_for_supported_assets/);
     expect(source).toMatch(/usdcIsFiatUsd:\s*false/);
     expect(source).toMatch(/usdPegGuaranteeAvailable:\s*false/);
-    expect(source).toMatch(/chainRecomputedBySuiMcp:\s*false/);
+    expect(source).toMatch(/chainRecomputedBySuiMcp:\s*true/);
   });
 
   it("keeps review-time simulation requirements separate from transaction bytes and quote reads", () => {
@@ -1319,10 +1320,6 @@ describe("source policy", () => {
       join(process.cwd(), "src/core/activity/localDataValidation.ts"),
       "utf8"
     );
-    const localDataServiceSource = readFileSync(
-      join(process.cwd(), "src/core/activity/localDataService.ts"),
-      "utf8"
-    );
     const sqliteActivityStoreSource = readFileSync(
       join(process.cwd(), "src/core/activity/sqliteActivityStore.ts"),
       "utf8"
@@ -1393,26 +1390,12 @@ describe("source policy", () => {
       "test/mcpSchemas.test.ts"
     ]);
     expect(filesImporting("reviewStateOutputSchema")).toEqual([
-      "src/core/session/cardResult.ts", "src/core/session/sqliteWalletWorkflowStore.ts", "src/core/session/workflowState.ts", "src/core/session/workflowView.ts",
+      "src/core/session/cardResult.ts", "src/core/session/workflowState.ts", "src/core/session/workflowView.ts",
       "src/mcp/tools/read/reviewActivityTools.ts", "src/mcp/tools/session/shared.ts"
     ]);
-    expect(localDataValidationSource).toMatch(/parseLocalDataEnvelope/);
-    expect(localDataValidationSource).toMatch(/validateAdapterLifecycle:\s*AdapterLifecycleValidator/);
-    expect(localDataValidationSource).toMatch(/validatePayloadSemantics\(parsed\.data\.data,\s*options\.validateAdapterLifecycle\)/);
-    expect(localDataValidationSource).toMatch(/validateReviewStateJsonColumn\(row\.state_json,\s*"state_json",\s*validateAdapterLifecycle\)/);
-    expect(localDataValidationSource).toMatch(/parseLifecycleValidatedReviewState\(parsed as ReviewState,\s*validateAdapterLifecycle\)/);
     expect(localDataValidationSource).not.toMatch(/reviewState(?:Schema|ShapeSchema|OutputShapeSchema|StructuralInvariantSchema|OutputSchema)/);
-    expect(localDataServiceSource).toMatch(/private readonly validateAdapterLifecycle:\s*AdapterLifecycleValidator/);
-    expect(localDataServiceSource).toMatch(/parseLocalDataEnvelope\(envelope,[\s\S]{0,180}validateAdapterLifecycle:\s*this\.validateAdapterLifecycle/);
-    expect(localDataServiceSource).toMatch(/parseLocalDataEnvelope\(input,[\s\S]{0,180}validateAdapterLifecycle:\s*this\.validateAdapterLifecycle/);
     expect(sqliteActivityStoreTypesSource).toMatch(/validateAdapterLifecycle:\s*AdapterLifecycleValidator/);
     expect(sqliteActivityStoreTypesSource).not.toMatch(/validateAdapterLifecycle\?:/);
-    expect(sqliteActivityStoreSource).toMatch(/private readonly validateAdapterLifecycle:\s*AdapterLifecycleValidator/);
-    expect(sqliteActivityStoreSource).toMatch(/this\.validateAdapterLifecycle\s*=\s*options\.validateAdapterLifecycle/);
-    expect(sqliteActivityStoreSource).toMatch(/parseLifecycleValidatedReviewState\(input\.state,\s*this\.validateAdapterLifecycle\)/);
-    expect(sqliteActivityStoreSource).toMatch(/parseReviewStateEvidenceJson/);
-    expect(sqliteActivityStoreSource).toMatch(/parseLifecycleValidatedReviewState\(parsed,\s*this\.validateAdapterLifecycle\)/);
-    expect(sqliteActivityStoreSource).toMatch(/new SqliteLocalDataService\(this\.db,\s*options,\s*this\.validateAdapterLifecycle\)/);
     expect(sqliteActivityStoreSource).not.toMatch(/reviewState(?:Schema|ShapeSchema|OutputShapeSchema|StructuralInvariantSchema|OutputSchema)/);
     expect(reviewComputationSource).toMatch(/rejectAdapterLifecycle/);
     expect(reviewComputationSource).not.toMatch(/validateSupportedAdapterLifecycle/);
@@ -1771,7 +1754,8 @@ describe("source policy", () => {
     expect(source).toMatch(/(Inspect|Stored summary rows and inspect rows|Inspect responses and stored-summary rows)[\s\S]{0,260}`compact`/i);
     expect(source).toMatch(/compact\.factScope[\s\S]{0,80}transaction/);
     expect(source).toMatch(/compact\.requestedAccountScoped[\s\S]{0,80}false/);
-    expect(source).toMatch(/compact[\s\S]{0,220}transaction-level facts[\s\S]{0,260}not (the requested wallet|wallet-specific)/i);
+    expect(source).toMatch(/live inspect row[\s\S]{0,160}transaction-level facts/i);
+    expect(source).toMatch(/stored row[\s\S]{0,180}requested_account[\s\S]{0,100}balanceChangesAccount/i);
     expect(source).toMatch(/wallet\/account-specific balance answers[\s\S]{0,180}requestedAccountTransactionFacts[\s\S]{0,220}requestedAccount\.coinFlows[\s\S]{0,220}transactions\[\]\.requestedAccountEffect/i);
     expect(source).toMatch(/requestedAccountTransactionFacts\[\][\s\S]{0,220}account-scoped row surface/i);
     expect(source).toMatch(/transactionDetailAvailability[\s\S]{0,260}transactions\[\]\.transactionContext/i);

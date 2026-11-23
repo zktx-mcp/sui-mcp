@@ -65,14 +65,16 @@ export function createTestSwapHumanReadableReviewEvidence(input: {
           rawAmount: input.swapQuotePolicy.minimumOutput.raw,
           rawAmountSource: "quote_policy_evidence"
         }],
-        fees: [{
+        inputFlow: input.swapQuotePolicy.inputFlow,
+        separateFeeBudgetRaw: input.swapQuotePolicy.separateFeeBudgetRaw,
+        fees: input.swapQuotePolicy.inputFlow.fee.kind === "separate_coin" ? [{
           role: "fee",
-          symbol: input.swapQuotePolicy.protocolFee.asset.symbol,
-          coinType: input.swapQuotePolicy.protocolFee.asset.coinType,
-          decimals: input.swapQuotePolicy.protocolFee.asset.decimals,
-          rawAmount: input.swapQuotePolicy.protocolFee.raw,
+          symbol: input.swapQuotePolicy.inputFlow.fee.amount.asset.symbol,
+          coinType: input.swapQuotePolicy.inputFlow.fee.amount.asset.coinType,
+          decimals: input.swapQuotePolicy.inputFlow.fee.amount.asset.decimals,
+          rawAmount: input.swapQuotePolicy.inputFlow.fee.amount.raw,
           rawAmountSource: "quote_policy_evidence"
-        }]
+        }] : []
       },
       recipients: [
         { role: "connected_account", address: input.account },
@@ -139,6 +141,7 @@ export function createTestSwapHumanReadableReviewEvidence(input: {
         }
       ],
       freshness: {
+        quotedAt: input.swapQuotePolicy.quoteSource.fetchedAt,
         status: "current",
         evaluatedAt: input.derivedAt.toISOString(),
         expiresAt: input.materialHandle.expiresAt,

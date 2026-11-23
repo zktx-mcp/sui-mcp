@@ -1,3 +1,4 @@
+import { confirmLocalRecords } from "./fixtures/settingsWorkflow.js";
 import { suiGrants } from "./fixtures/walletGrants.js";
 import { WalletSdkPeer } from "./fixtures/walletSdkPeer.js";
 import type { ChildProcess } from "node:child_process";
@@ -71,6 +72,6 @@ it("does not let a cancelled replacement continue into a new data generation", a
   peer.killMode = "hold"; f.runtime.fence(prior);
   const replacing = f.runtime.replace(prior, () => {});
   const stopped = expect(replacing).rejects.toThrow("run ended");
-  await f.run(() => f.localData.resetLocalData()); peer.finish(); await stopped;
+  await f.run(() => confirmLocalRecords(f, f.localData)); peer.finish(); await stopped;
   expect(f.peers).toHaveLength(1); expect(f.runtime.availability().status).toBe("unavailable");
 });

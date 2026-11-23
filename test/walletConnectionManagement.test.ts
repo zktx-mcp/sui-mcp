@@ -1,3 +1,4 @@
+import type { WalletSession } from "../src/core/session/walletConnection.js";
 import { connectViewSchema } from "../src/core/session/workflowView.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -116,7 +117,7 @@ it.each(["stop", "expiry"] as const)("blocks a new valid card while the %s pairi
   f.approval.reject(new Error("Synthetic original approval ended without a session"));
   await vi.waitFor(() => expect(f.run(() => f.records.operation(operation.operationId)?.settlementPending)).toBe(false));
   expect((await f.read(fresh)).snapshot).toEqual(fresh.snapshot);
-  const resumed = await f.createConnection(), nextApproval = deferred<Awaited<ReturnType<typeof f.transport.restore>>[number]>();
+  const resumed = await f.createConnection(), nextApproval = deferred<WalletSession>();
   f.connect.mockResolvedValueOnce({ uri: "wc:synthetic-new-pairing", expiresAt: new Date(f.now().getTime() + 300_000).toISOString(), approval: nextApproval.promise });
   try {
     expect(f.run(() => f.workflow.currentConnectionContext()).connection?.sessionPresence).toBe("absent");

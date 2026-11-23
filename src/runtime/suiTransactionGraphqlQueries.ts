@@ -104,6 +104,10 @@ export type GraphqlTransactionResult = {
 };
 
 export type GraphqlTransactionsResult = {
+  serviceConfig?: { availableRange?: {
+    first: { sequenceNumber: number; timestamp: string } | null;
+    last: { sequenceNumber: number; timestamp: string } | null;
+  } | null };
   transactions?: {
     nodes?: GraphqlTransactionNode[] | null;
     pageInfo?: {
@@ -169,11 +173,18 @@ export async function queryScanAccountTransactions(
         $last: Int!
         $before: String
         $filter: TransactionFilter!
+        $rangeFilters: [String!]!
         $moveCallLimit: Int!
         $balanceChangeLimit: Int!
         $objectChangeLimit: Int!
         $eventLimit: Int!
       ) {
+        serviceConfig {
+          availableRange(type: "Query", field: "transactions", filters: $rangeFilters) {
+            first { sequenceNumber timestamp }
+            last { sequenceNumber timestamp }
+          }
+        }
         transactions(last: $last, before: $before, filter: $filter) {
           nodes {
             ...SuiMcpTransactionDetail
@@ -190,6 +201,7 @@ export async function queryScanAccountTransactions(
       ...transactionDetailVariables({}, input.limits),
       last: input.last,
       before: input.before ?? null,
+      rangeFilters: Object.keys(input.filter).filter(key => key !== "afterCheckpoint" && key !== "beforeCheckpoint"),
       filter: input.filter
     }
   });

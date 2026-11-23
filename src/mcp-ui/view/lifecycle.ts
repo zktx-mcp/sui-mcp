@@ -561,7 +561,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       ...(settings && object(snapshot.data)?.download ? { download: { ...object(object(snapshot.data)?.download), remainingMs: undefined } } : {}) } : undefined;
     const settingsProgress = settings && commandFlight?.phase === "sending" && confirmation.status === "confirmed"
       ? settingsCommandProgress(commandFlight.basis, snapshot, commandFlight.input) : undefined;
-    const key = `${automation === "paused"}:${JSON.stringify(settingsProgress)}:${snapshot.revision}:${reference !== undefined}:${display !== undefined}:${walletDisplay !== undefined}:${JSON.stringify(projection)}`;
+    const chartPreview = snapshot.kind === "chart" && snapshot.state === "running" && object(snapshot.data)?.status === "preview";
+    const key = `${chartPreview}:${automation === "paused"}:${JSON.stringify(settingsProgress)}:${snapshot.revision}:${reference !== undefined}:${display !== undefined}:${walletDisplay !== undefined}:${JSON.stringify(projection)}`;
     if (key === renderedKey || (key === attemptedKey && !retryFailed)) return;
     attemptedKey = key;
     const previousNodes = [...content.children];
@@ -580,7 +581,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
         const controls = renderer.controls(snapshot, (input) => { void submit(input); }, display, walletDisplay, context);
         candidate = "node" in controls ? controls : { node: controls };
         nextInput = true;
-      } else if ((interactive || snapshot.reason === "completed") && snapshot.data !== undefined) {
+      } else if ((interactive || chartPreview || snapshot.reason === "completed") && snapshot.data !== undefined) {
         candidate = renderer.result(snapshot, display, reference && snapshot.reason !== "cancelled" ? (input) => { void submit(input); } : undefined, walletDisplay, context);
       }
       content.replaceChildren(...(candidate ? [candidate.node] : [])); inserted = true;
@@ -613,7 +614,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     // Same-card successful history is not an identity or transport failure.
     // Admission may have fixed a previously empty Chart input in the meantime.
     if (snapshot && next.revision < snapshot.revision) return false;
-    if (snapshot?.state === "closed" && confirmation.status === "confirmed" && JSON.stringify(next) !== JSON.stringify(snapshot)) throw new Error("The completed card result cannot change.");
+    if (snapshot?.state === "closed" && confirmation.status === "confirmed" && !sameJson(next, snapshot)) throw new Error("The completed card result cannot change.");
     if (boundInput && [...new Set([...Object.keys(boundInput), ...Object.keys(next.input)])]
         .some((key) => JSON.stringify(next.input[key]) !== JSON.stringify(boundInput![key]))) {
       confirmation = { status: "rejected", message: "The returned information does not match this card." };
@@ -924,7 +925,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       }
       const linkedId = linkedCardId(result);
       const ids = [initial.snapshot?.cardId, reference?.cardId, linkedId].filter((id): id is string => id !== undefined);
-      if (!ids.length) throw new Error("Card data is unavailable.");
+      if (!ids.length) throw new Error(initial.error ?? "Card data is unavailable.");
       if (ids.some((id) => id !== ids[0]) || (initial.snapshot && initial.snapshot.kind !== kind)) {
         confirmation = { status: "rejected", message: "The returned information does not match this card." }; throw new Error(confirmation.message);
       }

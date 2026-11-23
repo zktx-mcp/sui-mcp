@@ -85,5 +85,5 @@ export function formatUtc(value: string | number): string {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return typeof value === "number"
     ? `${value} milliseconds since 1970-01-01T00:00:00Z` : value;
-  return `${date.toISOString().slice(0, 19).replace("T", " ")} UTC`;
+  return date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
 }

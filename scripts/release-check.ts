@@ -1,5 +1,5 @@
 import { connectViewSchema } from "../src/core/session/workflowView.js";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, mkdirSync, writeFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,7 +28,7 @@ type PackInfo = {
   files: PackFile[];
 };
 
-const manifest = JSON.parse(readFileSync("package.json", "utf8")) as { name: string; version: string; mcpName: string; files: string[] };
+const manifest = JSON.parse(readFileSync("package.json", "utf8")) as { name: string; version: string; mcpName: string; publishConfig: { tag: string }; files: string[] };
 
 const requiredFiles = [
   "package.json",
@@ -41,6 +41,8 @@ const requiredFiles = [
   "dist/runtime/walletSdkIpc.js",
   ...["account", "receipt", "chart", "connect", "disconnect", "review", "settings"].flatMap((kind) => [`dist/mcp-app/${kind}.html`, `dist/mcp-app/${kind}.notices.txt`]),
   "LICENSES/@mysten-sui-2.17.0-Apache-2.0.txt",
+  "LICENSES/@mysten-bcs-2.1.4-Apache-2.0.txt",
+  "LICENSES/@mysten-utils-0.4.2-Apache-2.0.txt",
   "docs/UTILITY_INDEX.md",
   ...manifest.files.filter((path) => path.endsWith(".md")),
   ...MCP_RESOURCES.map((resource) => resource.path)
@@ -50,6 +52,7 @@ const forbiddenPrefixes = [
   "src/",
   "test/",
   ".WORK/",
+  "market-history/",
   "scripts/",
   "registry/generated/",
   "submission/",
@@ -221,6 +224,38 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
       Object.entries(tree.dependencies ?? {}).some(([name, dependency]) =>
         name === "mermaid" || name === "katex" || hasBrowserRenderer(dependency as typeof tree));
     if (hasBrowserRenderer(installedTree)) throw new Error("Browser renderer libraries must be embedded in cards, not installed as server runtime dependencies.");
+    const advisoryPackages = new Set(["zod", "follow-redirects", "hono", "@hono/node-server", "dompurify"]);
+    const installedVersions = new Map<string, Set<string>>();
+    function collectVersions(tree: { dependencies?: Record<string, { version?: string; dependencies?: Record<string, never> }> }) {
+      for (const [name, dependency] of Object.entries(tree.dependencies ?? {})) {
+        if (advisoryPackages.has(name) && dependency.version) {
+          const versions = installedVersions.get(name) ?? new Set<string>();
+          versions.add(dependency.version); installedVersions.set(name, versions);
+        }
+        collectVersions(dependency);
+      }
+    }
+    collectVersions(installedTree);
+    const versions = Object.fromEntries([...installedVersions].map(([name, values]) => [name,[...values].sort()]));
+    // Unions of the affected ranges in the reviewed advisories, including
+    // transitive runtime installations settled by the consumer's npm.
+    const affectedRanges = {
+      "@hono/node-server": "<2.1.3", // GHSA-rmxm-3fg6-px4f, GHSA-jpvv-r467-5p4w
+      "follow-redirects": ">=1.16.0 <=1.16.1", // GHSA-q3jh-wrc6-jgq8, GHSA-8r9p-f939-6h3c, GHSA-mrwp-f3q8-3g9p
+      hono: "<4.13.16", // GHSA-4m76-xfj5-7975, h7mg-cq63-vhpq, 3gg2-335m-rxc6, 46wx-v44x-9hh2, 4h7h-rv7c-7m2v
+      dompurify: "<=3.4.16", // GHSA-c6gr-qvv4-5v3f, GHSA-cg2g-xh64-v4q7, GHSA-mrv2-3pqr-j5jr
+      zod: "<4.6.6" // GHSA-mrhx-c7xc-m3w5
+    };
+    const selector = (name: string, range: string) => `[name="${name}"]:semver(${range})`;
+    const ranges = Object.entries(affectedRanges).map(([name, range]) => selector(name,range));
+    const affected = JSON.parse(capture("npm", ["query", ":is(" + ranges.join(",") + ")", "--offline"], installDir));
+    if (affected.length) throw new Error("The installed runtime contains a reviewed affected version: " +
+      affected.map((pkg: {name:string; version:string}) => pkg.name + "@" + pkg.version).join(", "));
+    const sanitizerVersions = new Set<string>(JSON.parse(capture("npm", ["query", '[name="dompurify"]', "--offline"]))
+      .map((pkg: {version:string}) => pkg.version));
+    const affectedSanitizers = JSON.parse(capture("npm", ["query", selector("dompurify", affectedRanges.dompurify), "--offline"]));
+    if (affectedSanitizers.length) throw new Error("The browser build includes an affected DOMPurify installation.");
+    process.stderr.write(`Installed advisory-related versions: ${JSON.stringify(versions)}\n`);
     stage = "MCP request-body rejection and recovery";
     try {
       await client.callTool({ name: TOOL_NAMES.readGetServerStatus, arguments: {},
@@ -241,6 +276,26 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
       TOOL_NAMES.uiOpenChart, TOOL_NAMES.settingsCreateLocalSettingsSession]) {
       if (!tools.tools.some((tool) => tool.name === name)) throw new Error(`Installed tool is missing: ${name}`);
     }
+    const cardLinks = [
+      [TOOL_NAMES.uiOpenAccount, CARD_RESOURCE_URIS.account], [TOOL_NAMES.uiOpenReceipt, CARD_RESOURCE_URIS.receipt],
+      [TOOL_NAMES.uiOpenChart, CARD_RESOURCE_URIS.chart], [TOOL_NAMES.sessionOpenWalletConnectionCard, CARD_RESOURCE_URIS.connect],
+      [TOOL_NAMES.sessionOpenWalletDisconnectionCard, CARD_RESOURCE_URIS.disconnect], [TOOL_NAMES.actionStartReview, CARD_RESOURCE_URIS.review],
+      [TOOL_NAMES.actionCreateProposalReview, CARD_RESOURCE_URIS.review], [TOOL_NAMES.sessionOpenReviewManagement, CARD_RESOURCE_URIS.review],
+      [TOOL_NAMES.settingsCreateLocalSettingsSession, CARD_RESOURCE_URIS.settings]
+    ] as const;
+    for (const [name, uri] of cardLinks) {
+      const meta = tools.tools.find((tool) => tool.name === name)?._meta;
+      if (meta?.["openai/outputTemplate"] !== uri || (meta?.ui as { resourceUri?: string })?.resourceUri !== uri) {
+        throw new Error(`Installed card tool does not identify its resource: ${name}`);
+      }
+    }
+    const privateActions = tools.tools.filter((t) => {
+      const visibility = (t._meta?.ui as {visibility?: string[]} | undefined)?.visibility;
+      return visibility?.length === 1 && visibility[0] === "app";
+    }).map((t) => t.name).sort();
+    if (privateActions.join() !== [TOOL_NAMES.uiActCard, TOOL_NAMES.uiReadCard, TOOL_NAMES.uiReadSettingsFile, TOOL_NAMES.uiSubmitCard].sort().join()) {
+      throw new Error("Installed card-only action contract differs from the package.");
+    }
     const listed = await client.listResources();
     const expected = [...MCP_RESOURCES.map((resource) => resource.uri), ...Object.values(CARD_RESOURCE_URIS)];
     if (listed.resources.length !== expected.length || listed.resources.some((resource) => !expected.includes(resource.uri as typeof expected[number]))) {
@@ -250,6 +305,23 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
       if (!listed.resources.some((resource) => resource.uri === uri)) throw new Error(`Installed resource is missing: ${uri}`);
       const read = await client.readResource({ uri });
       if (!read.contents.some((item) => "text" in item && item.text.trim().length > 0)) throw new Error(`Installed resource is empty: ${uri}`);
+      const entry = Object.entries(CARD_RESOURCE_URIS).find(([, resource]) => resource === uri);
+      if (entry) {
+        const [kind] = entry;
+        const directory = join(installDir, "node_modules", manifest.name, "dist/mcp-app");
+        const html = readFileSync(join(directory, kind + ".html"), "utf8"), notice = readFileSync(join(directory, kind + ".notices.txt"), "utf8");
+        if (kind === "review" || kind === "receipt") {
+          const bundled = [...notice.matchAll(/^dompurify (\S+)$/gm)];
+          if (!bundled.length || bundled.some(match => !sanitizerVersions.has(match[1]!))) {
+            throw new Error(`Could not bind the ${kind} sanitizer to an assessed build dependency.`);
+          }
+        }
+        const embedded = notice.replaceAll("&", "&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+        if (!html.includes(`<template id="dependency-notices">${embedded}</template>`) ||
+            !read.contents.some((item) => "text" in item && item.text === html && item.mimeType === RESOURCE_MIME_TYPE)) {
+          throw new Error(`Installed card resource, MIME or notice mismatch: ${kind}`);
+        }
+      }
     }
     stage = "Settings card and retired-route rejection";
     const result = await client.callTool({ name: TOOL_NAMES.settingsCreateLocalSettingsSession, arguments: {} });
@@ -327,6 +399,10 @@ export async function smokeInstalledRuntime(installDir: string, binPath: string)
 }
 
 async function main(): Promise<void> {
+  const channel = manifest.version.split("+")[0]!.includes("-") ? "next" : "latest";
+  if (manifest.publishConfig.tag !== channel || (process.env.npm_config_tag && process.env.npm_config_tag !== channel)) {
+    throw new Error(`Package version ${manifest.version} requires the ${channel} release channel.`);
+  }
   const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
   const server = JSON.parse(readFileSync("server.json", "utf8"));
   if (lock.name !== manifest.name || lock.version !== manifest.version || lock.packages?.[""]?.name !== manifest.name ||
@@ -342,28 +418,38 @@ async function main(): Promise<void> {
   assertLocalFiles();
   assertSqliteEngineAvailable();
 
-  const dryRunInfo = parsePackOutput(capture("npm", ["pack", "--dry-run", "--json"]));
-  assertPackContents(dryRunInfo);
-
   const packDir = mkdtempSync(join(tmpdir(), "sui-mcp-pack-"));
   try {
     const packedInfo = parsePackOutput(
       capture("npm", ["pack", "--json", "--pack-destination", packDir])
     );
     assertPackContents(packedInfo);
+    const packedPath = resolve(packDir, packedInfo.filename);
+    const extractDir = join(packDir, "contents");
+    mkdirSync(extractDir);
+    run("tar", ["-xzf", packedPath, "-C", extractDir]);
     const paths = new Set(packedInfo.files.map((file) => file.path));
     for (const file of paths) {
       if (!file.endsWith(".md")) continue;
-      for (const match of readFileSync(file, "utf8").matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+      for (const match of readFileSync(join(extractDir, "package", file), "utf8").matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
         const target = match[1]!.trim().replace(/^<|>$/g, "").split("#")[0]!;
         if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target)) continue;
         const path = relative(process.cwd(), resolve(dirname(file), decodeURIComponent(target))).replaceAll("\\", "/");
         if (!paths.has(path)) throw new Error(`Packed documentation link has no shipped target: ${file} -> ${target}`);
       }
     }
-    const packedPath = resolve(packDir, packedInfo.filename);
     process.stderr.write(`Checked package SHA256: ${createHash("sha256").update(readFileSync(packedPath)).digest("hex")}\n`);
     await smokeInstallPackedTarball(packedPath);
+    const output = process.env.SUI_MCP_RELEASE_OUTPUT;
+    if (output) {
+      const integrity = "sha512-" + createHash("sha512").update(readFileSync(packedPath)).digest("base64");
+      mkdirSync(output, { recursive: true });
+      copyFileSync(packedPath, join(output, "package.tgz"));
+      copyFileSync("server.json", join(output, "server.json"));
+      writeFileSync(join(output, "release.json"), JSON.stringify({
+        name: manifest.name, version: manifest.version, mcpName: server.name, integrity
+      }) + "\n");
+    }
   } finally {
     rmSync(packDir, { recursive: true, force: true });
   }

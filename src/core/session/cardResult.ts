@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { reviewStateOutputSchema } from "../action/schemas.js";
 import type { CardRecord, CardState } from "./cardSession.js";
 import type { WalletConnection } from "./walletConnection.js";
-import type { TransactionRequest } from "./transactionRequest.js";
+import { receiptObservationMessages, type TransactionRequest } from "./transactionRequest.js";
 import type { ReviewSession } from "../action/types.js";
 import { assertNoForbiddenMcpFields } from "../action/forbiddenFields.js";
 import { closedWalletCardSchema, closedReviewCardSchema, REVIEW_BOUNDARY } from "./workflowView.js";
@@ -30,6 +30,7 @@ export function reviewCardResult(record: CardRecord, at: Date, input: {
   const message = record.state.error ?? (request?.execution ? request.execution.status === "success" ? "Transaction succeeded on Sui." : "Transaction failed on Sui."
     : mode === "review_manage" && record.state.reason === "expired" ? "This result lookup expired. Ask in chat for a new result card for the same transaction."
     : input.observationStopped && request && request.requestStatus !== "stopped" ? "Result checking was stopped. This does not cancel the transaction. Ask in chat for a new result card for the same transaction."
+    : request?.lastObservation ? receiptObservationMessages[request.lastObservation.kind]
     : request ? request.reason ?? "No chain execution result has been confirmed."
     : session?.plans[0]?.reviewModel ? "This proposal review has ended. It provided no wallet approval or execution."
     : record.state.reason === "cancelled" ? "This review was cancelled. No approval request was sent."

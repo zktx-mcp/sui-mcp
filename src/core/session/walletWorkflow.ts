@@ -1,3 +1,5 @@
+import { withRpcDeadline } from "../suiEndpoint.js";
+import { SUI_DECIMALS, SUI_TYPE_ARG } from "@mysten/sui/utils";
 import { randomUUID } from "node:crypto";
 import { fixedReviewTarget, workflowConnectionEligibility, walletActionDecision, type ConnectionContext, type EvaluatedWorkflowState, type ReviewReadTarget } from "./workflowState.js";
 import { SessionStoreError } from "./sessionErrors.js";
@@ -7,13 +9,13 @@ import { verifyTransactionSignature } from "@mysten/sui/verify";
 import type { ReviewComputationDeps } from "../review/reviewComputation.js";
 import { computeReviewStateWithPrivateArtifacts } from "../review/reviewComputation.js";
 import { assertNoForbiddenMcpFields } from "../action/forbiddenFields.js";
-import type { PublicChainReceiptResult } from "../action/suiChainReceiptReader.js";
+import { normalizeCoinType } from "../read/coinMetadata.js";
 import { projectReadCardResult } from "../read/readCardResult.js";
 import type { VerifySuiChainReceiptInput, SuiChainReceiptVerificationResult } from "../action/suiChainReceiptVerifier.js";
 import type { SessionStore } from "./sessionStore.js";
 import type { CardRecord, CardPreparation, ReceiptDisplay, WalletDisplay } from "./cardSession.js";
 import { SqliteWalletWorkflowStore, WorkflowConflict, type ConnectionResponseOwner } from "./sqliteWalletWorkflowStore.js";
-import { isOwnedConnectedWallet, connectionHasSuiSigningScope, WalletUserRejectedError, WalletUnavailableError,
+import { isManagedConnectedWallet, connectionHasSuiSigningScope, WalletUserRejectedError, WalletUnavailableError,
   type WalletAvailability, type WalletRecoveryImpact, type WalletSession } from "./walletConnection.js";
 import { isInitialChainObservation, type TransactionRequest } from "./transactionRequest.js";
 import { projectConnectionView, projectReviewView, parseWorkflowAction, type WorkflowView } from "./workflowView.js";
@@ -35,6 +37,7 @@ type SettingsRecovery = { synchronize(): void; runtimeEvent(event: WalletRuntime
 
 export class WalletWorkflow {
   private stopped = false;
+  private readonly owner = new AbortController();
   private started = false;
   private retainedSessionCheck: { runId: string; connectionId: string; work: Promise<void> } | undefined;
   private readonly pairings = new Map<string, WalletDisplay>();
@@ -52,11 +55,10 @@ export class WalletWorkflow {
     runtime: WalletRuntime;
     computation: ReviewComputationDeps;
     verifyReceipt(input: VerifySuiChainReceiptInput): Promise<SuiChainReceiptVerificationResult>;
-    readReceipt?: ((input: { digest: string; now: Date }) => Promise<PublicChainReceiptResult>) | undefined;
     submitTransaction(bytes: Uint8Array, signature: string): Promise<unknown>;
     assertCurrent(): void;
     bindExternalEvent(work: (event: WalletRuntimeEvent) => void): (event: WalletRuntimeEvent) => void;
-    verifyNetwork(): Promise<void>;
+    verifyNetwork(signal?: AbortSignal): Promise<void>;
     signatureClient?: ClientWithCoreApi;
     logger: { error(message: string, meta?: Record<string, unknown>): void };
     now?: (() => Date) | undefined;
@@ -230,12 +232,12 @@ export class WalletWorkflow {
   async connectionCardInput(kind: "connect" | "disconnect", input: Record<string, unknown>): Promise<Record<string, unknown>> {
     walletConnectionCardInputSchema.parse(input);
     await this.inspectRetainedSession();
-    const context = this.reconcileConnectionContext(), facts = this.options.records.readConnectionFacts(this.now());
+    const facts = this.reconcileConnectionFacts();
     if (kind === "disconnect") {
       this.assertWalletAvailable();
-      const decision = walletActionDecision({ ...facts, walletAvailability: context.walletAvailability }, "disconnect");
+      const decision = walletActionDecision(facts, "disconnect");
       if (!decision.allowed) throw new WorkflowConflict(decision.nextStep.message!, [], decision.nextStep.reason);
-      return { connectionId: context.connection!.connectionId, operationId: randomUUID() };
+      return { connectionId: facts.connection!.connectionId, operationId: randomUUID() };
     }
     return { requestedChains: facts.requestedChains, connectionId: facts.connection?.connectionId ?? null, operationId: randomUUID() };
   }
@@ -261,6 +263,20 @@ export class WalletWorkflow {
   closeConnectionCardsWithChangedNetworks(chains: readonly WalletChainId[]): void {
     this.assertCurrent(); this.options.records.closeConnectionCardsWithChangedNetworks(chains);
   }
+  bindFirstReviewTarget(target: { account: string; connectionId: string }): () => void {
+    const run = this.options.runtime.bind(), connection = this.options.records.currentConnection();
+    const revision = connection?.connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN];
+    return () => {
+      this.assertCurrent();
+      this.assertWalletAvailable(run);
+      const current = this.options.records.currentConnection();
+      if (!current || revision === undefined || current.connection.connectionId !== target.connectionId ||
+          current.connection.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== revision ||
+          !this.options.records.isUsableConnection(target.connectionId, this.now(), SUI_MAINNET_WALLET_CHAIN, target.account)) {
+        throw new WorkflowConflict("The selected wallet changed before the Review card was created.");
+      }
+    };
+  }
   resolveReviewTarget(): { status: "available"; connectionId: string; account: string } |
     { status: "unavailable"; reason: "wallet_unavailable" | "connection_required" | "connection_state_unconfirmed" } {
     const context = this.reconcileConnectionContext(), record = this.options.records.currentConnection();
@@ -270,9 +286,12 @@ export class WalletWorkflow {
     return account && record && this.options.records.isUsableConnection(record.connection.connectionId, this.now(), SUI_MAINNET_WALLET_CHAIN, account)
       ? { status: "available", connectionId: record.connection.connectionId, account } : { status: "unavailable", reason: "connection_required" };
   }
-  reconcileConnectionContext(): ConnectionContext {
+  private reconcileConnectionFacts() {
     this.assertCurrent(); this.synchronizeWalletState(); this.recoverDisconnects();
-    const state = this.options.records.reconcileAndEvaluate({ purpose: "current_wallet", walletAvailability: this.walletAvailability(), walletObservation: this.observation() });
+    return this.options.records.reconcileAndEvaluate({ purpose: "current_wallet", walletAvailability: this.walletAvailability(), walletObservation: this.observation() });
+  }
+  reconcileConnectionContext(): ConnectionContext {
+    const state = this.reconcileConnectionFacts();
     return { connection: state.connection, pendingOperation: state.pendingOperation, requestedChains: state.requestedChains, walletAvailability: state.walletAvailability,
       walletObservation: state.walletObservation, canDisconnect: state.canDisconnect,
       connectionReconciliationRequired: state.connectionReconciliationRequired, assetReadAccount: state.assetReadAccount ?? { status: "address_required" } };
@@ -329,13 +348,33 @@ export class WalletWorkflow {
     this.options.sessions.recordEvaluationEvents(evaluated.events);
     return evaluated;
   }
-  async readReview(id: string, explicitResult = false): Promise<ReviewSnapshot | undefined> {
+  async readReview(id: string, explicitResult = false, fixedAttemptId?: string): Promise<ReviewSnapshot | undefined> {
     if (!this.options.sessions.readReviewSession(id)) return undefined;
+    if (fixedAttemptId) {
+      const fixed = this.options.records.request(fixedAttemptId);
+      if (!fixed || fixed.reviewSessionId !== id) return undefined;
+      this.options.records.advanceRequestDeadlines(this.now(), fixedAttemptId);
+      this.observe(fixedAttemptId, explicitResult);
+      const pending = this.observing.get(fixedAttemptId);
+      if (explicitResult && pending) await pending;
+      this.assertCurrent();
+      const session = this.options.sessions.readReviewSession(id);
+      const request = this.options.records.request(fixedAttemptId);
+      if (!session || !request || request.reviewSessionId !== session.id) return undefined;
+      const authority = this.options.records.authority(fixedAttemptId), walletAvailability = this.walletAvailability();
+      const bound = this.options.records.requestReview(fixedAttemptId);
+      if (!bound) return undefined;
+      return { session: { ...session, reviewRevision: request.reviewRevision, reviewState: bound, account: request.account,
+        status: bound.status }, request, hasReviewInput: false, walletAvailability, walletObservation: this.observation(),
+        progress: reviewProgress(false, request, walletAvailability, { stopped: authority?.observation_stopped === 1,
+          pending: authority?.lookup_pending === 1 }) };
+    }
     let state = await this.evaluateReview(id);
     if (state.request) {
       this.observe(state.request.attemptId, explicitResult);
-      if (explicitResult) {
-        await this.observing.get(state.request.attemptId);
+      const pending = this.observing.get(state.request.attemptId);
+      if (explicitResult && pending) {
+        await pending;
         this.assertCurrent();
         // An awaited receipt may have committed new facts. Return one freshly
         // evaluated snapshot; ordinary status reads do not await external I/O.
@@ -353,7 +392,7 @@ export class WalletWorkflow {
     evaluated: EvaluatedWorkflowState; data: WorkflowView; walletDisplay?: WalletDisplay; receiptDisplay?: ReceiptDisplay; displayAttemptId?: string;
   }> {
     this.assertCurrent();
-    if (record.state.kind === "connect" || record.state.kind === "disconnect") { await this.inspectRetainedSession(); this.reconcileConnectionContext(); }
+    if (record.state.kind === "connect" || record.state.kind === "disconnect") { await this.inspectRetainedSession(); this.synchronizeWalletState(); this.recoverDisconnects(); }
     const evaluated = record.state.kind === "review"
       ? await this.evaluateReview(String(record.state.input.reviewSessionId), record, uiObservation)
       : this.options.records.reconcileAndEvaluate({ purpose: "current_wallet", expectedCard: record, walletAvailability: this.walletAvailability(), walletObservation: this.observation() });
@@ -461,7 +500,7 @@ export class WalletWorkflow {
   private requireWallet(id: string, account: string) {
     this.assertWalletAvailable();
     const current = this.options.records.connection(id);
-    if (!this.options.records.isUsableConnection(id, this.now()) || !isOwnedConnectedWallet(current, this.options.ownerId, !!this.options.records.pendingDisconnect(id)) ||
+    if (!this.options.records.isUsableConnection(id, this.now()) || !isManagedConnectedWallet(current, this.options.ownerId, !!this.options.records.pendingDisconnect(id)) ||
         fixedChainAccount(current.connection, SUI_MAINNET_WALLET_CHAIN) !== account || Date.parse(current.connection.expiresAt) <= this.now().getTime()) {
       throw new WorkflowConflict("The selected Sui wallet connection is unavailable.");
     }
@@ -541,7 +580,7 @@ export class WalletWorkflow {
       await this.options.sessions.recordWalletConnected(id, account, this.now()); this.assertWalletAvailable(run);
       const session = await this.options.sessions.getReviewSession(id, () => this.now());
       if (!session?.plans[0]) throw new WorkflowConflict("Review session is unavailable.");
-      const computed = await computeReviewStateWithPrivateArtifacts({ reviewSessionId: id, plan: session.plans[0], account, now: this.now() }, this.options.computation);
+      const computed = await computeReviewStateWithPrivateArtifacts({ preparationId: preparation, reviewSessionId: id, plan: session.plans[0], account, clock: () => this.now() }, this.options.computation);
       const { connection: currentConnection } = await this.checkWallet(run, connectionId, account, preparation);
       this.assertWalletAvailable(run);
       if (!this.options.records.isPreparing(id, preparation) || session.walletGrantRevision !== currentConnection.grantRevisions[SUI_MAINNET_WALLET_CHAIN]) return;
@@ -585,7 +624,11 @@ export class WalletWorkflow {
       }
       await verifyTransactionSignature(bytes, response.signature, { address: request.account,
         ...(this.options.signatureClient ? { client: this.options.signatureClient } : {}) }); this.assertWalletAvailable(run);
-      await this.options.verifyNetwork(); this.assertWalletAvailable(run);
+      const deadline = this.options.records.authority(request.attemptId)?.signature_deadline;
+      const remaining = deadline ? Date.parse(deadline) - this.now().getTime() : 0;
+      if (remaining <= 0) { this.options.records.advanceRequestDeadlines(this.now(), request.attemptId); return; }
+      await withRpcDeadline(remaining, signal => this.options.verifyNetwork(signal), this.owner.signal);
+      this.assertWalletAvailable(run);
       const current = await this.checkWallet(run, connectionId, request.account, request.attemptId);
       this.assertWalletAvailable(run);
       if (current.observed.lifecycleRevision !== response.lifecycleRevision || current.observed.grantRevisions[SUI_MAINNET_WALLET_CHAIN] !== response.grantRevision) throw new WorkflowConflict("The wallet session changed before submission. Nothing was submitted.");
@@ -622,40 +665,60 @@ export class WalletWorkflow {
     }
     const request = this.options.records.beginObservation(id, explicit);
     if (!request) return;
-    const reading = (async () => {
+    // Claim the in-flight slot before the first SQLite read can fail synchronously.
+    const reading = Promise.resolve().then(async () => {
+      let verified = false;
       try {
-        const result = await this.options.verifyReceipt({ txDigest: request.transactionDigest, reviewedTransactionDigest: request.transactionDigest, account: request.account, now: this.now() });
+        this.assertCurrent();
+        const admitted = this.options.records.requestReview(id);
+        const guard = admitted?.transactionReviewData?.slippageOrMinOut.enforcement;
+        const deadline = this.options.records.authority(id)?.lookup_deadline;
+        const remainingMs = deadline && !explicit ? Math.max(0, Date.parse(deadline) - this.now().getTime()) : undefined;
+        const result = await this.options.verifyReceipt({ guard, signal: this.owner.signal, remainingMs, txDigest: request.transactionDigest, reviewedTransactionDigest: request.transactionDigest, account: request.account, now: this.now() });
         this.assertCurrent();
         if (result.status === "verified_success" || result.status === "verified_failure") {
+          verified = true;
           let details: ReturnType<typeof projectReadCardResult> | undefined;
-          if (this.options.readReceipt) {
+          if (result.display?.status === "found" && result.display.receipt.txDigest === request.transactionDigest) {
             try {
-              const receipt = await this.options.readReceipt({ digest: request.transactionDigest, now: this.now() });
-              this.assertCurrent();
-              if (receipt.status === "found") details = projectReadCardResult("receipt", { digest: request.transactionDigest }, receipt);
-            } catch { /* Keep verified chain facts if the additional display read is unavailable. */ }
+              const receipt = result.display.receipt;
+              const quantities = admitted?.transactionReviewData?.rawQuantities ?? [];
+              const units = new Map(quantities.map(q => [normalizeCoinType(q.asset.coinType), { decimals: q.unit.decimals, symbol: q.asset.symbol }]));
+              units.set(normalizeCoinType(SUI_TYPE_ARG), { decimals: SUI_DECIMALS, symbol: "SUI" });
+              const flow = admitted?.humanReadableReview?.assetFlow;
+              if (flow) for (const amount of [...flow.outgoing, ...flow.expectedIncoming, ...flow.minimumIncoming, ...flow.fees]) {
+                units.set(normalizeCoinType(amount.coinType), { decimals: amount.decimals, symbol: amount.symbol });
+              }
+              const balanceChanges = receipt.balanceChanges.map(change => ({ ...change, ...units.get(normalizeCoinType(change.coinType)) }));
+              details = projectReadCardResult("receipt", { digest: request.transactionDigest }, { status: "found", receipt: { ...receipt, balanceChanges } });
+            }
+            catch { /* Optional presentation cannot invalidate verified effects. */ }
           }
-          this.assertCurrent();
           this.options.records.transitionRequest(id, "completed", this.now(), { execution: {
             reviewSessionId: request.reviewSessionId, attemptId: id, planId: request.planId,
             status: result.status === "verified_success" ? "success" : "failure", txDigest: request.transactionDigest,
-            chainReceipt: result.receipt, recordedAt: this.now().toISOString(),
+            chainReceipt: result.receipt,
             ...(result.status === "verified_failure" ? { failureReason: "chain_execution_failed" as const } : {})
           }, ...(details ? { details } : {}) });
-        } else if (result.status === "verification_failed") {
-          this.options.records.transitionRequest(id, "outcome_unknown", this.now(), { reason: "The chain result could not be verified for this request." });
+        } else {
+          this.options.records.recordObservation(id, result.status, this.now());
         }
-      } catch { if (!this.stopped) this.options.records.transitionRequest(id, "outcome_unknown", this.now(), { reason: "The chain result is unavailable. No transaction was sent again." }); }
+      } catch {
+        if (!this.stopped && verified) this.options.records.transitionRequest(id, "outcome_unknown", this.now(), {
+          reason: "The observed result could not be saved. Check the same digest again."
+        });
+        else if (!this.stopped) this.options.records.recordObservation(id, "source_unavailable", this.now());
+      }
       finally { this.completeCallback({ kind: "request", id, field: "lookup_pending" }); this.observing.delete(id); }
-    })();
+    });
     this.observing.set(id, reading);
     void reading.catch(() => this.report("chain_observation"));
   }
-  pendingConnections() {
+  pendingReviewIds() { this.assertCurrent(); return this.options.records.pendingReviewIds(this.now()); }
+  pendingConnections(alreadyReconciled = false) {
     this.assertCurrent();
-    this.synchronizeWalletState();
-    this.recoverDisconnects();
-    this.options.records.expireConnections(this.now());
+    if (!alreadyReconciled) { this.synchronizeWalletState(); this.recoverDisconnects(); }
+    if (!alreadyReconciled) this.options.records.expireConnections(this.now());
     return this.options.records.pendingConnectionOperations().map((operation) => ({
       cardId: operation.cardId, operationId: operation.operationId,
       ...(operation.connectionId ? { connectionId: operation.connectionId } : {}),
@@ -666,6 +729,7 @@ export class WalletWorkflow {
   }
 
   stop(): void {
+    this.owner.abort();
     if (this.stopped) return;
     this.stopped = true; this.pairings.clear(); this.pendingWrites.clear();
   }

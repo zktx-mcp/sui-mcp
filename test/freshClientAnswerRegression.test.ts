@@ -32,7 +32,7 @@ import {
   type FreshClientScenario,
   type FreshClientToolExpectation
 } from "./fixtures/freshClientScenarios.js";
-import { InMemoryActivityStore } from "./fixtures/inMemoryActivityStore.js";
+import { TestSqliteActivityStore } from "./fixtures/sqliteActivity.js";
 import {
   InMemoryLocalSettingsService,
   InMemoryPreferencesRepository
@@ -352,7 +352,7 @@ async function connectFreshClient(options: {
   sessionTtlMs?: number;
 } = {}) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const activityStore = options.activityStore ?? new InMemoryActivityStore();
+  const activityStore = options.activityStore ?? new TestSqliteActivityStore();
   const sessions = new InMemorySessionStore({
     activityStore,
     logger,

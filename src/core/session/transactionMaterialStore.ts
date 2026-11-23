@@ -156,6 +156,7 @@ export async function verifyLocalTransactionMaterialArtifacts(
   transactionMaterial: LocalTransactionMaterialHandle;
   transactionMaterialDigest: LocalTransactionMaterialDigestCommitment;
   transactionBytes: Uint8Array;
+  transactionData: ReturnType<Transaction["getData"]>;
 }> {
   const now = value.now ?? new Date();
   const parsed = parseLocalTransactionMaterialArtifacts(
@@ -170,9 +171,10 @@ export async function verifyLocalTransactionMaterialArtifacts(
     throw new LocalTransactionMaterialStoreError("transaction material is unavailable");
   }
 
-  let transactionDigest: string;
+  let transactionDigest: string, transaction: Transaction;
   try {
-    transactionDigest = await Transaction.from(material.transactionBytes).getDigest();
+    transaction = Transaction.from(material.transactionBytes);
+    transactionDigest = await transaction.getDigest();
   } catch {
     throw new LocalTransactionMaterialStoreError("transaction material bytes cannot produce a Sui transaction digest");
   }
@@ -184,10 +186,11 @@ export async function verifyLocalTransactionMaterialArtifacts(
     throw new LocalTransactionMaterialStoreError("transaction material digest does not match stored transaction bytes");
   }
 
-  return { ...parsed, transactionBytes: new Uint8Array(material.transactionBytes) };
+  return { ...parsed, transactionData: transaction.getData(), transactionBytes: new Uint8Array(material.transactionBytes) };
 }
 
 export type StoreLocalTransactionMaterialInput = {
+  preparationId?: string | undefined;
   reviewSessionId: string;
   planId: string;
   account: string;
@@ -207,6 +210,7 @@ export interface LocalTransactionMaterialStore {
     handle: LocalTransactionMaterialHandle,
     now?: Date
   ): LocalTransactionMaterialRecord | undefined;
+  deleteTransactionMaterial(handle: LocalTransactionMaterialHandle): void;
   deleteReviewSessionTransactionMaterials(reviewSessionId: string): void;
 }
 
@@ -315,6 +319,10 @@ export class InMemoryLocalTransactionMaterialStore implements LocalTransactionMa
     };
   }
 
+  deleteTransactionMaterial(handle: LocalTransactionMaterialHandle): void {
+    const stored = this.records.get(handle.materialId);
+    if (stored && sameHandle(stored, handle)) this.records.delete(handle.materialId);
+  }
   deleteReviewSessionTransactionMaterials(reviewSessionId: string): void {
     for (const [materialId, record] of this.records) {
       if (record.reviewSessionId === reviewSessionId) {

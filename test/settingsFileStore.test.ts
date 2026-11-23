@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, writeFile, symlink, rm, stat, readdir } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { SettingsFileStore, decodeSettingsChunk } from "../src/core/session/settingsFileStore.js";
+import { SettingsFileStore, decodeSettingsChunk, downloadBlockHashes } from "../src/core/session/settingsFileStore.js";
 import type { SettingsFile } from "../src/core/session/settingsOperation.js";
 import { MAX_JSON_BODY_BYTES, settingsRawChunkBudget, settingsUploadMessageBudget } from "../src/core/session/settingsFileProtocol.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -67,6 +67,19 @@ it("creates one private snapshot and verifies that same artifact on range reads"
   await f.files.cleanup({ ...sealed, invalidated: true });
   await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readdir(join(f.directory, "backups")).catch(() => [])).toEqual([]);
+});
+
+it("verifies crossed blocks in arbitrary range order and rejects a changed block index", async () => {
+  const block = 65536, data = Buffer.alloc(3 * block + 11);
+  for (let i = 0; i < data.length; i++) data[i] = i % 251;
+  const f = await fixture(data, "export"), hashes = downloadBlockHashes(data);
+  const sealed = { ...f.file, blockHashes: hashes, sealed: true, receivedSize: data.length };
+  await f.files.createDownload(f.file, data);
+  for (const [offset, length] of [[2*block-3, 20], [0, 40], [2*block-3, 20]] as const) {
+    expect(await f.files.readDownloadRange(sealed, offset, length)).toEqual(data.subarray(offset, offset+length));
+  }
+  await expect(f.files.readDownloadRange({ ...sealed, blockHashes: [hashes[0]!, hashes[0]!, ...hashes.slice(2)] }, block-1, 4))
+    .rejects.toThrow("content changed");
 });
 
 it("verifies a published snapshot and preserves its local backup during temporary cleanup", async () => {

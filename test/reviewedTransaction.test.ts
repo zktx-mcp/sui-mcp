@@ -1,8 +1,9 @@
+import { isFixtureSharedObject } from "./fixtures/transactionMaterial.js";
 import { describe, expect, it } from "vitest";
 import { Transaction } from "@mysten/sui/transactions";
 import type { ActionPlan } from "../src/core/action/types.js";
 import { computeReviewStateWithPrivateArtifacts } from "../src/core/review/reviewComputation.js";
-import { buildSupportedReviewAdapters } from "../src/adapters/reviewAdapters.js";
+import { buildSupportedReviewAdapters, verifyInstalledMinimum } from "../src/adapters/reviewAdapters.js";
 import { validateSupportedAdapterLifecycle } from "../src/adapters/adapterLifecycleValidators.js";
 import { createDeepbookSwapHumanReadableReviewProducer } from "../src/adapters/deepbook/deepbookHumanReviewProducer.js";
 import { createTransactionObjectOwnershipProducer } from "../src/core/action/transactionObjectOwnershipProducer.js";
@@ -13,7 +14,7 @@ import { InMemoryLocalTransactionMaterialStore } from "../src/core/session/trans
 import { recordTestTransactionMaterial } from "./fixtures/transactionMaterial.js";
 import { deepbookDisplayQuote } from "./fixtures/deepbookQuote.js";
 import { createSuccessfulReviewTimeSimulationClient } from "./fixtures/reviewTimeSimulation.js";
-import { InMemoryActivityStore } from "./fixtures/inMemoryActivityStore.js";
+import { TestSqliteActivityStore } from "./fixtures/sqliteActivity.js";
 import type { Logger } from "../src/runtime/logger.js";
 
 const logger: Logger = { info() {}, warn() {}, error() {} };
@@ -44,8 +45,9 @@ const plan: ActionPlan = {
 
 async function readyReviewSession() {
   const materialStore = new InMemoryLocalTransactionMaterialStore();
-  const activityStore = new InMemoryActivityStore();
+  const activityStore = new TestSqliteActivityStore();
   const store = new InMemorySessionStore({
+    verifySwapMinimum: verifyInstalledMinimum,
     activityStore,
     transactionMaterialStore: materialStore,
     logger,
@@ -66,11 +68,13 @@ async function readyReviewSession() {
     {
       validateAdapterLifecycle: validateSupportedAdapterLifecycle,
       adapters: buildSupportedReviewAdapters({ deepbook: {
+        deepbookDeepBalanceSource: async () => "25000", gasFeePolicySource: async () => ({ enabled: false, additionalTakerFeeRaw: "1000000" }),
         deepbookQuoteSource: {
           quoteDeepbookDisplayAmount: async () => deepbookDisplayQuote()
         },
         deepbookTransactionMaterialProducer: async (input) => {
           const material = await recordTestTransactionMaterial({
+            swap: input,
             materialStore,
             reviewSessionId: session.id,
             planId: input.plan.id,
@@ -82,7 +86,7 @@ async function readyReviewSession() {
           materialDigest = material.digest;
           return {
             status: "completed",
-            evidence: material.handle,
+            evidence: material.handle, ...(material.guardCommand !== undefined ? { guardCommand:material.guardCommand } : {}),
             checks: [
               {
                 id: "deepbook_transaction_material_build_or_verify",
@@ -116,7 +120,7 @@ async function readyReviewSession() {
           materialStore,
           objectSource: {
             async getObject(input) {
-              if (input.objectId === `0x${"c".repeat(64)}`) {
+              if (isFixtureSharedObject(input.objectId)) {
                 return {
                   object: {
                     objectId: input.objectId,
@@ -176,8 +180,9 @@ describe("prepareReviewedTransaction", () => {
   });
 
   it("refuses backend preparation when the session has no ready_for_wallet_review state", async () => {
-    const activityStore = new InMemoryActivityStore();
+    const activityStore = new TestSqliteActivityStore();
     const store = new InMemorySessionStore({
+    verifySwapMinimum: verifyInstalledMinimum,
       activityStore,
       logger,
       validateAdapterLifecycle: validateSupportedAdapterLifecycle
@@ -208,20 +213,15 @@ describe("prepareReviewedTransaction", () => {
     contract.reviewedTransactionDigest = other.digest.transactionDigest;
     contract.humanReadableReview.transactionDigest = other.digest.transactionDigest;
     contract.simulation.transactionDigest = other.digest.transactionDigest;
+    contract.slippageOrMinOut.enforcement!.transactionDigest = other.digest.transactionDigest;
     if (!computed.privateArtifacts) {
       throw new Error("expected private artifacts");
     }
-    await store.recordReviewStateWithArtifacts(session.id, skewed, computed.privateArtifacts, computeNow);
-
-    await expect(
-      store.prepareReviewedTransaction(session.id, plan.id, walletAccount, computeNow)
-    ).rejects.toMatchObject({ code: "handoff_commitment_mismatch" });
-
-    try {
-      await store.prepareReviewedTransaction(session.id, plan.id, walletAccount, computeNow);
-    } catch (error) {
+    const publication = store.recordReviewStateWithArtifacts(session.id, skewed, computed.privateArtifacts, computeNow);
+    await expect(publication).rejects.toMatchObject({ code: "session_mismatch" });
+    await publication.catch((error: unknown) => {
       expect(error).toBeInstanceOf(SessionStoreError);
       expect(JSON.stringify(error)).not.toContain("transactionBytesBase64");
-    }
+    });
   });
 });

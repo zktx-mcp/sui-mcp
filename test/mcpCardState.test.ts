@@ -1,3 +1,4 @@
+import { confirmLocalRecords } from "./fixtures/settingsWorkflow.js";
 import { seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -95,7 +96,7 @@ describe("DB-owned card admission, recovery and results", () => {
   it("recovers abandoned work without replaying it and preserves completed results beyond the input deadline", async () => {
     const db = await database(); const delayed = deferred<unknown>(); let calls = 0;
     const old = new CardStore({ records: db.records, ownerId: "old", now: () => now,
-      execute: async (_kind, input) => { calls++; return input.account === account ? delayed.promise : { value: "complete" }; } });
+      execute: async ({ kind, input }) => { calls++; return kind === "account" && input.account === account ? delayed.promise : { value: "complete" }; } });
     try {
       const ready = await old.create("account", {});
       const running = await old.create("account", {});
@@ -132,7 +133,7 @@ describe("DB-owned card admission, recovery and results", () => {
       const ref = { cardId: created.snapshot.cardId, permission: created.permission };
       const pending = access.run(() => cards.submit({ ...ref, revision: 0, input: choice }));
       const rejection = expect(pending).rejects.toThrow("stale access");
-      await access.run(() => operation === "reset" ? data.resetLocalData() : data.importLocalDataReplace(backup));
+      await access.run(() => operation === "reset" ? confirmLocalRecords(db.store, data) : confirmLocalRecords(db.store, data, backup));
       delayed.resolve({ value: "late" }); await rejection;
       await expect(access.run(() => cards.read(ref))).rejects.toThrow("access is unavailable");
       expect(access.run(() => db.records.get(ref.cardId))).toBeUndefined();
@@ -149,7 +150,7 @@ describe("DB-owned card admission, recovery and results", () => {
       expect(JSON.stringify(backup)).not.toContain(created.snapshot.cardId);
       expect(JSON.stringify(backup)).not.toContain(created.permission);
       raw.exec("CREATE TRIGGER fail_reset BEFORE DELETE ON accounts BEGIN SELECT RAISE(ABORT, 'fixture reset failure'); END");
-      await expect(local.resetLocalData()).rejects.toThrow("fixture reset failure");
+      await expect(confirmLocalRecords(db.store, local)).rejects.toThrow("fixture reset failure");
       expect((await cards.read({ cardId: created.snapshot.cardId, permission: created.permission })).snapshot).toEqual(created.snapshot);
       expect(await db.store.getActiveAccount()).toMatchObject({ address: account });
     } finally { raw.close(); db.close(); }
@@ -192,10 +193,10 @@ it.each(["reset", "stop"] as const)("refuses a late preparation result after %s 
   try {
     const creating = access.run(() => cards.create("chart", {}));
     const rejected = expect(creating).rejects.toThrow(operation === "reset" ? "stale access" : "This card cannot be checked right now.");
-    if (operation === "reset") await access.run(() => data.resetLocalData());
+    if (operation === "reset") await access.run(() => confirmLocalRecords(db.store, data));
     else cards.stop();
     preparation.resolve({ status: "failed", error: "Fixture source unavailable" }); await rejected;
-    expect(raw.prepare("SELECT COUNT(*) AS count FROM live_read_cards").get()).toEqual({ count: 0 });
+    expect(raw.prepare("SELECT COUNT(*) AS count FROM live_read_cards WHERE kind='chart'").get()).toEqual({ count: 0 });
     expect(prepares).toBe(1); expect(executes).toBe(0);
   } finally { cards.stop(); raw.close(); access.close(); db.close(); }
 });
@@ -213,7 +214,7 @@ it("persists a safe preparation exception but refuses success when the initial D
     expect(db.records.get(failed.snapshot.cardId)?.acceptedInput).toBeUndefined();
     raw.exec("CREATE TRIGGER fail_initial_card BEFORE INSERT ON live_read_cards BEGIN SELECT RAISE(ABORT, 'fixture initial write failure'); END");
     await expect(cards.create("chart", {})).rejects.toThrow("fixture initial write failure");
-    expect(raw.prepare("SELECT COUNT(*) AS count FROM live_read_cards").get()).toEqual({ count: 1 });
+    expect(raw.prepare("SELECT COUNT(*) AS count FROM live_read_cards WHERE kind='chart'").get()).toEqual({ count: 1 });
     expect(executes).toBe(0);
   } finally { cards.stop(); raw.close(); db.close(); }
 });

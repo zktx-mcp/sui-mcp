@@ -1,6 +1,10 @@
+export const SUI_MAINNET_CHAIN_IDENTIFIER = "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S";
+
 export type SuiEndpointErrorKind =
   | "invalid_url"
   | "endpoint_timeout"
+  | "endpoint_access_denied"
+  | "endpoint_invalid_response"
   | "endpoint_unreachable"
   | "chain_identifier_mismatch";
 
@@ -91,4 +95,31 @@ function getUrlAuthority(value: string): string | undefined {
 
 function hasExplicitPort(authority: string): boolean {
   return /\]:\d+$/.test(authority) || /^[^[]*:\d+$/.test(authority);
+}
+
+
+// The timer bounds the transport itself, including reading its response body.
+// Await settlement so the owner never releases a pending operation early.
+export async function withRpcDeadline<T>(ms: number, work: (signal: AbortSignal) => Promise<T>, owner?: AbortSignal): Promise<T> {
+  const controller = new AbortController();
+  const signal = owner ? AbortSignal.any([owner, controller.signal]) : controller.signal;
+  const timer = setTimeout(() => controller.abort(new DOMException("The Sui request timed out.", "TimeoutError")), ms);
+  try {
+    signal.throwIfAborted();
+    const result = await work(signal);
+    signal.throwIfAborted();
+    return result;
+  } catch (error) {
+    signal.throwIfAborted();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function isEndpointAccessDenied(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? error.code : "status" in error ? error.status : undefined;
+  return error instanceof SuiEndpointError && error.kind === "endpoint_access_denied" ||
+    ["UNAUTHENTICATED", "PERMISSION_DENIED", 7, 16, 401, 403].some(value => value === code);
 }

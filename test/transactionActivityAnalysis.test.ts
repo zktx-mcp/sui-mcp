@@ -12,6 +12,7 @@ function compact(
   overrides: Partial<ExternalActivityTransactionCompactFacts> = {}
 ): ExternalActivityTransactionCompactFacts {
   return {
+    balanceChangeScope: "transaction",
     factScope: "transaction",
     requestedAccountScoped: false,
     moveCallTargets: [],
@@ -43,7 +44,8 @@ function protocolMatch(protocolId: string, displayName = protocolId) {
     protocolId,
     displayName,
     activityCategory: "swap_or_order",
-    primaryAction: "swap" as const,
+    declaredAction: "swap" as const,
+    transactionStatus: "unknown" as const,
     matchBasis: "direct_move_call" as const,
     evidence: [
       {
@@ -158,7 +160,7 @@ describe("buildSuiActivityAnalysis", () => {
         })
       }),
       tx({
-        digest: "2".repeat(44),
+        digest: "2".repeat(44), status: "failure",
         compact: compact({
           protocolMatches: [protocolMatch("cetus-clmm", "Cetus CLMM")]
         })
@@ -166,8 +168,8 @@ describe("buildSuiActivityAnalysis", () => {
     ]);
 
     expect(analysis.protocols).toEqual([
-      { protocolId: "cetus-clmm", displayName: "Cetus CLMM", count: 2 },
-      { protocolId: "deepbook-v3", displayName: "DeepBook v3", count: 1 }
+      { protocolId: "cetus-clmm", displayName: "Cetus CLMM", count: 2, statusCounts: { success: 1, failure: 1, unknown: 0 } },
+      { protocolId: "deepbook-v3", displayName: "DeepBook v3", count: 1, statusCounts: { success: 1, failure: 0, unknown: 0 } }
     ]);
   });
 

@@ -119,7 +119,8 @@ function testSwapQuotePolicyEvidence(input: {
       raw: policy.minOutRaw,
       asset: amount(quote.rawQuote.directionalOutput).asset
     },
-    protocolFee: amount(quote.rawQuote.deepRequired),
+    inputFlow: quote.inputFlow,
+    separateFeeBudgetRaw: quote.rawQuote.deepRequired.raw,
     derivedAt
   });
 }

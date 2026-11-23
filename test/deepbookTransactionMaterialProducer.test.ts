@@ -1,3 +1,5 @@
+import { Transaction } from "@mysten/sui/transactions";
+import { verifyDeepbookSwapCommands } from "../src/adapters/deepbook/deepbookSwapCommands.js";
 import { describe, expect, it } from "vitest";
 import {
   createDeepbookSwapTransactionMaterialDigestProducer,
@@ -74,7 +76,7 @@ describe("DeepBook transaction material producer", () => {
       requestedIntent,
       poolResolution: resolveDeepbookPoolForSymbols({ sourceSymbol: "SUI", targetSymbol: "USDC" }),
       quote,
-      quotePolicy: policy,
+      quotePolicy: { ...policy, feeBudgetRaw: "27500" },
       now: new Date("2026-05-15T00:00:29.000Z")
     });
 
@@ -95,12 +97,24 @@ describe("DeepBook transaction material producer", () => {
     expect(outcome.evidence.expiresAt).toBe("2026-05-15T00:00:30.000Z");
     const stored = materialStore.getTransactionMaterial(outcome.evidence, new Date("2026-05-15T00:00:29.500Z"));
     expect(stored?.transactionBytes.byteLength).toBeGreaterThan(0);
+    const data = Transaction.from(stored!.transactionBytes).getData();
+    const limits = { account, poolId: resolveDeepbookPoolForSymbols({ sourceSymbol: "SUI", targetSymbol: "USDC" }).pool.address,
+      baseType: quote.rawQuote.baseOut.coinType, quoteType: quote.rawQuote.quoteOut.coinType, deepType: quote.rawQuote.deepRequired.coinType,
+      direction: policy.direction, principal: BigInt(policy.sourceAmountRaw), deepBudget: 27500n, minimum: BigInt(policy.minOutRaw) };
+    const guard = verifyDeepbookSwapCommands(data, limits);
+    expect(guard).toBe(outcome.guardCommand);
+    expect(() => verifyDeepbookSwapCommands(data, { ...limits, minimum: limits.minimum + 1n })).toThrow();
+    expect(() => verifyDeepbookSwapCommands(data, { ...limits, deepBudget: limits.deepBudget - 1n })).toThrow();
+    const incorrectOutput = structuredClone(data);
+    incorrectOutput.commands[guard]!.SplitCoins!.coin = { $kind: "NestedResult", NestedResult: [guard - 1, 0] };
+    expect(() => verifyDeepbookSwapCommands(incorrectOutput, limits)).toThrow();
+
     expect(stored?.redactedDiagnostics).toMatchObject({
       poolKey: "SUI_USDC",
       direction: "base_to_quote",
       sourceAmountRaw: "1000000000",
-      minOutRaw: "122839505",
-      deepAmountRaw: "25000"
+      minOutRaw: "122839506",
+      feeBudgetRaw: "27500"
     });
 
     const digestOutcome = await createDeepbookSwapTransactionMaterialDigestProducer({
@@ -159,7 +173,7 @@ describe("DeepBook transaction material producer", () => {
       requestedIntent,
       poolResolution: resolveDeepbookPoolForSymbols({ sourceSymbol: "SUI", targetSymbol: "USDC" }),
       quote,
-      quotePolicy: policy,
+      quotePolicy: { ...policy, feeBudgetRaw: "27500" },
       now: new Date("2026-05-15T00:00:29.000Z")
     });
 
@@ -197,7 +211,7 @@ describe("DeepBook transaction material producer", () => {
       requestedIntent,
       poolResolution: resolveDeepbookPoolForSymbols({ sourceSymbol: "SUI", targetSymbol: "USDC" }),
       quote,
-      quotePolicy: { ...policy, sourceAmountRaw: "1.5" },
+      quotePolicy: { ...policy, feeBudgetRaw: "27500", sourceAmountRaw: "1.5" },
       now: new Date("2026-05-15T00:00:29.000Z")
     });
 
@@ -240,7 +254,7 @@ describe("DeepBook transaction material producer", () => {
       requestedIntent,
       poolResolution: resolveDeepbookPoolForSymbols({ sourceSymbol: "SUI", targetSymbol: "USDC" }),
       quote,
-      quotePolicy: policy,
+      quotePolicy: { ...policy, feeBudgetRaw: "27500" },
       now: new Date("2026-05-15T00:00:29.000Z")
     });
 

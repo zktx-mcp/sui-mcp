@@ -40,7 +40,7 @@ import {
 } from "../src/core/session/sqliteSessionStore.js";
 import type { SessionRecordStore } from "../src/core/session/sessionRecordStore.js";
 import type { PrivateReviewArtifactStore } from "../src/core/session/privateReviewArtifacts.js";
-import { InMemoryActivityStore } from "./fixtures/inMemoryActivityStore.js";
+import { TestSqliteActivityStore } from "./fixtures/sqliteActivity.js";
 import { deepbookDisplayQuote } from "./fixtures/deepbookQuote.js";
 import { createTestSwapHumanReadableReviewEvidence } from "./fixtures/humanReadableReview.js";
 import { recordTestTransactionMaterial } from "./fixtures/transactionMaterial.js";
@@ -243,7 +243,8 @@ function testSwapQuotePolicyEvidence(input: {
       raw: policy.minOutRaw,
       asset: amount(quote.rawQuote.directionalOutput).asset
     },
-    protocolFee: amount(quote.rawQuote.deepRequired),
+    inputFlow: quote.inputFlow,
+    separateFeeBudgetRaw: quote.rawQuote.deepRequired.raw,
     derivedAt: input.derivedAt
   });
 }
@@ -295,7 +296,7 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
   function createSessionStore(options: Partial<InMemorySessionStoreOptions> = {}): LocalSessionStore {
     const base = {
       ...options,
-      activityStore: options.activityStore ?? new InMemoryActivityStore(),
+      activityStore: options.activityStore ?? new TestSqliteActivityStore(),
       logger: options.logger ?? testLogger,
       validateAdapterLifecycle: options.validateAdapterLifecycle ?? validateSupportedAdapterLifecycle
     };
@@ -355,7 +356,7 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
   });
 
   it("keeps review session mutable when wallet-connected activity persistence fails", async () => {
-    const activityStore = new InMemoryActivityStore();
+    const activityStore = new TestSqliteActivityStore();
     const store = createSessionStore({ activityStore });
     const { session } = await store.createReviewSession([plan], new Date(0));
     await setReadAccountFixture(store, walletAccount, new Date(2));
@@ -602,7 +603,7 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
           fetchedAt: "2026-06-06T00:00:00.000Z"
         },
         minimumOutput: {
-          raw: "122839505"
+          raw: "122839506"
         }
       }
     });
@@ -1690,7 +1691,7 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
   });
 
   it("records review evidence lifecycle calls through the activity store", async () => {
-    const activityStore = new InMemoryActivityStore();
+    const activityStore = new TestSqliteActivityStore();
     const store = createSessionStore({ activityStore });
     const { session } = await store.createReviewSession([plan], new Date(0));
     await openAndConnectReview(store, session.id, walletAccount, new Date(1));
@@ -1707,18 +1708,19 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
       new Date(2)
     );
 
-    expect(activityStore.reviewSessions).toHaveLength(1);
-    expect(activityStore.reviewSessions[0]).toMatchObject({
+    const db = activityStore.createSettingsWorkflowStore("history-check").db;
+    const sessions = db.prepare("SELECT id AS reviewSessionId, current_status AS currentStatus FROM review_sessions").all();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
       reviewSessionId: session.id,
-      currentStatus: "proposed"
+      currentStatus: "ready_for_wallet_review"
     });
-    expect(activityStore.reviewTransitions.map((transition) => transition.event)).toEqual([
+    expect(db.prepare("SELECT event FROM review_status_transitions ORDER BY id").pluck().all()).toEqual([
       "created",
       "wallet_connected",
       "state_computed"
     ]);
-    expect(activityStore.reviewStateSnapshots).toHaveLength(1);
-    expect(activityStore.reviewStateSnapshots[0]?.state.status).toBe("ready_for_wallet_review");
+    expect(db.prepare("SELECT status FROM review_state_snapshots").pluck().all()).toEqual(["ready_for_wallet_review"]);
   });
 
   it("rejects review states for another session or a plan outside the session", async () => {
@@ -1810,7 +1812,7 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
   });
 
   it("does not mutate review state when activity evidence persistence fails", async () => {
-    class FailingSnapshotStore extends InMemoryActivityStore {
+    class FailingSnapshotStore extends TestSqliteActivityStore {
       override async recordReviewStateSnapshot(): Promise<void> {
         throw new Error("snapshot failed");
       }
@@ -1844,7 +1846,7 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
   });
 
   it("cleans private transaction material when review state persistence fails after artifact verification", async () => {
-    class FailingSnapshotStore extends InMemoryActivityStore {
+    class FailingSnapshotStore extends TestSqliteActivityStore {
       override async recordReviewStateSnapshot(): Promise<void> {
         throw new Error("snapshot failed");
       }
@@ -1899,7 +1901,7 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
   });
 
   it("does not append duplicate expired transitions after a review session is already expired", async () => {
-    const activityStore = new InMemoryActivityStore();
+    const activityStore = new TestSqliteActivityStore();
     const store = createSessionStore({ ttlMs: 1, activityStore });
     const { session } = await store.createReviewSession([plan], new Date(0));
 
@@ -1908,11 +1910,11 @@ describe.each(SESSION_STORE_BACKENDS)("LocalSessionStore (%s)", (_backendLabel, 
 
     expect(first?.status).toBe("expired");
     expect(second?.status).toBe("expired");
-    expect(activityStore.reviewTransitions.filter((transition) => transition.event === "expired")).toHaveLength(1);
+    expect(activityStore.createSettingsWorkflowStore("expiry-check").db.prepare("SELECT id FROM review_status_transitions WHERE event='expired'").all()).toHaveLength(1);
   });
 
   it("cleans private transaction material when review expiry persistence fails", async () => {
-    const activityStore = new InMemoryActivityStore();
+    const activityStore = new TestSqliteActivityStore();
     const materialStore = new InMemoryLocalTransactionMaterialStore();
     const store = createSessionStore({
       ttlMs: 10_000,

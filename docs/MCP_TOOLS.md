@@ -43,8 +43,8 @@ not grant input permission; a saved card is read through its bound resource.
 | `read_list_deepbook_tokens` | Implemented | Lists DeepBook mainnet tokens from pinned `@mysten/deepbook-v3` constants. |
 | `read_inspect_deepbook_orderbook` | Implemented | Uses pinned DeepBook SDK read methods over Sui gRPC simulation reads with an internal sender placeholder; `ticks` is capped at 50. |
 | `read_get_deepbook_mid_price` | Implemented | Returns a DeepBook pool mid price snapshot from pinned SDK simulation reads. |
-| `read_get_deepbook_usdc_price_history` | Implemented | Returns DeepBookV3 official Indexer USDC candle evidence for a requested official interval. |
-| `read_get_deepbook_usdc_price_at_time` | Implemented | Returns the DeepBookV3 official Indexer USDC candle for or nearest to one target UTC time. |
+| `read_get_deepbook_usdc_price_history` | Implemented | Returns pool-bound DeepBook USDC candle evidence for a requested UTC interval. |
+| `read_get_deepbook_usdc_price_at_time` | Implemented | Returns the pool-bound DeepBook USDC candle for or nearest to one target UTC time. |
 | `read_quote_deepbook_action` | Implemented | Quotes raw integer DeepBook quantities through pinned SDK transaction builders and raw `u64` simulation return values with an internal sender placeholder. |
 | `read_quote_deepbook_display_amount` | Implemented | Converts an explicit display source amount through pinned DeepBook token units, then returns scoped display quote facts plus raw quote evidence. |
 | `read_summarize_deepbook_account_inventory` | Implemented | Summarizes active-account DeepBook BalanceManager inventory through pinned SDK simulation reads. |
@@ -131,35 +131,43 @@ The response includes `priceSemantics` and `userAnswerUse.cannotAnswer` for unsu
 
 If the SDK returns a non-positive or non-finite mid price, both `read_get_deepbook_mid_price` and `read_inspect_deepbook_orderbook` fail closed with `quote_unavailable`.
 
-`read_get_deepbook_usdc_price_history` returns DeepBookV3 official Indexer USDC candle evidence for a requested official interval.
+Long reads in `read_get_deepbook_usdc_price_history`, `read_get_deepbook_usdc_price_at_time`, and `read_get_account_asset_timeline` can return `status: "running"`. Call the tool and arguments in `nextRead` on the same MCP connection. Each continuation waits for the same computation and returns its final evidence or another running response. Short reads return their usual evidence immediately. Each connection retains up to 256 running reads and results held for continuation. At capacity a new distinct read returns `request_unavailable` with reason `capacity`; existing handles remain readable until expiry. A request ID cannot sign, change settings, or open a card.
 
-Inputs require `start` and `end` in the read-tool UTC input format described above and exactly one selector: `poolName`, `assetSymbol`, or `coinType`. Optional `interval` accepts only official Indexer interval values and defaults to `15m`.
+The backend keeps these results in connection-local memory. The running response gives the idle expiration time. Reading it renews the lease. A closed connection, backend restart, data replacement, or expired lease makes the ID unavailable. An unavailable request never restarts a source read. At the connection’s retention limit, even completed results with exposed handles occupy slots until their lease expires. Wait for expiry or open a new connection for new requests. A new timeline request binds the resolved account and local data revision before sharing work. Within one connection, overlapping calls to the same price tool share a running read when their normalized selector, interval, and requested range or target and search distance match. Once it finishes, a new request starts a new read. An existing request ID returns its original result, including the original timeline snapshot or a source failure. No separate price-history database is maintained. Completed Chart cards retain their selected result.
+
+`read_get_deepbook_usdc_price_history` returns pool-bound DeepBook USDC candle evidence for a requested UTC interval.
+
+Inputs require `start` and `end` in the read-tool UTC input format described above and exactly one market selector: `poolId`, `poolName`, `assetSymbol`, or `coinType`. Optional `interval` accepts only supported UTC interval values and defaults to `15m`.
+
+For price history, a user-supplied `start` later than the backend clock returns `input_invalid` before a source read. A range starting at or before that clock can extend beyond it; the source’s coverage rules still apply. For a point-in-time price, a future `targetTime` returns `input_invalid`. The service may search neighboring candles for an elapsed target.
 
 The requested range is capped at `requested.range.maxBars: 1008` candle slots for the selected interval. Larger requests return `status: "unsupported_range"` with `reason: "requested_range_exceeds_max_bars"`.
 
 Supported successful responses return:
 
 - `status: "ok"`;
-- `pair` with the official pool name, pool id, base asset, canonical USDC quote asset, and `priceConvention: "USDC_PER_BASE"`;
+- `pair` with the market display name, pool id, base asset, canonical USDC quote asset, and `priceConvention: "USDC_PER_BASE"`;
 - `requested.range.interval`, `requested.range.intervalDurationMs`, and `requested.range.requestedCandleSlots`;
 - `bars`, where each returned candle has `timestampMs`, `start`, `end`, `open`, `high`, `low`, `close`, and `volume`;
-- `candleAvailability`, which can be `available` or `no_candles_in_range`;
+- `candleAvailability` is `available`, `no_candles_in_range`, or `partial_coverage`. For partial coverage, `source.candles.coveredUntil` is the exclusive end of verified data. If the end is in a later bucket, bars from the indexed prefix remain available. An empty prefix leaves the remainder unknown;
 - `source.poolList` and `source.candles`;
 - `quantitySemantics`, `responseSummary`, and `unsupportedClaims`.
 
-Candles are returned by the DeepBookV3 official Indexer for the requested interval. The tool does not synthesize candles, interpolate, carry forward a previous candle, call the browser, use a local price database, or fall back to an on-demand chain-history scan.
+SDK-registered names and names derived from coin symbols are display labels. Ambiguous names return candidate pool IDs and base and quote types. Exact coin-type searches only consider that type. Missing metadata on a matching or unidentified market yields `pool_list_incomplete` when it prevents selection. Point-in-time results retain the selector, the UTC range actually requested from the source, and the verified cutoff. A point-in-time read reports `candle_coverage_incomplete` if unseen fills could change the match.
 
-`status: "unsupported_pair"` means the selector did not resolve to exactly one official USDC-quoted pool. `status: "source_unavailable"` means the official pool list or candle response was unavailable or failed validation.
+Sui MCP aggregates finalized fills by pool ID and UTC interval. Within gRPC retention, the ledger stream selects transactions that changed the pool and emitted a DeepBook fill. Each fill must carry the selected ID. Older requested checkpoints are read through GraphQL. A forming candle includes only fills through the reported checkpoint. The backend reads the requested pool and time range from the configured Sui mainnet endpoints. The defaults are the Sui Foundation GraphQL and gRPC services. The candle source identifies the endpoints used for coverage and the indexed checkpoint time. Custom GraphQL addresses expose their origin in public evidence. Each indexed archive page must cover the requested checkpoints in the same GraphQL response. Loss of required coverage returns `source_unavailable` with reason `candle_coverage_incomplete`. Empty periods require a complete source range. Prices are never interpolated or carried forward.
 
-`quantitySemantics.kind: "deepbook_official_indexer_candles"` and `quantitySemantics.allowedUse: "official_deepbook_usdc_candle_history"` mean this output is candle evidence only.
+`status: "unsupported_pair"` means the selector did not resolve to exactly one registered or explicitly identified USDC-quoted pool. `status: "source_unavailable"` means market discovery or fill evidence was unavailable or failed validation.
 
-`source.kind: "deepbook_v3_official_indexer"` and `source.chainRecomputedBySuiMcp: false` mean Sui MCP read official Indexer candles and did not independently recompute candle values from chain history for this response.
+`quantitySemantics.kind: "deepbook_pool_fill_candles"` and `quantitySemantics.allowedUse: "pool_bound_usdc_candle_history"` mean this output is candle evidence only.
 
-USDC in this tool is the token-denominated quote asset for the returned official DeepBookV3 Indexer candles. It is not fiat USD and not a USDC/USD peg guarantee.
+`source.kind: "sui_mainnet_deepbook_order_fills"` and `source.chainRecomputedBySuiMcp: true` identify prices calculated from onchain trades. The exact pool ID and covered time range travel with the candle source.
+
+USDC in this tool is the token-denominated quote asset for the returned pool-bound DeepBook candles. It is not fiat USD and not a USDC/USD peg guarantee.
 
 This output is not a live quote, execution price, historical mid price, global market price, fiat USD cash-out estimate, external market-price conversion, USDC/USD peg assumption, route recommendation, best route, transaction-building input, signing data, signing readiness, P&L, tax evidence, cost basis, user-account transaction history, or user-account balance history.
 
-`read_get_deepbook_usdc_price_at_time` uses the same official Indexer candle source and selector rules, but accepts one `targetTime` instead of a range. Optional `interval` defaults to `15m`. Optional `maxDistanceMinutes` limits how far from the target time the tool may select a candle.
+`read_get_deepbook_usdc_price_at_time` uses the same pool-bound DeepBook candle source and selector rules, but accepts one `targetTime` instead of a range. Optional `interval` defaults to `15m`. Optional `maxDistanceMinutes` limits how far from the target time the tool may select a candle.
 
 Successful at-time responses return:
 
@@ -168,26 +176,26 @@ Successful at-time responses return:
 - `match.kind`, which can be `exact_bucket`, `nearest_before`, or `nearest_after`;
 - `match.distanceMinutes`;
 - `match.representativePrice`, whose `field` is `matchedCandle.close`;
-- `matchedCandle`, an official Indexer candle;
+- `matchedCandle`, an pool-bound DeepBook candle;
 - the same `pair`, `candleAvailability`, `source`, `quantitySemantics`, `responseSummary`, and `unsupportedClaims` boundaries as the range-history tool.
 
-`status: "no_price_in_search_window"` means no official Indexer candle was available inside the bounded search window. The tool does not synthesize a price, interpolate, carry forward a previous candle outside the search window, or perform an on-demand chain-history scan.
+`status: "no_price_in_search_window"` indicates a covered interval with no matching fill candle. Pool creation proves that earlier periods had no fills. The search continues forward within the selected distance. Missing index coverage that could change the match is reported as unavailable.
 
-Internal read cards are opened with `ui_open_account`, `ui_open_receipt`, and `ui_open_chart`. They require a client that provides MCP Apps. A client without that UI receives `ui_unavailable`; ordinary MCP read tools remain available.
+Internal read cards are opened with `ui_open_account`, `ui_open_receipt`, and `ui_open_chart`. If the current MCP connection lacks a valid advertisement for the required card format, the tool returns `ui_unavailable` before creating a card. A later MCP connection negotiates its own capabilities. Ordinary evidence tools remain available.
 
 | Tool | Input and result |
 | --- | --- |
-| `ui_open_account` | Optional explicit Sui address; otherwise use the saved Sui read address only when its wallet connection is currently usable. Missing input returns `input_required` with no card or source query. Shows name, address, coin totals, Display NFTs, other-object count, fetched time and enumeration limits; no address form. |
+| `ui_open_account` | Optional explicit Sui address; otherwise use the saved Sui read address only when its wallet connection is currently usable. Missing input returns `input_required` with no card or source query. Shows name, address, coin totals, objects with Display metadata, other-object count, fetched time and enumeration limits; no address form. |
 | `ui_open_receipt` | A transaction digest is required for a query. Omission returns `input_required` with no card or source query. The result view shows execution outcome, balance changes, net gas, sender, digest and fetched time; no hash form. No wallet or active account is needed. Normalized receipt evidence and private display metadata remain available under their existing boundaries. |
-| `ui_open_chart` | Optional `poolName`, official Indexer interval, UTC `startTimeMs`/`endTimeMs`, and candle `limit`. Shows one selected USDC pool as candlesticks and volume. Range shortcuts fill these query fields. The initial time axis uses the saved request boundaries, with price-free whitespace at boundaries without candles; omitted boundaries use the returned data. |
+| `ui_open_chart` | Optional market ID or pool name, supported UTC interval, UTC `startTimeMs`/`endTimeMs`, and candle `limit`. Shows one selected USDC pool as candlesticks and volume. A time-range shortcut uses its click time with millisecond precision. Each time field accepts a UTC minute (`YYYY-MM-DDTHH:mm`) or nonnegative integer Unix epoch milliseconds. Editing a field replaces only that boundary. Minute input starts at second zero and millisecond input retains the exact value. The initial time axis uses the saved request boundaries, with price-free whitespace at boundaries without candles; omitted boundaries use the returned data. |
 
 A missing Account/Receipt target returns `data: { kind, status: "input_required", field, message }`, with no permission, card ID, saved resource or query. A host-rendered view shows the message without input controls or polling. Other errors remain errors.
 
-A successful card-creating response contains a `cardId`, `kind`, `state`, `revision`, timestamps, original `input`, and available `data`. `inputRemainingMs` is computed by the backend; `pollAfterMs` controls sequential observation of a running read. Card `ready` permits a read selection, not signing or payment readiness. An initial supplied input uses the same admission path as a form submission. DB states are `ready`, `running`, and `closed`, with terminal reasons `completed`, `expired`, `failed`, `server_restarted`, or `cancelled`.
+A successful card-creating response contains a `cardId`, `kind`, `state`, `revision`, timestamps, original `input`, and available `data`. `inputRemainingMs` is computed by the backend; `pollAfterMs` controls sequential observation of a running read. Card `ready` permits a read selection, not signing or payment readiness. An initial supplied input uses the same admission path as a form submission. A Chart that is still reading on its first polling tick returns its running card. Subsequent reads observe the same admitted scan. A running Chart can display its first verified closed candle as a preview. The final chart replaces the preview. Relative time shortcuts keep their requested bounds and identify the portion available at the indexed checkpoint. A future start or end returns `invalid_card_input` on form submission. The user can correct the time on the same open card. Opening a market directly with a future boundary returns a saved `unsupported_input` result with `reason: "invalid_timestamp"` and the affected field. For elapsed times, coverage depends on the indexed checkpoint. A custom end beyond its bucket can be temporarily unavailable. An unavailable market carries its registered pool ID, coin types and the failed check in `unavailableReason`. Available curated pairs remain selectable. DB states are `ready`, `running`, and `closed`, with terminal reasons `completed`, `expired`, `failed`, `server_restarted`, or `cancelled`.
 
 When Chart pool choices cannot be prepared, the backend creates a `closed`/`failed` card with a readable error. No selection is admitted and no candles are requested. Reading that card again returns the stored failure; retrying the source requires an explicit request for a new card. A database access or write failure is a tool error, not a successfully stored failure card.
 
-`ui_read_card` and `ui_submit_card` are app-only operations. Permission travels in UI metadata and is absent from model content and public saved resources. Input submission carries card ID, permission, expected revision and typed input. There is no first-view ownership or open/close operation. Recreated frames and chat returns read the same DB record. Identical duplicate input returns the stored request; conflicting input returns `card_conflict` and the authenticated current snapshot in error details. Invalid input returns `invalid_card_input` without consuming a valid selection. Invalid permission exposes neither current state nor private display data.
+`ui_read_card` and `ui_submit_card` are app-only operations. Permission travels in UI metadata and is absent from model content and public saved resources. Input submission carries card ID, permission, expected revision and typed input. There is no first-view ownership or open/close operation. Recreated frames and chat returns read the same DB record. Identical duplicate input returns the stored request; conflicting input returns `card_conflict` and the authenticated current snapshot in error details. Invalid input returns `invalid_card_input` without consuming a valid selection. Account addresses and Chart pool IDs are normalized at admission. A market selection must match a pair offered on that card. An unoffered pair returns `invalid_card_input` and leaves the same card open for a valid selection. Invalid permission exposes neither current state nor private display data.
 
 Receipt model results retain input kinds/indices/object references and identify input values and PTB as UI-only details. Receipt and completed Review show the executed transaction graph above their result summary when bound private metadata is available. Technical records are in one Details slide. Missing metadata leaves the saved result available without inventing a graph. The typed `sui-mcp/receipt-display` metadata binds display data to the same card ID, transaction digest and revision. It carries individual on-chain Pure input values and the graph derived from those inputs; never a serialized transaction, signature or wallet credential. Public saved resources contain only the model projection. A missing UI detail payload means unavailable display data, not that a transaction had no inputs.
 
@@ -291,12 +299,13 @@ Quote responses include `quantitySemantics` before the public quote values. The 
 
 The same response-local rule is also exposed as `userAnswerUse.followUp.tool: "read_preview_intent_evidence"` and `userAnswerUse.followUp.answerFields: ["responseSummary"]`.
 
-Raw quote source:
+Both tools accept optional `feeMode` with values `deep` (default) and `input_coin`. The simulation uses the requested mode without reading a wallet balance. `rawQuote.sourceMoveFunction` identifies the directional getter. For DEEP fees, `rawQuote.sourceMoveFunction` is `pool::get_quote_quantity_out` on a sale and `pool::get_base_quantity_out` on a buy. The underlying getter is identified by `rawQuote.returnValueSourceMoveFunction: "pool::get_quantity_out"`. Input-fee variants add `_input_fee` to both function names. Each returns three raw u64 values in order, `base_quantity_out`, `quote_quantity_out`, and `deep_quantity_required`.
 
-- `rawQuote.sourceMoveFunction` is `pool::get_quote_quantity_out` for `base_to_quote`.
-- `rawQuote.sourceMoveFunction` is `pool::get_base_quantity_out` for `quote_to_base`.
-- Both entrypoints delegate to `rawQuote.returnValueSourceMoveFunction: "pool::get_quantity_out"`.
-- The official Move source defines return values in this order: `base_quantity_out`, `quote_quantity_out`, `deep_quantity_required`.
+`rawQuote.inputAmount` identifies the principal and its unit. In that same unit, `inputFlow.expectedSpendRaw + inputFlow.expectedReturnRaw` equals the principal. `rawQuote.directionalOutput` identifies the expected receive asset and amount. `quoteOutcome` distinguishes a positive output with all input spent, a positive output with input returned, and zero quoted output. Zero output alone does not identify a pool's minimum order size. These fields also accompany quoted conversion candidates in intent previews.
+
+A pool with a confirmed whitelist exemption and zero taker rate identifies its quoted base fee separately. A separate-coin fee has a quoted amount and asset in `inputFlow.fee.amount`. An input-inclusive fee is already reflected in expected spend. Its amount is unavailable separately. The raw DEEP tuple slot is zero in this mode. `fetchedAt` timestamps the read-only snapshot. The account Review computes its own minimum receive, fee allocation and expiry from its selected quote.
+
+For a public quote, `rawQuote.poolTerms.gasFeePolicy` records whether the pool gas-price surcharge was enabled, disabled, or unavailable. A verified setting includes its configured extra rate in billionths. Account Review requires that observation for its selected mode. Raw pool terms include the base lot, minimum base size, taker rate, DEEP conversion basis and best live opposite price. For a buy that returns zero, the inverse quote supplies a search value. A published minimum input and its preceding raw input were checked against the minimum base size in one forward simulation in the selected fee mode. A later quote can observe another book. A zero output can report `below_minimum_input`, `empty_opposite_book`, `insufficient_depth_for_minimum`, or `no_output` when the available evidence cannot establish the cause.
 
 Returned raw fields are quote evidence only. They are not final min-out values, effective prices, price-impact calculations, venue comparisons, best-route claims, transaction-building inputs, signing data, or signing readiness.
 
@@ -485,7 +494,7 @@ MCP error responses intentionally omit `structuredContent`; clients should read 
 
 A no-op transition is an observed lifecycle call whose stored status did not change, such as a repeated open or reconnect event.
 
-`read_get_review_session_detail.userAnswerUse.answerFields` lists `execution` only when the response includes an `execution` object. If `execution` is absent and `userAnswerUse.cannotAnswer` includes `stored_review_execution_result_without_execution_field`, the response cannot answer a stored execution-result question.
+The latest attempt's observed outcome appears in `request.execution`. For history, inspect `requests[].execution` on the matching attempt ID. Missing execution evidence leaves the chain outcome unconfirmed.
 
 Funnel summaries count distinct reviews and do not treat repeated no-op rows as additional completed steps.
 
@@ -528,6 +537,7 @@ Stored summary boundaries:
 - `summary` contains the stored transaction counts.
 - `analysis.overview.transactionCount` mirrors the stored count.
 - `analysis.overview.analyzedTransactionCount` reports how many returned rows fed the richer aggregations.
+- `accountCoinFlows.completeTransactions` and `incompleteTransactions` count the returned transactions by balance-detail completeness. Only complete transactions contribute amounts. `accountCoinFlows.rowsTruncated` reports whether the asset list exceeded its 50-type limit. When true, a missing type may still have a flow. The top-level `truncated` refers to the transaction list.
 - `transactionDetailAvailability` counts returned stored rows with `details`. `userAnswerUse.answerFields` includes `transactions[].compact` and `transactions[].details` only when `transactionDetailAvailability.allReturnedTransactionsHaveDetails: true`.
 
 Coverage and pagination boundaries:
@@ -536,7 +546,9 @@ Coverage and pagination boundaries:
 - Treat unverified ordering as unproven coverage.
 - Checkpoint bounds are inclusive user bounds translated to the pinned GraphQL API's exclusive checkpoint filters.
 - Timestamp bounds are page filters and coverage signals, not GraphQL provider filters.
-- Continue with `continuationCursor` until `windowComplete` proves coverage or the provider cannot continue.
+- Continue with `continuationCursor` until `windowComplete` proves coverage or the provider cannot continue. A completed scan can skip rows for storage. `persistence.scan.skippedReasons.unconfirmedRelation` counts in-window rows without the required account evidence.
+- Stored summaries include both `relationshipCounts` (unique digests per relationship) and `relationshipObservationCounts` (reads per relationship). Balance changes under stored compact facts are scoped to the requested account.
+- Stored summary bounds include `from` and `to`; the asset timeline excludes its end timestamp. Compare equal effective periods and the same returned digests. `netFlowBars` includes observed partial rows. `completeFlowBars` includes only transactions with complete account balance changes. `incompleteBuckets` counts incomplete transactions by bucket. `coverage.transactionsWithoutTime` counts stored account transactions that cannot be placed in a time range. Scan coverage is separate from amount completeness.
 - Provider retention and rate-limit behavior are endpoint/operator properties, not Sui MCP guarantees.
 - Empty pages, bounded pages, and stored local summaries are not complete wallet or dApp history.
 
@@ -559,10 +571,10 @@ Detail boundaries:
 - `userAnswerUse.answerFields` omits `transactionContext`, `compact`, `details`, and requested-account effect fields that are absent from the current response.
 - For array paths such as `transactions[].transactionContext`, `transactions[].compact`, and `transactions[].details`, `userAnswerUse.answerFields` lists the path only when every returned `transactions` row has that field. If only some rows have details, use `transactionDetailAvailability` and inspect the specific rows or follow-up digest lookup instead.
 - Compact balance changes can aggregate repeated ownerless raw changes with `count`.
-- Compact balance changes are transaction-level facts, not requested-wallet balance evidence.
+- In live inspect rows, compact balance changes are transaction-level facts. In stored rows, `compact.balanceChangeScope: "requested_account"` identifies balances for `compact.balanceChangesAccount`. Calls, events, object changes, and gas retain their transaction scope.
 - `analysis.coinFlows` is a transaction/page aggregate, not wallet-specific evidence.
 
-For wallet/account-specific balance answers, use requested-account fields:
+For live wallet/account-specific balance answers, use requested-account fields:
 
 - `requestedAccountTransactionFacts`;
 - `requestedAccount.coinFlows`;
@@ -675,13 +687,13 @@ For a stored known-account scan, the dropped row contributes only to skipped cou
 - `orderingVerified`;
 - optional `incompleteReason`.
 
-`windowComplete: null` means the user asked for the latest N results without a lower bound.
+`windowComplete: null` means the user asked for the latest N results without a time or checkpoint bound.
 
-`windowComplete: true` means the requested lower checkpoint or timestamp was reached, or the provider reported no more matching transactions.
+`windowComplete: true` requires a continuous, ordered scan within the transaction filter’s verified checkpoint range. Both the requested end and the retained start must be covered. It must exhaust its query or cross the inclusive lower bound. Another page ending exactly at that bound does not complete the period.
 
 `windowComplete: false` means coverage could not be proven.
 
-Provider cursors are opaque and best-effort. Cursor rejection returns a safe error and does not create a complete-history claim.
+Pass the returned opaque continuation cursor with the same account and filters. For a stored scan it identifies the exact previous page, even if that page is read again or the local clock changes. Cursor rejection returns a safe error and does not create a complete-history claim.
 
 Tool source comparison:
 
@@ -690,7 +702,7 @@ Tool source comparison:
 - The summary tools also return deterministic `analysis`.
 - `read_inspect_sui_transaction` is the full normalized detail path for a specific digest.
 - `read_summarize_sui_account_activity` reads only stored normalized facts from local SQLite.
-- `read_get_account_asset_timeline` reads only stored normalized facts from local SQLite, then can attach DeepBookV3 official Indexer USDC candle references for supported USDC-quoted assets.
+- `read_get_account_asset_timeline` reads only stored normalized facts from local SQLite, then can attach pool-bound DeepBook USDC candle references for supported USDC-quoted assets.
 
 If stored or summary details are missing or capped, use the digest metadata with `read_inspect_sui_transaction` instead of inferring missing calls, balances, objects, events, gas, or errors.
 
@@ -702,7 +714,7 @@ Inputs:
 
 - `account` is optional. If omitted, the tool uses saved Sui read context with `accountSource: "active_account_context"`, without requiring a live wallet. Missing or cleared context returns `active_account_not_set` with `details.action: "provide_account"`; supply an explicit Sui address for this read. That error does not establish wallet disconnection. Supplying an explicit public account does not create saved read context or prove ownership.
 - `start` and `end` are ISO 8601 UTC timestamps. The requested range is half-open: `start` is included and `end` is excluded.
-- `interval` is optional and uses the same official Indexer interval values as DeepBook USDC price tools. Omitted `interval` uses `15m`.
+- `interval` is optional and uses the same supported UTC interval values as DeepBook USDC price tools. Omitted `interval` uses `15m`.
 
 Output fields:
 
@@ -713,7 +725,8 @@ Output fields:
 - `balanceStatus` is currently `unavailable_no_balance_anchor`, and `balanceBars` is empty. Do not present net-flow bars as held balances.
 - `sourceTransactions` reports how many stored rows were read, returned, truncated, and detail-covered.
 - `quantitySemantics` marks raw integer net-flow fields and unsupported uses.
-- `usdcReferences` can attach DeepBookV3 official Indexer USDC token-denominated candle references for supported USDC-quoted assets. These references are not fiat USD value, not a USDC/USD peg guarantee, not P&L, not cost basis, not route advice, and not signing readiness.
+- Each entry in `usdcReferences.coinReferences` carries its `coinType` and `range.start` / `range.end`, including unsupported assets, unsupported ranges and unavailable price sources. The range identifies the continuous UTC activity buckets checked for that coin. Disjoint runs have separate source evidence. Account flow is retained when a price is unavailable.
+- `usdcReferences` can attach pool-bound DeepBook USDC token-denominated candle references for supported USDC-quoted assets. These references are not fiat USD value, not a USDC/USD peg guarantee, not P&L, not cost basis, not route advice, and not signing readiness.
 
 This tool does not run scans, start a background indexer, create a price cache, prove complete wallet history, compute held balances, calculate portfolio value, compute P&L, compute tax, compute cost basis, recommend routes, build transactions, return signing data, or provide signing readiness.
 
@@ -1707,3 +1720,8 @@ A deterministic protocol rejection during SDK build-time simulation is reported
 as a simulation rejection, not proof of missing account objects or funds. Refresh
 or a new user-selected constraint does not establish success until the complete
 review is recomputed. The backend does not relax slippage to make a build pass.
+
+
+Stored external activity counts unique transactions by account and digest. `relationshipCounts` counts distinct digests in each relationship. `relationshipObservationCounts` counts observations, including repeated reads. `accountCoinFlows` sums only complete account balance changes among returned unique transactions and exposes the complete and incomplete denominators. `lastObservationDetail` describes the latest observation, even when a previous complete detail remains available. Live scan `analysis.coinFlows` describes its returned transaction context. A digest lookup can report an unconfirmed relationship for an explicitly supplied address.
+
+The activity classifier reports the action declared by a recognized Move call in `declaredAction` alongside `transactionStatus`. Protocol summary counts measure distinct matching transactions and include success, failure and unknown counts. Use independently observed account balance changes for amounts. In stored summaries, `accountCoinFlows.rows` covers only returned transactions with complete account amounts. Live scan `analysis.coinFlows` describes transaction-wide changes.

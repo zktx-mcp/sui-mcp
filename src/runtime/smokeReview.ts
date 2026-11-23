@@ -27,11 +27,12 @@ export async function computeSmokeReview(options: {
   const { protocol, ...intent } = parsed.data;
   const resolution = resolveIntentPlanFactory(INTENT_PLAN_FACTORIES, "swap", protocol);
   if (resolution.status !== "resolved") throw new SmokeReviewConfigError("SUI_MCP_SMOKE_SWAP_PROTOCOL must select a supported swap adapter.");
-  const now = options.now ?? new Date(), plan = resolution.factory.createPlan(intent, now);
+  const clock = () => options.now ?? new Date();
+  const now = clock(), plan = resolution.factory.createPlan(intent, now);
   const created = await sessions.createReviewSession([plan], now);
   await sessions.recordWalletConnected(created.session.id, account, now);
-  const computed = await computeReviewStateWithPrivateArtifacts({ reviewSessionId: created.session.id, plan, account, now }, computation);
-  await sessions.recordReviewStateWithArtifacts(created.session.id, computed.state, computed.privateArtifacts, now);
+  const computed = await computeReviewStateWithPrivateArtifacts({ reviewSessionId: created.session.id, plan, account, clock }, computation);
+  await sessions.recordReviewStateWithArtifacts(created.session.id, computed.state, computed.privateArtifacts, clock());
   return { status: "ok", reviewStatus: computed.state.status, blockedReason: computed.state.blockedReason,
     completedStageCount: computed.state.adapterLifecycle?.completedStages.length ?? 0,
     missingStages: computed.state.adapterLifecycle?.missingStages ?? [],

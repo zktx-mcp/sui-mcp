@@ -38,7 +38,7 @@ attribution. It does not promote any protocol to `read_list_supported_protocols`
 and does not add protocol-specific read tools.
 
 Current package rules are static mainnet research snapshots. The classifier does
-not perform runtime MVR lookups. `mvrName` records the verified name used when
+not perform runtime MVR lookups. `mvrName` records the historical name used when
 the package snapshot was accepted; it is evidence provenance, not a freshness
 guarantee.
 
@@ -97,9 +97,9 @@ requirements.
 
 Classifier matches must be versioned and evidence-based. The current matching hierarchy is:
 
-1. Direct Move package/module/function match.
-2. Event type package/module match.
-3. Object type package/module match.
+1. Defining package of the outer event type.
+2. Defining package of the outer changed object type.
+3. Direct Move package/module/function matched to the indexed package lineage.
 4. Known shared object id match.
 5. Balance change asset flow as supporting evidence only.
 6. Gas or execution error as supporting evidence only.
@@ -129,7 +129,7 @@ type ProtocolActivityClassifierMatch = {
   protocolId: string;
   displayName: string;
   activityCategory: string;
-  primaryAction:
+  declaredAction:
     | "order"
     | "swap"
     | "liquidity"
@@ -180,11 +180,11 @@ Rules for the output:
 
 - `protocolId` is an attribution label for the transaction, not a wallet
   position and not a support claim.
-- `primaryAction` is a coarse activity group, not a protocol-specific action
+- `declaredAction` is a coarse activity group, not a protocol-specific action
   decoder. When a transaction has multiple matched calls for the same protocol,
   core user-action groups such as order, swap, liquidity, and lending take
   precedence over helper fee/reward or admin/versioning calls.
-- `packageSource` and `mvrName` record why the package match is accepted. When a
+- `packageSource` identifies the observed on-chain lineage. `mvrName` describes a historical naming observation. When a
   verified MVR name exists, include it in the package-derived evidence.
 - `amountRaw` values remain raw integer strings. The classifier must not format,
   price, round, or infer token decimals.
@@ -415,7 +415,7 @@ Action grouping:
 
 - The first classifier pass does not emit an Aftermath primary action from Move
   calls because direct callable entrypoints have not been verified.
-- Event and object evidence can identify the afSUI surface, but `primaryAction`
+- Event and object evidence can identify the afSUI surface, but `declaredAction`
   remains `unknown`.
 - Future stake, unstake, receipt-token mint/burn, fee, reward, or treasury
   labels require verified callable entrypoints or verified event semantics.

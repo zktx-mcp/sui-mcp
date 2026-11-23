@@ -165,7 +165,7 @@ export type WalletConnectionRecord = {
 
 // Shared recorded connection facts only. Each operation checks its own expiry,
 // account, method and revision requirements at its decision boundary.
-export function isOwnedConnectedWallet(record: WalletConnectionRecord | undefined, ownerId: string,
+export function isManagedConnectedWallet(record: WalletConnectionRecord | undefined, ownerId: string,
   disconnectPending: boolean): record is WalletConnectionRecord {
   return !!record && record.ownerId === ownerId && record.connection.status === "connected" && !disconnectPending;
 }
@@ -178,7 +178,7 @@ export type WalletSession = {
 };
 
 export interface WalletTransport {
-  restore(): Promise<WalletSession[]>;
+  cleanupPairings(): Promise<void>;
   connect(chains: readonly WalletChainId[]): Promise<{ uri: string; expiresAt: string; approval: Promise<WalletSession> }>;
   disconnect(topic: string): Promise<void>;
   sign(input: { topic: string; account: string; transactionBytesBase64: string }): Promise<{

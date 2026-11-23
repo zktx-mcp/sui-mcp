@@ -450,6 +450,7 @@ const slippagePolicyClaimSchema = z.object({
   id: evidenceIdSchema,
   factKind: z.literal("slippage_policy"),
   sourceEvidenceId: evidenceIdSchema,
+  maxSlippageSource: z.literal("action_request").optional(),
   policySource: z.enum(["user_explicit", "adapter_policy_from_quote_evidence"]),
   maxSlippageBps: z.number().int().min(0).max(10_000),
   minOutRaw: unsignedIntegerStringSchema.optional()
@@ -628,12 +629,29 @@ export const adapterExpiryEvidenceSchema = z.discriminatedUnion("status", [
   }
 });
 
+export const minimumOutputEnforcementSchema = z.object({
+  commandFailure: z.literal("InsufficientCoinBalance").optional(),
+  method: z.string().min(1).max(120),
+  protocolAbort: z.object({
+    commandIndex: z.number().int().nonnegative(),
+    packageId: suiObjectIdSchema,
+    moduleOrigin: suiObjectIdSchema,
+    module: z.string().min(1).max(128),
+    code: unsignedIntegerStringSchema
+  }).strict().optional(),
+  transactionDigest: z.string().min(1),
+  commandIndex: z.number().int().nonnegative(),
+  coinType: z.string().min(1), recipient: z.string().min(1), raw: unsignedIntegerStringSchema
+}).strict();
+
 export const adapterSlippageOrMinOutEvidenceSchema = z.object({
   status: z.enum(["required_and_verified", "not_required_for_action", "missing", "stale"]),
   quoteEvidenceId: z.string().min(1).max(120).optional(),
   quoteEvidenceClaimId: evidenceIdSchema.optional(),
   maxSlippageBps: z.number().int().min(0).max(10_000).optional(),
   minOutRaw: unsignedIntegerStringSchema.optional(),
+  enforcement: minimumOutputEnforcementSchema.optional(),
+  maxSlippageSource: z.literal("action_request").optional(),
   policySource: z.enum(["user_explicit", "adapter_policy_from_quote_evidence"]).optional(),
   policyEvidenceClaimId: evidenceIdSchema.optional()
 }).strict().superRefine((value, ctx) => {
@@ -1184,6 +1202,14 @@ export const transactionReviewDataSchema = z.object({
     }
   }
 
+  const enforcement = value.slippageOrMinOut.enforcement;
+  if (enforcement && (enforcement.transactionDigest !== value.reviewedTransactionDigest ||
+      enforcement.raw !== value.slippageOrMinOut.minOutRaw ||
+      !value.rawQuantities.some((quantity) => quantity.role === "minimum_output" &&
+        quantity.asset.coinType === enforcement.coinType && quantity.rawAmount === enforcement.raw))) {
+    ctx.addIssue({ code: "custom", path: ["slippageOrMinOut", "enforcement"],
+      message: "Output enforcement must match the reviewed transaction digest, asset and minimum." });
+  }
   if (value.slippageOrMinOut.quoteEvidenceClaimId !== undefined) {
     const quoteClaim = requireClaim(
       value.slippageOrMinOut.quoteEvidenceClaimId,
@@ -1220,6 +1246,7 @@ export const transactionReviewDataSchema = z.object({
       "slippageOrMinOut.policyEvidenceClaimId"
     );
     if (policyClaim?.factKind === "slippage_policy") {
+      requireEqual(ctx, value.slippageOrMinOut.maxSlippageSource, policyClaim.maxSlippageSource, ["slippageOrMinOut", "maxSlippageSource"], "slippageOrMinOut.maxSlippageSource");
       requireEqual(ctx, value.slippageOrMinOut.policySource, policyClaim.policySource, ["slippageOrMinOut", "policySource"], "slippageOrMinOut.policySource");
       requireEqual(ctx, value.slippageOrMinOut.maxSlippageBps, policyClaim.maxSlippageBps, ["slippageOrMinOut", "maxSlippageBps"], "slippageOrMinOut.maxSlippageBps");
       if (policyClaim.policySource === "adapter_policy_from_quote_evidence") {

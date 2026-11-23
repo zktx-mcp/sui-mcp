@@ -1,6 +1,6 @@
+import { quotePoolCommandResults } from "./fixtures/deepbookQuote.js";
 import { describe, expect, it } from "vitest";
 import { mainnetCoins, type Coin } from "@mysten/deepbook-v3";
-import { bcs } from "@mysten/sui/bcs";
 import type { SuiClientTypes } from "@mysten/sui/client";
 import {
   ReadServiceCacheError,
@@ -11,18 +11,18 @@ import {
   type IntentEvidenceSummary
 } from "../src/core/read/readService.js";
 import {
-  DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT,
-  type DeepbookOfficialIndexerCandlesInput,
-  type DeepbookOfficialIndexerCandle,
-  type DeepbookOfficialIndexerFetchSource,
-  type DeepbookOfficialIndexerPool,
-  type DeepbookOfficialIndexerSourceClient
-} from "../src/core/read/deepbookOfficialIndexerSource.js";
+  DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
+  DEEPBOOK_CANDLE_SOURCE_STATEMENT,
+  type DeepbookCandleQuery,
+  type DeepbookTradeCandle,
+  type DeepbookCandleSourceEvidence,
+  type DeepbookCandlePool,
+  type DeepbookCandleSourceClient
+} from "../src/core/read/deepbookCandleSource.js";
 import {
-  DEEPBOOK_ANSWER_USE,
-  DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT,
-  DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE,
+  DEEPBOOK_ANSWER_USE, DEEPBOOK_READ_RESPONSE_UNSUPPORTED,
+  DEEPBOOK_CANDLE_RESPONSE_TEXT,
+  DEEPBOOK_CANDLE_SOURCE_BASE,
   DEEPBOOK_PINNED_SDK_METADATA_SOURCE,
   DEEPBOOK_SDK_SIMULATION_SOURCE_BASE
 } from "../src/core/read/deepbookSourceOwners.js";
@@ -67,10 +67,11 @@ function createService(
       options: SuiClientTypes.DefaultNameServiceNameOptions
     ) => Promise<SuiClientTypes.DefaultNameServiceNameResponse>;
     deepbook?: Partial<DeepBookReadClient>;
+    now?: () => Date;
     coinMetadataCache?: CoinMetadataCache;
     coinMetadataTtlMs?: number;
     deepbookCoins?: DeepBookCoinRegistry;
-    deepbookOfficialIndexerSource?: DeepbookOfficialIndexerSourceClient;
+    deepbookCandleSource?: DeepbookCandleSourceClient;
   } = {}
 ) {
   const deepbook: DeepBookReadClient = {
@@ -130,8 +131,8 @@ function createService(
     coinMetadataCache: options.coinMetadataCache ?? new MemoryCoinMetadataCache(),
     ...(options.coinMetadataTtlMs === undefined ? {} : { coinMetadataTtlMs: options.coinMetadataTtlMs }),
     ...(options.deepbookCoins === undefined ? {} : { deepbookCoins: options.deepbookCoins }),
-    ...(options.deepbookOfficialIndexerSource === undefined ? {} : { deepbookOfficialIndexerSource: options.deepbookOfficialIndexerSource }),
-    now,
+    ...(options.deepbookCandleSource === undefined ? {} : { deepbookCandleSource: options.deepbookCandleSource }),
+    now: options.now ?? (options.deepbookCandleSource ? () => new Date(officialSource("pool_registry").fetchedAt) : now),
     deepbookFactory: () => deepbook,
     client: {
       core: {
@@ -196,21 +197,21 @@ function deepbookCoinsWithInvalidSuiScalar(): DeepBookCoinRegistry {
   };
 }
 
-function createDeepbookOfficialIndexerSourceFixture(options: {
-  pools?: DeepbookOfficialIndexerPool[] | undefined;
-  candles?: DeepbookOfficialIndexerCandle[] | undefined;
+function createDeepbookCandleSourceFixture(options: {
+  pools?: DeepbookCandlePool[] | undefined;
+  candles?: DeepbookTradeCandle[] | undefined;
   failPools?: boolean | undefined;
   failCandles?: boolean | undefined;
 } = {}): {
-  source: DeepbookOfficialIndexerSourceClient;
+  source: DeepbookCandleSourceClient;
   calls: {
     pools: number;
-    candles: DeepbookOfficialIndexerCandlesInput[];
+    candles: DeepbookCandleQuery[];
   };
 } {
   const calls: {
     pools: number;
-    candles: DeepbookOfficialIndexerCandlesInput[];
+    candles: DeepbookCandleQuery[];
   } = {
     pools: 0,
     candles: []
@@ -224,7 +225,7 @@ function createDeepbookOfficialIndexerSourceFixture(options: {
           throw new Error("pool source unavailable");
         }
         return {
-          source: officialSource("get_pools"),
+          source: officialSource("pool_registry"),
           pools: options.pools ?? [officialPoolFixture()]
         };
       },
@@ -234,8 +235,10 @@ function createDeepbookOfficialIndexerSourceFixture(options: {
           throw new Error("candle source unavailable");
         }
         return {
-          source: officialSource("ohclv", input),
-          candles: options.candles ?? officialCandlesFixture()
+          source: officialSource("order_fills", input),
+          candles: options.candles ?? officialCandlesFixture().filter((c) =>
+            (input.startTimeMs === undefined || Date.parse(c.end) > input.startTimeMs) &&
+            (input.endTimeMs === undefined || c.timestampMs < input.endTimeMs))
         };
       }
     }
@@ -246,7 +249,7 @@ function officialPoolFixture(
   poolName = "SUI_USDC",
   symbol = "SUI",
   coinType = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI"
-): DeepbookOfficialIndexerPool {
+): DeepbookCandlePool {
   return {
     pool_id:
       poolName === "SUI2_USDC"
@@ -256,13 +259,13 @@ function officialPoolFixture(
     base_asset_id: coinType,
     base_asset_symbol: symbol,
     base_asset_decimals: 9,
-    quote_asset_id: DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE,
+    quote_asset_id: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
     quote_asset_symbol: "USDC",
     quote_asset_decimals: 6
   };
 }
 
-function officialCandlesFixture(): DeepbookOfficialIndexerCandle[] {
+function officialCandlesFixture(): DeepbookTradeCandle[] {
   return [
     {
       timestampMs: Date.parse("2026-06-26T16:50:00.000Z"),
@@ -288,19 +291,19 @@ function officialCandlesFixture(): DeepbookOfficialIndexerCandle[] {
 }
 
 function officialSource(
-  endpoint: "get_pools" | "ohclv",
-  input: Partial<Parameters<DeepbookOfficialIndexerSourceClient["fetchCandles"]>[0]> = {}
-): DeepbookOfficialIndexerFetchSource {
+  endpoint: "pool_registry" | "order_fills",
+  input: Partial<Parameters<DeepbookCandleSourceClient["fetchCandles"]>[0]> = {}
+): DeepbookCandleSourceEvidence {
   return {
     baseUrl: "https://deepbook-indexer.mainnet.mystenlabs.com",
     endpoint,
     url:
-      endpoint === "get_pools"
+      endpoint === "pool_registry"
         ? "https://deepbook-indexer.mainnet.mystenlabs.com/get_pools"
         : `https://deepbook-indexer.mainnet.mystenlabs.com/ohclv/${input.poolName}?interval=${input.interval}`,
     fetchedAt: "2026-06-27T00:00:00.000Z",
-    sourceStatement: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_STATEMENT,
-    poolName: input.poolName,
+    sourceStatement: DEEPBOOK_CANDLE_SOURCE_STATEMENT,
+    poolId: input.poolId, poolName: input.poolName,
     interval: input.interval,
     startTimeMs: input.startTimeMs,
     endTimeMs: input.endTimeMs,
@@ -495,6 +498,36 @@ describe("SuiReadService", () => {
     expect(result.objectGroups).toEqual([{ type: "0xabc::game::Sword", count: 2 }]);
     expect(result.objectsTruncated).toBe(false);
     expect(result.balances.length).toBeGreaterThan(0);
+  });
+
+  it("keeps independent account sections and counts observed Display rows beyond the rendering cap", async () => {
+    const display = Array.from({ length: 61 }, (_, i) => ({ objectId: "piece-" + i, type: "0xab::art::Piece", display: { output: { name: "Art" } } }));
+    const objectTypes = ["0xabc::coin::Coin<0x2::sui::SUI>", "0xabc::wrap::Box<0x2::coin::Coin<0x2::sui::SUI>>"];
+    const result = await createService({
+      listBalances: async () => { throw new Error("balance source unavailable"); },
+      defaultNameServiceName: async () => ({ data: { name: "alice.sui" } }),
+      listOwnedObjects: async () => ({ hasNextPage: false, cursor: null,
+        objects: [...display, ...objectTypes.map((type, i) => ({ objectId: "other-" + i, type, display: null }))]
+      } as unknown as SuiClientTypes.ListOwnedObjectsResponse<{ display: true }>)
+    }).summarizeAccountInventory({ account: managerAddress });
+    expect(result).toMatchObject({ name: "alice.sui", nameStatus: "found", balancePages: 0,
+      balancesIncompleteReason: "wallet_balance_source_unavailable", objectScanStatus: "complete",
+      displayObjectCount: 61, displayObjectsTruncated: true, scannedObjects: 63 });
+    expect(result.nfts).toHaveLength(60);
+    expect(result.objectGroups.map(group => group.type)).toEqual(objectTypes);
+  });
+
+  it.each([["70", 1], ["71", 0]] as const)("deduplicates paginated wallet totals and excludes conflicts", async (last, retained) => {
+    const coin = (coinType: string, amount: string) => ({ coinType, balance: amount, coinBalance: amount, addressBalance: "0" });
+    const result = await createService({
+      listBalances: async ({ cursor }) => cursor === "third" ? { balances: [coin("0x2::sui::SUI", last)], hasNextPage: false, cursor: null }
+        : cursor === "second" ? { balances: [coin("0x2::sui::SUI","70")], hasNextPage: true, cursor: "third" }
+        : { balances: [coin("0x2::empty::EMPTY","0")], hasNextPage: true, cursor: "second" }
+    }).summarizeAccountInventory({ account: managerAddress });
+    expect(result.balancePages).toBe(3);
+    expect(result.balances).toHaveLength(retained);
+    if (retained) expect(result.balances[0]?.balance).toBe("70");
+    else expect(result.balancesIncompleteReason).toBe("wallet_balance_conflict");
   });
 
   it("summarizeAccountInventory reports a null name when the account has none", async () => {
@@ -2154,8 +2187,8 @@ describe("SuiReadService", () => {
   });
 
   it("returns official DeepBook USDC candle history with interval and range metadata", async () => {
-    const { source, calls } = createDeepbookOfficialIndexerSourceFixture();
-    const result = await createService({ deepbookOfficialIndexerSource: source }).getDeepbookUsdcPriceHistory({
+    const { source, calls } = createDeepbookCandleSourceFixture();
+    const result = await createService({ deepbookCandleSource: source }).getDeepbookUsdcPriceHistory({
       assetSymbol: "SUI",
       interval: "15m",
       start: "2026-06-26T16:50:00.000Z",
@@ -2165,6 +2198,7 @@ describe("SuiReadService", () => {
     expect(calls.pools).toBe(1);
     expect(calls.candles).toEqual([
       {
+        poolId: officialPoolFixture().pool_id, market: officialPoolFixture(), directId: false, window: "history",
         poolName: "SUI_USDC",
         interval: "15m",
         startTimeMs: Date.parse("2026-06-26T16:50:00.000Z"),
@@ -2191,7 +2225,7 @@ describe("SuiReadService", () => {
         poolId: "0xe05dafb5133bcffb8d59f4e12465dc0e9faeaa05e3e342a08fe135800e3e4407",
         quoteAsset: {
           symbol: "USDC",
-          coinType: DEEPBOOK_OFFICIAL_INDEXER_CANONICAL_USDC_COIN_TYPE,
+          coinType: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
           decimals: 6
         },
         priceConvention: "USDC_PER_BASE"
@@ -2199,30 +2233,30 @@ describe("SuiReadService", () => {
       candleAvailability: "available",
       barCount: 2,
       source: {
-        kind: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind,
+        kind: DEEPBOOK_CANDLE_SOURCE_BASE.kind,
         baseUrl: "https://deepbook-indexer.mainnet.mystenlabs.com",
         candles: {
           poolName: "SUI_USDC",
           interval: "15m"
         },
-        chainRecomputedBySuiMcp: false
+        chainRecomputedBySuiMcp: true
       },
       responseSummary: {
-        sourceStatement: DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.sourceStatement,
-        usdcDisclaimer: DEEPBOOK_OFFICIAL_INDEXER_RESPONSE_TEXT.usdcDisclaimer
+        sourceStatement: DEEPBOOK_CANDLE_RESPONSE_TEXT.sourceStatement,
+        usdcDisclaimer: DEEPBOOK_CANDLE_RESPONSE_TEXT.usdcDisclaimer
       },
       quantitySemantics: {
-        allowedUse: DEEPBOOK_ANSWER_USE.officialUsdcCandleHistory,
+        allowedUse: DEEPBOOK_ANSWER_USE.poolUsdcCandleHistory,
         quoteAsset: "USDC",
         usdcIsFiatUsd: false,
         usdPegGuaranteeAvailable: false,
-        chainRecomputedBySuiMcp: false,
+        chainRecomputedBySuiMcp: true,
         routeRecommendationAvailable: false,
         signingReadinessAvailable: false
       },
       userAnswerUse: {
-        canAnswer: expect.arrayContaining([DEEPBOOK_ANSWER_USE.officialUsdcCandleHistory]),
-        cannotAnswer: expect.arrayContaining(["fiat_usd_cash_out", "usd_peg_assumption", "signing_data_or_readiness"])
+        canAnswer: [DEEPBOOK_ANSWER_USE.poolUsdcCandleHistory, DEEPBOOK_ANSWER_USE.candleAvailabilityForRequestedUtcRange],
+        cannotAnswer: [...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.officialUsdcCandles]
       },
       unsupportedClaims: expect.arrayContaining([
         "fiat_usd_cash_out",
@@ -2231,7 +2265,6 @@ describe("SuiReadService", () => {
         "signing_readiness",
         "profit_or_pnl",
         "cost_basis",
-        "independent_chain_recomputation"
       ])
     });
     if (result.status !== "ok") {
@@ -2246,9 +2279,9 @@ describe("SuiReadService", () => {
   });
 
   it("resolves official DeepBook USDC history by pool name and coin type", async () => {
-    const byPool = createDeepbookOfficialIndexerSourceFixture();
+    const byPool = createDeepbookCandleSourceFixture();
     await expect(
-      createService({ deepbookOfficialIndexerSource: byPool.source }).getDeepbookUsdcPriceHistory({
+      createService({ deepbookCandleSource: byPool.source }).getDeepbookUsdcPriceHistory({
         poolName: "sui_usdc",
         start: "2026-06-26T16:50:00.000Z",
         end: "2026-06-26T17:05:00.000Z"
@@ -2259,9 +2292,9 @@ describe("SuiReadService", () => {
       pair: { poolName: "SUI_USDC" }
     });
 
-    const byCoinType = createDeepbookOfficialIndexerSourceFixture();
+    const byCoinType = createDeepbookCandleSourceFixture();
     await expect(
-      createService({ deepbookOfficialIndexerSource: byCoinType.source }).getDeepbookUsdcPriceHistory({
+      createService({ deepbookCandleSource: byCoinType.source }).getDeepbookUsdcPriceHistory({
         coinType: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
         start: "2026-06-26T16:50:00.000Z",
         end: "2026-06-26T17:05:00.000Z"
@@ -2274,29 +2307,30 @@ describe("SuiReadService", () => {
   });
 
   it("returns explicit unsupported pool statuses without fetching candles", async () => {
-    const missing = createDeepbookOfficialIndexerSourceFixture();
+    const missing = createDeepbookCandleSourceFixture();
     await expect(
-      createService({ deepbookOfficialIndexerSource: missing.source }).getDeepbookUsdcPriceHistory({
+      createService({ deepbookCandleSource: missing.source }).getDeepbookUsdcPriceHistory({
         assetSymbol: "UNKNOWN",
         start: "2026-06-26T16:50:00.000Z",
         end: "2026-06-26T17:05:00.000Z"
       })
     ).resolves.toMatchObject({
       status: "unsupported_pair",
-      reason: "selector_not_in_official_indexer",
+      reason: "market_not_in_mainnet_pool_catalog",
+      userAnswerUse: { canAnswer: [], cannotAnswer: expect.arrayContaining(["signing_data_or_readiness"]), answerFields: expect.not.arrayContaining(["bars"]) },
       matchingPoolNames: [],
       availablePoolNames: ["SUI_USDC"]
     });
     expect(missing.calls.candles).toEqual([]);
 
-    const ambiguous = createDeepbookOfficialIndexerSourceFixture({
+    const ambiguous = createDeepbookCandleSourceFixture({
       pools: [
         officialPoolFixture("SUI_USDC", "SUI", "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI"),
         officialPoolFixture("SUI2_USDC", "SUI", "0x9999999999999999999999999999999999999999999999999999999999999999::sui::SUI")
       ]
     });
     await expect(
-      createService({ deepbookOfficialIndexerSource: ambiguous.source }).getDeepbookUsdcPriceHistory({
+      createService({ deepbookCandleSource: ambiguous.source }).getDeepbookUsdcPriceHistory({
         assetSymbol: "SUI",
         start: "2026-06-26T16:50:00.000Z",
         end: "2026-06-26T17:05:00.000Z"
@@ -2307,12 +2341,67 @@ describe("SuiReadService", () => {
       matchingPoolNames: ["SUI_USDC", "SUI2_USDC"]
     });
     expect(ambiguous.calls.candles).toEqual([]);
+
+    const original = officialPoolFixture();
+    const namesake = { ...officialPoolFixture("SUI2_USDC", "SUI", "0x12::coin::SUI"), pool_name:original.pool_name };
+    const catalog = createDeepbookCandleSourceFixture({ pools:[original,namesake] }).source;
+    const range = { start:"2026-06-26T16:50:00.000Z", end:"2026-06-26T17:05:00.000Z" };
+    const service = createService({deepbookCandleSource:catalog});
+    await expect(service.getDeepbookUsdcPriceHistory({...range, coinType:original.base_asset_id})).resolves.toMatchObject({
+      status:"ok", pair:{poolId:original.pool_id}
+    });
+    await expect(service.getDeepbookUsdcPriceHistory({...range, poolName:original.pool_name})).resolves.toMatchObject({
+      status:"unsupported_pair", candidates:[{poolId:original.pool_id, baseCoinType:original.base_asset_id},{poolId:namesake.pool_id, baseCoinType:namesake.base_asset_id}]
+    });
+    const directory = await catalog.fetchPools();
+    catalog.fetchPools = async () => ({...directory,pools:[original],unavailablePools:[{
+      poolId:namesake.pool_id,baseCoinType:namesake.base_asset_id,quoteCoinType:namesake.quote_asset_id
+    }]});
+    await expect(service.getDeepbookUsdcPriceHistory({...range, coinType:original.base_asset_id})).resolves.toMatchObject({status:"ok"});
+    await expect(service.getDeepbookUsdcPriceHistory({...range, assetSymbol:"SUI"})).resolves.toMatchObject({
+      status:"source_unavailable", reason:"pool_list_incomplete", candidates:[{poolId:original.pool_id},{poolId:namesake.pool_id}]
+    });
+  });
+
+  it("retains the indexed cutoff when no candle can be observed at the target", async () => {
+    const fixture = createDeepbookCandleSourceFixture({candles:[]});
+    const fetch = fixture.source.fetchCandles.bind(fixture.source);
+    fixture.source.fetchCandles = async query => {
+      const result = await fetch(query);
+      return {...result,source:{...result.source,coverage:"partial_tail",indexedAt:"2026-06-26T17:02:00.000Z",coveredUntil:"2026-06-26T17:02:00.001Z"}};
+    };
+    const service = createService({deepbookCandleSource:fixture.source});
+    await expect(service.getDeepbookUsdcPriceHistory({poolName:"SUI_USDC",start:"2026-06-26T17:00:00.000Z",end:"2026-06-26T17:05:00.000Z"}))
+      .resolves.toMatchObject({status:"ok",barCount:0,candleAvailability:"partial_coverage",source:{candles:{coveredUntil:"2026-06-26T17:02:00.001Z"}}});
+    await expect(service.getDeepbookUsdcPriceAtTime({poolName:"SUI_USDC",targetTime:"2026-06-26T17:01:00.000Z"}))
+      .resolves.toMatchObject({status:"source_unavailable",reason:"candle_coverage_incomplete"});
+  });
+
+  it("proves a nearest-after match within the indexed prefix and reports the union of the two reads", async () => {
+    const at = (minute: number) => Date.UTC(2026, 0, 1, 10, minute);
+    const iso = (minute: number) => new Date(at(minute)).toISOString();
+    const candle = { ...officialCandlesFixture()[0]!, timestampMs: at(5), start: iso(5), end: iso(6) };
+    const { source, calls } = createDeepbookCandleSourceFixture({ candles: [candle] });
+    const read = source.fetchCandles.bind(source);
+    source.fetchCandles = async query => {
+      if (query.endTimeMs! > at(7) + 1) throw new Error("Outside the indexed prefix");
+      const result = await read(query);
+      return { ...result, source: { ...result.source, coveredFrom: new Date(query.startTimeMs!).toISOString(),
+        coveredUntil: new Date(query.endTimeMs!).toISOString(), indexedAt: iso(7), indexedCheckpoint: 7 } };
+    };
+    const result = await createService({ deepbookCandleSource: source }).getDeepbookUsdcPriceAtTime({
+      poolName: "SUI_USDC", targetTime: iso(4), interval: "1m", maxDistanceMinutes: 6
+    });
+    expect(result).toMatchObject({ status: "ok", matchedCandle: candle, match: { kind: "nearest_after", distanceMinutes: 1 },
+      requested: { selector: { kind: "pool_name" }, range: { start: iso(-3), end: new Date(at(7) + 1).toISOString() } },
+      source: { candles: { startTimeMs: at(-3), endTimeMs: at(7) + 1 } } });
+    expect(calls.pools).toBe(1);
   });
 
   it("returns source-unavailable when official candles cannot be read", async () => {
-    const { source } = createDeepbookOfficialIndexerSourceFixture({ failCandles: true });
+    const { source } = createDeepbookCandleSourceFixture({ failCandles: true });
     await expect(
-      createService({ deepbookOfficialIndexerSource: source }).getDeepbookUsdcPriceHistory({
+      createService({ deepbookCandleSource: source }).getDeepbookUsdcPriceHistory({
         poolName: "SUI_USDC",
         start: "2026-06-26T16:50:00.000Z",
         end: "2026-06-26T17:05:00.000Z"
@@ -2322,7 +2411,7 @@ describe("SuiReadService", () => {
       reason: "candle_fetch_failed",
       pair: { poolName: "SUI_USDC" },
       source: {
-        kind: DEEPBOOK_OFFICIAL_INDEXER_SOURCE_BASE.kind,
+        kind: DEEPBOOK_CANDLE_SOURCE_BASE.kind,
         poolList: { url: "https://deepbook-indexer.mainnet.mystenlabs.com/get_pools" }
       }
     });
@@ -2330,7 +2419,7 @@ describe("SuiReadService", () => {
 
   it("returns a target-time DeepBook USDC candle with close as the representative price", async () => {
     const result = await createService({
-      deepbookOfficialIndexerSource: createDeepbookOfficialIndexerSourceFixture().source
+      deepbookCandleSource: createDeepbookCandleSourceFixture().source
     }).getDeepbookUsdcPriceAtTime({
       poolName: "SUI_USDC",
       targetTime: "2026-06-26T16:55:00.000Z"
@@ -2360,20 +2449,21 @@ describe("SuiReadService", () => {
         close: "0.69316"
       },
       userAnswerUse: {
+        canAnswer: [DEEPBOOK_ANSWER_USE.poolUsdcCandleForRequestedTime, DEEPBOOK_ANSWER_USE.representativeClosePriceForMatchedCandle],
         answerFields: expect.arrayContaining(["match.representativePrice", "matchedCandle.close", "responseSummary"]),
-        cannotAnswer: expect.arrayContaining(["fiat_usd_cash_out", "global_market_price", "profit_or_pnl"])
+        cannotAnswer: [...DEEPBOOK_READ_RESPONSE_UNSUPPORTED.officialUsdcCandles]
       },
       quantitySemantics: {
-        allowedUse: DEEPBOOK_ANSWER_USE.officialUsdcCandleHistory,
+        allowedUse: DEEPBOOK_ANSWER_USE.poolUsdcCandleHistory,
         usdcIsFiatUsd: false,
-        chainRecomputedBySuiMcp: false
+        chainRecomputedBySuiMcp: true
       }
     });
   });
 
   it("uses the nearest official candle when the target bucket has no candle", async () => {
     const result = await createService({
-      deepbookOfficialIndexerSource: createDeepbookOfficialIndexerSourceFixture().source
+      deepbookCandleSource: createDeepbookCandleSourceFixture().source
     }).getDeepbookUsdcPriceAtTime({
       poolName: "SUI_USDC",
       targetTime: "2026-06-26T17:10:00.000Z"
@@ -2395,7 +2485,7 @@ describe("SuiReadService", () => {
 
   it("uses the nearest-after official candle when the target time is before the first candle", async () => {
     const result = await createService({
-      deepbookOfficialIndexerSource: createDeepbookOfficialIndexerSourceFixture().source
+      deepbookCandleSource: createDeepbookCandleSourceFixture().source
     }).getDeepbookUsdcPriceAtTime({
       poolName: "SUI_USDC",
       targetTime: "2026-06-26T16:45:00.000Z"
@@ -2417,7 +2507,7 @@ describe("SuiReadService", () => {
 
   it("uses half-open official candle boundaries for target-time matching", async () => {
     const service = createService({
-      deepbookOfficialIndexerSource: createDeepbookOfficialIndexerSourceFixture().source
+      deepbookCandleSource: createDeepbookCandleSourceFixture().source
     });
 
     await expect(
@@ -2465,7 +2555,7 @@ describe("SuiReadService", () => {
 
   it("does not invent a price when no official candle is inside the search window", async () => {
     const result = await createService({
-      deepbookOfficialIndexerSource: createDeepbookOfficialIndexerSourceFixture().source
+      deepbookCandleSource: createDeepbookCandleSourceFixture().source
     }).getDeepbookUsdcPriceAtTime({
       poolName: "SUI_USDC",
       targetTime: "2026-06-26T17:10:00.000Z",
@@ -2480,16 +2570,17 @@ describe("SuiReadService", () => {
       },
       pair: { poolName: "SUI_USDC" },
       userAnswerUse: {
-        canAnswer: expect.not.arrayContaining(["representative_close_price_for_the_matched_candle"]),
+        canAnswer: [DEEPBOOK_ANSWER_USE.candleAvailabilityForRequestedUtcRange],
+        cannotAnswer: expect.arrayContaining(["signing_data_or_readiness"]),
         answerFields: expect.not.arrayContaining(["matchedCandle.close"])
       }
     });
   });
 
   it("rejects unsupported official candle intervals before reading the official source", async () => {
-    const { source, calls } = createDeepbookOfficialIndexerSourceFixture();
+    const { source, calls } = createDeepbookCandleSourceFixture();
     await expect(
-      createService({ deepbookOfficialIndexerSource: source }).getDeepbookUsdcPriceAtTime({
+      createService({ deepbookCandleSource: source }).getDeepbookUsdcPriceAtTime({
         poolName: "SUI_USDC",
         interval: "not-an-interval" as never,
         targetTime: "2026-06-26T16:55:00.000Z"
@@ -2502,9 +2593,24 @@ describe("SuiReadService", () => {
     expect(calls.candles).toEqual([]);
   });
 
+  it("rejects wholly future price requests but keeps a crossing range and a derived point window", async () => {
+    const { source, calls } = createDeepbookCandleSourceFixture();
+    const service = createService({ deepbookCandleSource: source, now: () => new Date("2026-06-26T17:01:00.000Z") });
+    const future = "2026-06-26T17:02:00.000Z";
+    await expect(service.getDeepbookUsdcPriceHistory({poolName:"SUI_USDC",start:future,end:"2026-06-26T17:10:00.000Z"}))
+      .rejects.toMatchObject({kind:"input_invalid",details:{field:"start"}});
+    await expect(service.getDeepbookUsdcPriceAtTime({poolName:"SUI_USDC",targetTime:future}))
+      .rejects.toMatchObject({kind:"input_invalid",details:{field:"targetTime"}});
+    expect(calls.pools).toBe(0);expect(calls.candles).toHaveLength(0);
+    await expect(service.getDeepbookUsdcPriceHistory({poolName:"SUI_USDC",start:"2026-06-26T16:59:00.000Z",end:future}))
+      .resolves.toMatchObject({status:"ok"});
+    await expect(service.getDeepbookUsdcPriceAtTime({poolName:"SUI_USDC",targetTime:"2026-06-26T17:01:00.000Z"}))
+      .resolves.toMatchObject({status:"ok"});
+  });
+
   it("returns unsupported-range before reading the official source", async () => {
-    const { source, calls } = createDeepbookOfficialIndexerSourceFixture();
-    const result = await createService({ deepbookOfficialIndexerSource: source }).getDeepbookUsdcPriceHistory({
+    const { source, calls } = createDeepbookCandleSourceFixture();
+    const result = await createService({ deepbookCandleSource: source }).getDeepbookUsdcPriceHistory({
       poolName: "SUI_USDC",
       start: "2026-06-01T00:00:00.000Z",
       end: "2026-06-30T00:00:00.000Z"
@@ -2548,6 +2654,24 @@ describe("SuiReadService", () => {
         })
       ).rejects.toMatchObject(expectedError);
     }
+  });
+
+  it.each(["quote first", "policy first"] as const)("dates a public quote at the raw response (%s)", async order => {
+    const start = now().getTime();
+    let clock = start;
+    const quote = Promise.withResolvers<{ baseOutRaw: string; quoteOutRaw: string; deepRequiredRaw: string }>();
+    const policy = Promise.withResolvers<{ enabled: boolean; additionalTakerFeeRaw: string }>();
+    const service = createService({ now: () => new Date(clock), deepbook: {
+      getQuoteQuantityOutRaw: () => quote.promise, gasFeePolicy: () => policy.promise
+    } });
+    const pending = service.quoteDeepbookDisplayAmount({ poolKey: "SUI_USDC", direction: "base_to_quote", amountDisplay: "1", simulationSender: accountAddress });
+    const finishQuote = () => quote.resolve({ baseOutRaw: "0", quoteOutRaw: "500000", deepRequiredRaw: "1000" });
+    const finishPolicy = () => policy.resolve({ enabled: false, additionalTakerFeeRaw: "0" });
+    if (order === "quote first") finishQuote(); else finishPolicy();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    clock += 40_000;
+    if (order === "quote first") finishPolicy(); else finishQuote();
+    expect((await pending).fetchedAt).toBe(new Date(order === "quote first" ? start : clock).toISOString());
   });
 
   it("quotes DeepBook actions in both directions", async () => {
@@ -2634,16 +2758,8 @@ describe("SuiReadService", () => {
           async simulateTransaction(options: { include?: { commandResults?: boolean } }) {
             simulatedTransactionSeen = options.include?.commandResults === true;
             return {
-              commandResults: [
-                {
-                  returnValues: [
-                    { bcs: bcs.U64.serialize(0).toBytes() },
-                    { bcs: bcs.U64.serialize(123_456_789n).toBytes() },
-                    { bcs: bcs.U64.serialize(25_000n).toBytes() }
-                  ],
-                  mutatedReferences: []
-                }
-              ]
+              $kind: "Transaction",
+              commandResults: quotePoolCommandResults([0n, 123_456_789n, 25_000n])
             };
           }
         }
@@ -2671,6 +2787,44 @@ describe("SuiReadService", () => {
       },
       quote: { baseOut: "0", quoteOut: "123.456789", deepRequired: "0.025" }
     });
+  });
+
+  it.each([
+    ["FailedTransaction", [8, 8, 8]], ["Transaction", [8, 8]], ["Transaction", [8, 8, 8, 8]],
+    ["Transaction", [8, 9, 8]], ["Transaction", [7, 8, 8]]
+  ] as const)("refuses an unsuccessful or malformed quote result %s %j", async (kind, widths) => {
+    const service = new SuiReadService({
+      network: "mainnet", chainIdentifier: "4c78adac", now, coinMetadataCache: new MemoryCoinMetadataCache(),
+      client: { core: { simulateTransaction: async () => ({
+        $kind: kind, commandResults: [{ returnValues: widths.map((n) => ({ bcs: new Uint8Array(n) })) }, ...quotePoolCommandResults([]).slice(1)]
+      }) } } as unknown as ConstructorParameters<typeof SuiReadService>[0]["client"]
+    });
+    await expect(service.quoteDeepbookAction({ poolKey: "SUI_USDC", direction: "base_to_quote", amountRaw: "1",
+      simulationSender: "0x2" })).rejects.toMatchObject({ kind: "quote_unavailable" });
+  });
+
+  it.each([
+    ["10", "0", "no_output", "0"], ["3", "8", "input_returned", "7"], ["0", "8", "full_input_spend", "10"]
+  ])("reports return %s and output %s consistently for both public input kinds", async (returned, output, quoteOutcome, consumed) => {
+    const service = createService({ deepbook: { getQuoteQuantityOutRaw: async () => ({
+      baseOutRaw: returned!, quoteOutRaw: output!, deepRequiredRaw: "0"
+    }) } });
+    const input = { poolKey: "SUI_USDC", direction: "base_to_quote" as const, simulationSender: "0x2" };
+    const raw = await service.quoteDeepbookAction({ ...input, amountRaw: "10" });
+    const display = await service.quoteDeepbookDisplayAmount({ ...input, amountDisplay: "0.000000010" });
+    expect(raw).toMatchObject({ quoteOutcome, inputFlow: { expectedSpendRaw: consumed, expectedReturnRaw: returned } });
+    expect(display.inputFlow).toEqual(raw.inputFlow);
+    expect(display.quoteOutcome).toBe(quoteOutcome);
+    const candidateService = createService({
+      listBalances: async () => ({ balances: [{ coinType: mainnetCoins.WUSDT!.type, balance: "10", coinBalance: "10", addressBalance: "0" }],
+        hasNextPage: false, cursor: null }),
+      deepbook: { getQuoteQuantityOutRaw: async () => ({ baseOutRaw: returned!, quoteOutRaw: output!, deepRequiredRaw: "0" }) }
+    });
+    const preview = await candidateService.previewIntentEvidence({ account: accountAddress, intentKind: "cover_payment_like_amount",
+      denomination: "dollar", requiredDisplayAmount: "1", targetAssetSymbol: "USDC", targetAssetSelectionSource: "user_explicit" });
+    expect(preview.candidateConversions).toMatchObject([{ status: "quoted", sourceSymbol: "WUSDT",
+      quote: { quoteOutcome, inputFlow: { expectedSpendRaw: consumed, expectedReturnRaw: returned } } }]);
+    expect(preview.selectedTarget?.shortfallRawAmount).toBe("1000000");
   });
 
   it("formats raw DeepBook quote display fields without floating point conversion", async () => {

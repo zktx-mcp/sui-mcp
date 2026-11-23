@@ -1,3 +1,4 @@
+import { validateSealedBackup } from "../src/runtime/localBackupWorker.js";
 import { disconnectViewSchema } from "../src/core/session/workflowView.js";
 import { seedReadAddressCleared, seedCurrentReadAccount } from "./fixtures/readAccount.js";
 import { suiGrants } from "./fixtures/walletGrants.js";
@@ -10,7 +11,12 @@ import Database from "better-sqlite3";
 import { settingsWorkflowFixture } from "./fixtures/settingsWorkflow.js";
 import { deferred } from "./fixtures/walletWorkflow.js";
 import type { SettingsView } from "../src/core/session/settingsOperation.js";
-import type { LocalDataCounts, LocalDataImportPreview } from "../src/core/activity/localDataTypes.js";
+import type { LocalDataCounts, LocalDataEnvelope, LocalDataImportPreview } from "../src/core/activity/localDataTypes.js";
+import { SuiReadService } from "../src/core/read/readService.js";
+import { createDeepbookSwapActionPlan } from "../src/adapters/deepbook/deepbookSwapIntent.js";
+import { createDeepBookReadClient } from "../src/core/read/deepbookRawQuoteClient.js";
+import { BUILD_CHAIN, createDeepbookBuildClient } from "./fixtures/deepbookBuildClient.js";
+import { MemoryCoinMetadataCache } from "./fixtures/memoryCoinMetadataCache.js";
 import { DEFAULT_SUI_GRPC_URL, DEFAULT_SUI_GRAPHQL_URL } from "../src/runtime/config.js";
 import { SuiEndpointError } from "../src/core/suiEndpoint.js";
 
@@ -35,6 +41,19 @@ const downloadReport = (card: Awaited<ReturnType<Awaited<ReturnType<typeof fixtu
     attemptId: data.download!.currentAttemptId, status: "acknowledged" };
 };
 
+
+it("reuses committed record counts until the bound data revision changes", async () => {
+  const f = await fixture(), wallet = f.wallet;
+  const count = vi.spyOn(f.localData, "getDataCountsSync");
+  const read = () => wallet.run(() => f.localData.readWithCounts(() => ({})).counts);
+  const before = read();
+  count.mockClear();
+  expect(read()).toEqual(before);
+  expect(count).not.toHaveBeenCalled();
+  const account = "0x" + "a".repeat(64);
+  await wallet.run(() => seedCurrentReadAccount(wallet.activity, account, wallet.now()));
+  expect(read().accounts).toBe(before.accounts + 1);
+});
 
 it.each(["connected", "cleared", "terminal", -1, 0, 1] as const)("keeps one connection qualification consistent across consumers (%s)", async (kind) => {
   const f = await fixture(), w = f.wallet, { connection } = await w.approve();
@@ -275,7 +294,7 @@ it("reads Settings facts while an unrelated pending connection expiry remains un
   } finally { db.exec("DROP TRIGGER IF EXISTS refuse_foreign_connection_expiry"); }
 });
 
-async function uploadBackup(f: Awaited<ReturnType<typeof fixture>>, raw: Buffer, initial?: Awaited<ReturnType<typeof f.create>>) {
+async function uploadBackup(f: Awaited<ReturnType<typeof fixture>>, raw: Buffer, initial?: Awaited<ReturnType<typeof f.create>>, duringCheck?: () => Promise<void>) {
   let card = initial ?? await f.create(); const permission = card.permission;
   const call = async (input: Record<string, unknown>) => {
     card = { ...await f.act(card, input), permission }; expect(card.error).toBeUndefined();
@@ -289,9 +308,211 @@ async function uploadBackup(f: Awaited<ReturnType<typeof fixture>>, raw: Buffer,
     await call({ action: "settings_upload_chunk", operationId, fileId, offset,
       chunkBase64: raw.subarray(offset, offset + 20000).toString("base64") });
   }
-  await call({ action: "settings_seal_upload", operationId, fileId });
+  const checking = call({ action: "settings_seal_upload", operationId, fileId });
+  await Promise.all([checking, duringCheck?.()]);
   return card;
 }
+
+async function receiveBackup(f: Awaited<ReturnType<typeof fixture>>) {
+  const settings = await f.create();
+  expect((await f.download(settings)).error).toBeUndefined();
+  const card = await downloadReady(f, settings);
+  const { file, operationId, download } = view(card);
+  const chunks: Buffer[] = [];
+  for (let offset = 0; offset < file!.totalSize;) {
+    const response = await f.wallet.run(() => f.cards.readSettingsFile({ cardId: card.snapshot.cardId, permission: card.permission,
+      operationId, fileId: file!.fileId, attemptId: download!.currentAttemptId, offset }, 20000));
+    const chunk = Buffer.from(response.chunkBase64, "base64");
+    expect(chunk.length).toBeGreaterThan(0);
+    chunks.push(chunk);
+    offset += chunk.length;
+  }
+  const bytes = Buffer.concat(chunks);
+  expect(createHash("sha256").update(bytes).digest("hex")).toBe(file!.sha256);
+  expect((await f.act(card, downloadReport(card))).error).toBeUndefined();
+  return bytes;
+}
+
+it("accepts valid backups and rejects invalid backups on both sides of the worker threshold", async () => {
+  const f = await fixture();
+  const envelope = await f.wallet.run(() => f.localData.exportLocalData());
+  const contents = JSON.stringify(envelope);
+  for (const size of [64 * 1024, 64 * 1024 + 1]) {
+    for (const valid of [true,false]) {
+      const text = valid ? contents : JSON.stringify({ ...envelope, network: "unknown" });
+      const bytes = Buffer.from(text.padEnd(size));
+      expect(bytes.length).toBe(size);
+      const result = await uploadBackup(f, bytes);
+      if (valid) {
+        expect(view(result).restoreCheck).toMatchObject({ status: "can_restore" });
+        expect((await f.act(result, {action:"settings_cancel"})).error).toBeUndefined();
+      } else expect(view(result).restoreCheck).toMatchObject({ status: "cannot_restore", reason: "invalid_backup" });
+    }
+  }
+});
+
+it("serves an independent Settings card while the worker validates a populated backup", async () => {
+  const started = deferred<void>();
+  let settled = false;
+  const f = await fixture({ validateUpload(bytes) {
+    const parsing = validateSealedBackup(bytes);
+    started.resolve();
+    return parsing.finally(() => { settled = true; });
+  } });
+  const observer = await f.create();
+  const archive = await f.wallet.run(() => f.localData.exportLocalData());
+  for (let id=1; id<=4096; id++) {
+    archive.data.accounts.push({ id, chain_id:"sui:mainnet", address:"0x"+id.toString(16).padStart(64,"0"),
+      first_seen_at:archive.exportedAt,last_used_at:archive.exportedAt,first_source:"wallet_connection",last_source:"wallet_connection" });
+  }
+  const result = await uploadBackup(f, Buffer.from(JSON.stringify(archive)), undefined, async () => {
+    await started.promise;
+    expect((await f.read(observer)).error).toBeUndefined();
+    expect(settled).toBe(false);
+  });
+  expect(view(result).restoreCheck?.status).toBe("can_restore");
+});
+
+it("restores expired review history and a later admitted revision through Settings", async () => {
+  const client = createDeepbookBuildClient({ expectedChainIdentifier: BUILD_CHAIN });
+  const received: Date[] = [];
+  const raw = (fee: string) => {
+    received.push(w.now());
+    return { baseOutRaw: "0", quoteOutRaw: "123456789", deepRequiredRaw: fee,
+      poolTerms: { lotSizeRaw: "100000000", minBaseRaw: "1000000000", takerFeeRaw: "200000",
+        assetIsBase: true, deepPerAssetRaw: "125000000", whitelisted: false } };
+  };
+  const quotes: SuiReadService = new SuiReadService({
+    network: "mainnet", chainIdentifier: BUILD_CHAIN, client, coinMetadataCache: new MemoryCoinMetadataCache(), now: () => w.now(),
+    deepbookFactory: sender => ({
+      ...createDeepBookReadClient({ client, network: "mainnet", simulationSender: sender }),
+      getQuoteQuantityOutRaw: async () => raw("25000"),
+      getQuoteQuantityOutInputFeeRaw: async () => raw("0"),
+      gasFeePolicy: async () => {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        w.advance(1000);
+        return { enabled: false, additionalTakerFeeRaw: "1000000" };
+      }
+    })
+  });
+  const source = await fixture({ quoteSource: quotes, availableDeepRaw: "0" }), target = await fixture(), w = source.wallet;
+  const { connection } = await w.approve();
+  // One SUI is the book minimum before input fees; use a principal with
+  // enough room for the selected input-fee quote to become reviewable.
+  const plan = createDeepbookSwapActionPlan({ type: "swap", from: { symbol: "SUI", amount: "1.5" },
+    to: { symbol: "USDC" }, maxSlippageBps: 50 }, w.now());
+  const { session, card } = await w.run(() => w.cards.createFirstReview(w.sessions, plan, {
+    connectionId: connection.connectionId, account: w.account
+  }));
+  w.advance(1000);
+  const firstOpenedAt = w.now().toISOString();
+  const opened = await w.read(card);
+  expect((await w.act(opened, { action: "prepare_review", connectionId: connection.connectionId,
+    account: w.account, reviewRevision: 0 })).error).toBeUndefined();
+  const review = await vi.waitFor(() => {
+    const state = w.run(() => w.sessions.readReviewSession(session.id))?.reviewState;
+    expect(state?.status).toBe("ready_for_wallet_review");
+    return state!;
+  });
+  expect(received).toHaveLength(2);
+  const finalQuoteTime = received[1]!;
+  expect(review.humanReadableReview?.freshness).toMatchObject({
+    quotedAt: finalQuoteTime.toISOString(), expiresAt: new Date(finalQuoteTime.getTime() + 30_000).toISOString()
+  });
+  w.advance(finalQuoteTime.getTime() + 29_999 - w.now().getTime());
+  const beforeExpiry = await w.read(card);
+  expect(beforeExpiry.snapshot.data).toMatchObject({ allowedActions: expect.arrayContaining(["request_signature"]) });
+  w.advance(1);
+  const refused = await w.act(beforeExpiry, { action: "request_signature", connectionId: connection.connectionId, account: w.account, reviewRevision: 1 });
+  expect(refused.error?.code).toBe("card_conflict");
+  expect(w.sign).not.toHaveBeenCalled();
+  const expired = await w.read(card);
+  expect((expired.snapshot.data as { review: { status: string } }).review.status).toBe("refresh_required");
+  const atExpiry: LocalDataEnvelope = JSON.parse((await receiveBackup(source)).toString());
+  expect(atExpiry.data.reviewStateSnapshots.map(row => [row.review_revision, row.status])).toEqual([
+    [1, "ready_for_wallet_review"], [1, "refresh_required"]
+  ]);
+  expect(atExpiry.data.reviewRequests).toEqual([]);
+  await w.act(expired, { action: "prepare_review", connectionId: connection.connectionId, account: w.account, reviewRevision: 1 });
+  await vi.waitFor(async () => expect((await w.run(() => w.sessions.getReviewSession(session.id, w.now)))?.reviewRevision).toBe(2));
+  const renewed = await w.read(expired);
+  // Receipt observation can finish after the admission deadline.
+  w.submit.mockImplementationOnce(async () => { w.advance(31_000); return {}; });
+  await w.act(renewed, { action: "request_signature", connectionId: connection.connectionId, account: w.account, reviewRevision: 2 });
+  await vi.waitFor(() => expect(w.run(() => w.records.currentRequest(session.id))?.requestStatus).toBe("completed"));
+  const bytes = await receiveBackup(source);
+  const incoming: LocalDataEnvelope = JSON.parse(bytes.toString());
+  const late = structuredClone(incoming);
+  const lateRequest = late.data.reviewRequests[0]!;
+  const deadline: string = JSON.parse(lateRequest.review_state_json).humanReadableReview.freshness.expiresAt;
+  lateRequest.created_at = lateRequest.signature_verified_at = lateRequest.submission_admitted_at = deadline;
+  for (const event of late.data.reviewStatusTransitions) {
+    if (event.attempt_id === lateRequest.attempt_id && event.transitioned_at < deadline) event.transitioned_at = deadline;
+  }
+  expect(() => target.localData.validateBackupBytes(Buffer.from(JSON.stringify(late)))).toThrow(
+    expect.objectContaining({ details: { reason: "invalid_review_admission_time" } }));
+  const rejectChanges: Array<(data: LocalDataEnvelope["data"]) => void> = [
+    data => { data.reviewSessions[0]!.current_status = "proposed"; },
+    data => { data.reviewSessions[0]!.opened_at = null; },
+    data => { data.reviewStateSnapshots.splice(1, 1); },
+    data => {
+      const snapshot = data.reviewStateSnapshots.find(state => state.review_revision === 2)!;
+      const published = data.reviewStatusTransitions.filter(event => event.event === "state_computed").at(-1)!;
+      snapshot.recorded_at = published.transitioned_at = deadline;
+    },
+    data => { data.reviewStatusTransitions = data.reviewStatusTransitions.filter(row => row.event !== "signature_verified"); },
+    data => {
+      const pending = data.reviewStatusTransitions.find(row => row.to_status === "awaiting_chain_result")!;
+      pending.transitioned_at = new Date(Date.parse(data.reviewRequests[0]!.updated_at) + 1).toISOString();
+    },
+    data => { data.reviewRequests[0]!.signature_verified_at = null; },
+    data => { data.reviewRequests[0]!.submission_admitted_at = null; },
+    data => {
+      const row = data.reviewExecutions[0]!;
+      row.result_json = JSON.stringify({ ...JSON.parse(row.result_json), recordedAt: new Date(Date.parse(row.recorded_at) - 1000).toISOString() });
+    }
+  ];
+  for (const change of rejectChanges) {
+    const invalid = structuredClone(incoming);
+    change(invalid.data);
+    expect(() => target.localData.validateBackupBytes(Buffer.from(JSON.stringify(invalid)))).toThrow(
+      expect.objectContaining({ kind: "input_invalid" }));
+  }
+  const laterSample = structuredClone(incoming);
+  const earlierWriter = laterSample.data.reviewExecutions[0]!;
+  earlierWriter.result_json = JSON.stringify({ ...JSON.parse(earlierWriter.result_json),
+    recordedAt: new Date(Date.parse(earlierWriter.recorded_at) + 1).toISOString() });
+  const verified = target.localData.validateBackupBytes(Buffer.from(JSON.stringify(laterSample)));
+  expect(JSON.parse(verified.data.reviewExecutions[0]!.result_json).recordedAt).toBe(earlierWriter.recorded_at);
+  const wrongChain = structuredClone(incoming);
+  const row = wrongChain.data.reviewExecutions[0]!, result = JSON.parse(row.result_json);
+  result.chainReceipt.source.chainIdentifier = "another-chain";
+  row.result_json = JSON.stringify(result);
+  const rejected = await uploadBackup(target, Buffer.from(JSON.stringify(wrongChain)));
+  expect(view(rejected).restoreCheck).toMatchObject({ status: "cannot_restore", reason: "invalid_backup" });
+  expect(view(rejected).allowedActions).not.toContain("settings_confirm");
+  expect(target.wallet.run(() => target.records.control().data_epoch)).toBe(0);
+  const prepared = await uploadBackup(target, bytes, await target.read(rejected));
+  expect(view(prepared).restoreCheck?.status).toBe("can_restore");
+  expect((await target.confirm(prepared)).error).toBeUndefined();
+  const restored = (await target.wallet.run(() => target.localData.exportLocalData())).data;
+  expect(restored).toEqual(incoming.data);
+  expect(restored.reviewSessions.find(row => row.id === session.id)?.opened_at).toBe(firstOpenedAt);
+  const openings = restored.reviewStatusTransitions.filter(row => row.review_session_id === session.id && row.event === "opened");
+  expect(openings.map(row => row.transitioned_at)).toEqual([firstOpenedAt]);
+  expect(restored.reviewStateSnapshots.map(row => [row.review_revision, row.status])).toEqual([
+    [1, "ready_for_wallet_review"], [1, "refresh_required"], [2, "ready_for_wallet_review"]
+  ]);
+  expect(restored.reviewRequests[0]?.review_revision).toBe(2);
+  const request = w.run(() => w.records.currentRequest(session.id))!;
+  const history = await target.wallet.run(() => target.wallet.activity.listReviewActivity({ account: w.account }));
+  expect(history.activities).toMatchObject([{ reviewSessionId: session.id, reviewRevision: 2,
+    currentAttemptId: request.attemptId, transactionDigest: request.transactionDigest, executionStatus: "success" }]);
+  expect(target.wallet.run(() => target.wallet.records.authority(request.attemptId))).toBeUndefined();
+  expect(w.sign).toHaveBeenCalledOnce();
+  expect(w.submit).toHaveBeenCalledOnce();
+  expect(target.wallet.sign).not.toHaveBeenCalled();
+});
 
 it("refuses a backup carrying the retired account-selection payload without changing its bytes or current data", async () => {
   const f = await fixture(), { connection } = await f.wallet.approve();
@@ -471,7 +692,7 @@ it("keeps an automatic check pending through a frame read and rejects a data cha
     expect(view(during).restoreCheck).toEqual({ status: "checking" });
     expect(view(during).allowedActions).not.toContain("settings_confirm");
     expect(physical).toHaveBeenCalledOnce();
-    await f.wallet.run(() => f.wallet.activity.upsertAccount(`0x${"b".repeat(64)}`, "review_execution", f.wallet.now()));
+    await f.wallet.run(() => f.wallet.activity.upsertAccount(`0x${"b".repeat(64)}`, "review_record", f.wallet.now()));
     release.resolve(); card = { ...await pending, permission };
     expect(view(card)).toMatchObject({ restoreCheck: { status: "check_required" }, file: { fileId, sealed: true } });
     expect(f.wallet.run(() => f.records.control().data_epoch)).toBe(0);
@@ -724,7 +945,7 @@ it.each(["sdk", "parent", "submit", "lookup", "initial_window"].flatMap((boundar
       expect(view(reset).allowedActions).not.toContain("settings_confirm");
       // The actual replacement sink remains protected, independently of a
       // missing preparation ID or the UI's eligibility decision.
-      const validated = await w.run(() => f.localData.parseAndVerifyImportEnvelope(JSON.parse(raw.toString("utf8"))));
+      const validated = await w.run(() => f.localData.verifyImportEndpoints(f.localData.validateBackupBytes(raw)));
       expect(() => w.run(() => f.records.transaction(() => f.localData.applyValidatedReplacement(validated, w.now()))))
         .toThrow("A wallet request is still unsettled");
     } else {
@@ -1524,7 +1745,7 @@ it("preserves a physically prepared snapshot across result storage failure witho
 
 it.each(["upload", "download"] as const)("keeps replacement cleanup of an old %s with its own result and preserves the file identity", async (role) => {
   const f = await fixture(), bytes = Buffer.from("{}");
-  await f.wallet.run(() => f.wallet.activity.upsertAccount(`0x${"a".repeat(64)}`, "review_execution", f.wallet.now()));
+  await f.wallet.run(() => f.wallet.activity.upsertAccount(`0x${"a".repeat(64)}`, "review_record", f.wallet.now()));
   let previous = await f.create(), fileId: string, operationId: string, publicPath = join(f.wallet.directory, "backups", "previous-user-backup.json"), publicBytes = Buffer.from("existing user backup");
   await mkdir(join(f.wallet.directory, "backups"), { recursive: true }); await writeFile(publicPath, publicBytes);
   if (role === "upload") {
