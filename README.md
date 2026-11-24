@@ -6,9 +6,11 @@ For a supported DeepBook swap, the Review card shows your account, how much you 
 
 ## Install
 
-> **Upgrading from 0.8.2? Keep your old data folder.** The database format changed in 0.9.0. Opening a 0.8.2 database stops the server at startup, so your app may show Sui MCP as disconnected or list none of its tools even after npm installs successfully.
+> **Upgrading from 0.8.2?** The database format changed in 0.9.0. If the server opens the old database, it stops at startup and your app may show no Sui MCP tools. Resolve pending wallet requests or unconfirmed transactions first, then stop Sui MCP in every app.
 >
-> Check any pending wallet requests or submitted transactions in the old installation first. Stop Sui MCP in every app, keep the original folder intact, and set `SUI_MCP_DATA_DIR` to the **same new, empty folder** in each app before restarting. Your old history remains accessible with 0.8.2 and the original folder. [Follow the per-app upgrade instructions](docs/MCP_SETUP.md#updating-an-existing-sui-mcp-installation). Fresh installs can use the defaults. If you already use 0.9.0, keep its data folder when updating to 0.9.1.
+> To keep your old records, move the entire old Sui MCP data folder aside. If you choose to discard them, delete only that old folder. When you restart with default settings, Sui MCP creates its data folder automatically. No version-named folder or app configuration change is required for a default installation. [Find your data folder and review what deletion removes](docs/MCP_SETUP.md#database-format-mismatch).
+>
+> Fresh installs and working 0.9.0 installations can skip this step.
 
 **If your assistant cannot find `read_get_server_status`:** An empty tool list alone does not explain why. Check the app’s existing local registration and its Sui MCP startup log. The message `Local database format does not match this runtime` confirms a database mismatch. If the assistant cannot see the log, it should ask for the startup error line before suggesting a fix. [Troubleshoot a missing server](docs/MCP_SETUP.md#server-does-not-appear-in-the-client)
 

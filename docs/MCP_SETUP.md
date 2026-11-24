@@ -61,7 +61,7 @@ If installation reports a permission error, see [Global installation permission 
 
 Tell the agent which app you use and which published version you want. For example:
 
-> Set up the published Sui MCP package for **[my app]**. Check the available version of `@zktx.io/sui-mcp` on npm and use the matching setup guide. Preserve my other MCP servers and existing data. If Sui MCP is already registered, inspect that registration and follow the update instructions before replacing anything. If the tool is missing, check the local app’s Sui MCP startup log or ask me for its error line. After the app reloads, call `read_get_server_status` in that same app and report the returned package, version and network. If you cannot make the call, tell me how to run it and leave the running version unconfirmed.
+> Set up the published Sui MCP package for **[my app]**. Check the available version of `@zktx.io/sui-mcp` on npm and use the matching setup guide. Preserve my other MCP servers. If my data format is incompatible, explain the options and preserve my data unless I explicitly choose deletion. If Sui MCP is already registered, inspect that registration and follow the update instructions before replacing anything. If the tool is missing, check the local app’s Sui MCP startup log or ask me for its error line. After the app reloads, call `read_get_server_status` in that same app and report the returned package, version and network. If you cannot make the call, tell me how to run it and leave the running version unconfirmed.
 
 ## Codex
 
@@ -357,24 +357,24 @@ This downloads the requested published package as needed. On native Windows clie
 
 ### Updating an Existing Sui MCP Installation
 
-For **0.8.2 → 0.9.1**, keep the complete 0.8.2 data directory. The database and backup formats changed in 0.9.0. You can read the old history with 0.8.2 and its original directory.
+For **0.8.2 → 0.9.1**, the database and backup formats differ. At step 3, choose whether to keep or discard the old local records. Either choice works with the default app registration.
 
-For **0.9.0 → 0.9.1**, keep your current data directory, settings and wallet connection records. Follow the restart and version checks below and skip the new-directory step.
+For **0.9.0 → 0.9.1**, keep your current data directory, settings and wallet connection records. Follow the restart and version checks below and skip step 3.
 
 1. Check that npm has the exact version you intend to install. Before closing your current installation, settle pending wallet prompts. For an admitted transaction with an unknown outcome, keep the attempt ID and look up the same transaction digest. Resending a swap could execute it twice.
 2. Disable Sui MCP in every participating app or fully quit those apps. Wait for the shared backend to exit. Closing just a chat or window can leave the old process running.
-3. **Only when upgrading from 0.8.2**, choose one new, empty directory for 0.9.1. Set `SUI_MCP_DATA_DIR` to its absolute path in **each app's existing server registration** as shown below. All apps sharing the backend must use the same directory and review port. Setting a variable in a terminal alone does not configure a desktop app launched separately.
+3. **Only when upgrading from 0.8.2:** Move the entire old Sui MCP data folder aside to keep it, or delete that folder if you explicitly choose to discard its contents. On restart the server creates a fresh folder at the same path. If you prefer to leave the old folder in place, point every participating app to the same empty directory instead. See [folder locations and deletion effects](#database-format-mismatch).
 4. For a global install, run `npm install -g @zktx.io/sui-mcp@0.9.1` once and keep the `sui-mcp` launch command. If you use npx, update the exact package version in each registration.
-5. Reopen the connections. In each app ask for the running package, server name, version and network. Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.9.1` and `mainnet`. If you switched to an empty directory, it starts with default settings. Reapply any custom endpoints or networks you use there and connect a wallet when needed.
+5. Reopen the connections. In each app ask for the running package, server name, version and network. Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.9.1` and `mainnet`. A fresh data folder starts with default settings. Reapply any custom endpoints or networks you use there and connect a wallet when needed.
 
-**Set the directory in the registration.** Replace `/absolute/path/to/sui-mcp-0.9` below with the same real folder on this computer. On Windows a path such as `C:/local-data/sui-mcp-0.9` also works in JSON and TOML. Preserve the server's other settings.
+**Optional: use a different data location.** Only change the registration if you want Sui MCP to use a different path. Replace `/absolute/path/to/sui-data` below with the same absolute path in each app. On Windows, for example, use `C:/local-data/sui-data`. The folder name is yours to choose. Preserve the other settings.
 
 - **Claude Desktop, Cursor and Antigravity:** Merge this member into the existing `mcpServers.sui-mcp` entry. If it already has an `env` object, add the variable there.
 
   ```json
   {
     "env": {
-      "SUI_MCP_DATA_DIR": "/absolute/path/to/sui-mcp-0.9"
+      "SUI_MCP_DATA_DIR": "/absolute/path/to/sui-data"
     }
   }
   ```
@@ -383,13 +383,13 @@ For **0.9.0 → 0.9.1**, keep your current data directory, settings and wallet c
 
   ```toml
   [mcp_servers.sui-mcp.env]
-  SUI_MCP_DATA_DIR = "/absolute/path/to/sui-mcp-0.9"
+  SUI_MCP_DATA_DIR = "/absolute/path/to/sui-data"
   ```
 
 - **Claude Code:** Use `claude mcp get sui-mcp` to identify the existing scope. For a user registration in `~/.claude.json` or a project registration in `.mcp.json`, merge the same JSON `env` member into that server. Local-scope registrations are under the project's entry in `~/.claude.json`. If you are adding a **new** user registration to share the upgraded backend, use:
 
   ```sh
-  claude mcp add --transport stdio --scope user sui-mcp --env "SUI_MCP_DATA_DIR=/absolute/path/to/sui-mcp-0.9" -- sui-mcp
+  claude mcp add --transport stdio --scope user sui-mcp --env "SUI_MCP_DATA_DIR=/absolute/path/to/sui-data" -- sui-mcp
   ```
 
 If startup reports a [database format mismatch](#database-format-mismatch), check which data directory the failing app actually uses. Reinstalling npm leaves the database intact. Deleting old data or settings requires a separate choice by the user.
@@ -795,35 +795,10 @@ separate condition and does not by itself shut down the parent read service.
 
 ### Database format mismatch
 
-When upgrading from 0.8.2, keep the old directory. Resolve pending wallet requests and recheck submitted transaction digests using the 0.8.2 installation. Start 0.9.1 in an empty directory for that upgrade. When updating a working 0.9.0 installation, reuse its current directory.
+The startup error `Local database format does not match this runtime` means Sui MCP refused to open the database before writing to it. Reinstalling the package leaves that database in place. This applies when opening a 0.8.2 database with 0.9.1. A working 0.9.0 database can stay in place.
 
-This recovery applies to an existing installation with incompatible local data.
-It is not an extra step for a first-time installation. The diagnostic
-`Local database format does not match this runtime` means the database was
-rejected before writes. The runtime does not migrate, repair or automatically
-delete it. Reinstalling the npm package alone will not resolve this mismatch.
-The Settings card cannot perform the recovery while startup is blocked.
-
-Choose how to handle the old data:
-
-- **Keep the files:** Leave the existing folder untouched and set
-  `SUI_MCP_DATA_DIR` to a new empty folder in every participating app. Use the
-  same folder for all apps; see the [per-app configuration examples](#updating-an-existing-sui-mcp-installation).
-  Old-format backups cannot be restored into the new format.
-- **Start fresh with default settings:** Explicitly choose to delete the old
-  Sui MCP data folder, then follow the steps below. This removes local activity
-  and saved card results, stored addresses, network and endpoint settings, and
-  private WalletConnect sessions and keys. An agent must obtain that choice;
-  a request to install, update or fix startup is not permission to delete data.
-
-For an explicitly chosen fresh start:
-
-1. Stop Sui MCP in every app and wait for the shared backend to exit. Do not
-   delete data while a transaction request is unresolved; resolve the existing
-   request's digest or coordinate recovery first.
-2. Locate the active Sui MCP data folder. With default settings, use your file
-   manager's Go to Folder or address bar with the location below, then delete
-   only the `sui-mcp` folder after confirming the fresh-start choice.
+1. Resolve outstanding wallet requests and recheck any unconfirmed submission using its original digest. Stop Sui MCP in every participating app and wait for the shared backend to exit.
+2. Locate the **old Sui MCP data folder**. If the old installation used `SUI_MCP_DATA_DIR`, that setting identifies the folder. Otherwise use your platform’s default:
 
    | Platform | Default Sui MCP data folder |
    | --- | --- |
@@ -831,14 +806,11 @@ For an explicitly chosen fresh start:
    | Windows | `%APPDATA%\sui-mcp` |
    | Linux | `$XDG_DATA_HOME/sui-mcp`, or `~/.local/share/sui-mcp` when `XDG_DATA_HOME` is unset |
 
-   If `SUI_MCP_DATA_DIR` is configured, it selects the active folder instead.
-   Remove an obsolete override from each app to return to the default path.
-   Preserve other app settings and MCP registrations; do not delete a parent
-   directory or another server's data.
-3. Keep the global `sui-mcp` command registration and reopen the MCP connections.
-   The runtime creates a new database with built-in defaults automatically.
-   Ask for the package name, version and network using the [first-use status check](#1-confirm-the-running-server).
-   A new wallet connection is needed only when you want wallet-dependent features.
+3. Choose what happens to the old records:
+   - **Keep them:** Move or rename the entire old folder to an unused location. Keeping it together preserves the database, its companion files and backups for use with the old version. To leave it exactly where it is, set the [optional per-app data path](#updating-an-existing-sui-mcp-installation) to the same empty directory in every app instead. An old-format backup cannot be imported into 0.9.1.
+   - **Discard them:** Delete only that old Sui MCP folder. This removes its activity history, saved cards, addresses, network and endpoint settings, WalletConnect sessions and keys, and backups stored inside it. An agent may delete it only when the user explicitly chooses to discard those records.
+4. Reopen the apps with the same data path and review port. Sui MCP creates a fresh database automatically. Existing default registrations need no edits if you moved or deleted the old folder.
+5. Ask for the [running package and version](#1-confirm-the-running-server) in each app. Wallet-dependent features require a new connection in the fresh profile.
 
 Deleting local files does not reverse blockchain transactions or remove a
 pairing still shown in your wallet app. Remove an unwanted pairing in the wallet
