@@ -113,7 +113,7 @@ DeepBook raw quote inputs use raw integer quantities as expected by the pinned S
 
 DeepBook display quote inputs are source-side display amounts. They are converted to raw integers only through pinned DeepBook token units.
 
-DeepBook read outputs include `source.simulation: "client.core.simulateTransaction"` because the pinned SDK uses transaction simulation for these read queries.
+DeepBook orderbook, mid-price, quote and BalanceManager inventory reads use SDK transaction simulation via Sui gRPC. Their source identifies `client.core.simulateTransaction`. Pool and token listings read SDK constants. Historical prices come from onchain fills for the selected pool.
 
 DeepBook pool and token lists are static pinned SDK registries.
 

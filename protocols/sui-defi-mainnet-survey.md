@@ -50,7 +50,7 @@ Resolution source: direct POST to `https://mainnet.mvr.mystenlabs.com/v1/resolut
 
 | MVR name | Resolved package at the source snapshot | Survey use |
 | --- | --- | --- |
-| `@deepbook/core` | `0xf48222c4e057fa468baf136bff8e12504209d43850c5778f76159292a96f621e` | Pinned SDK/local registry DeepBook package. The newer Sui docs package remains a conflict until reconciled deliberately. |
+| `@deepbook/core` | `0xf48222c4e057fa468baf136bff8e12504209d43850c5778f76159292a96f621e` | DeepBook package returned by MVR at the time of the survey. For direct-call matching, see the [recorded lineage](../src/core/activity/transactionActivityLineages.ts). |
 | `@deeptrade/deeptrade-core` | `0xc10d536b6580d809711b9bb8eee3945d5e96f92a346c84d74ff7a0697e664695` | DeepTrade Core package at the source snapshot. |
 | `@cetuspackages/clmm` | `0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3` | Cetus CLMM package at the source snapshot. |
 | `@suilend/core` | `0xe53906c2c058d1e369763114418f3c144d1b74960d29b2785718a782fec09b61` | Suilend current MVR package; the recorded market type package remains separate evidence. |

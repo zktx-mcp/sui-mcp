@@ -88,13 +88,11 @@ package, change dist-tags, or call a wallet or Sui endpoint.
 
 The publication workflow runs it after the npm job succeeds and before the MCP
 publisher is installed or authenticated. HTTP 404, 429, 5xx and network failures
-are retried within a 20-minute CI budget. This reuses the npm job's existing
-20-minute allowance; it is not a promise that npm scanning completes in that
-time. Checks are 30 seconds apart (at most 40 requests), with a 10-second request
-and response-body deadline matching the Registry's npm validator. A longer
-`Retry-After` is respected within the overall budget. The Registry job retains
-its original 10-minute registration allowance in addition to the wait, for a
-30-minute job limit.
+are retried for up to 20 minutes within the Registry job's 30-minute limit.
+Checks are 30 seconds apart (at most 40 requests), with a 10-second deadline
+covering each request and its response body. A longer `Retry-After` is
+respected within the overall budget. The separate artifact verification job
+has its own 20-minute limit.
 
 Other HTTP errors, invalid JSON and mismatched or missing metadata fail the
 check. A timeout also fails without attempting Registry registration. Check npm
@@ -246,11 +244,11 @@ It is not an MCP tool, not a CI check, not packaged product functionality, not r
 - They are not zero-balance claims, spendable asset facts, funding sources, route liquidity, payment readiness, portfolio completeness, transaction-building inputs, signing data, or signing readiness.
 - Intent evidence previews map natural-language USD-denominated targets to pinned SDK settlement asset groups and current wallet balance snapshots.
 - Use `userAnswerUse.answerFields` for intent evidence answers. Settlement-asset-only coverage, shortfall, or current-total answers use `responseSummary`; selected-target answers also use the selected-target fields listed in the response. Direct pool quote evidence is supported only when the same intent-evidence response lists `direct_pool_quote_evidence` in `responseEvidence.supportedResponseClaims` and `direct_pool_quote_evidence_for_user_selected_target` in `userAnswerUse.canAnswer`. Intent evidence previews do not choose settlement assets, quote best routes, evaluate gas reserve, execute payments, or create signing material.
-- DeepBook read outputs identify SDK simulation reads through `source.simulation`.
+- For DeepBook orderbook, mid-price, quote and BalanceManager inventory reads, `source.simulation` identifies the SDK simulation. Pool and token lists use SDK constants. Historical candles use finalized fills for the selected pool.
 - Review activity tools analyze local Sui MCP review evidence only. The optional `account` input is a read filter and does not change active account context.
 - Sui activity scan tools are user-requested bounded reads. They store only normalized facts tied to known local wallets.
 - Sui activity scans do not store raw provider payloads or non-known party account addresses. They do not claim complete wallet history, complete dApp history, P&L, signing readiness, transaction building, or route recommendations.
-- Stored account asset timeline output reads only local normalized facts. It is an MCP tool response, not a source-checkout utility, background scanner, held-balance history, complete wallet history, USD value, P&L, tax, cost basis, route recommendation, transaction-building input, or signing-readiness signal.
+- The account asset timeline builds net-flow bars from local normalized transactions. For eligible assets it also reads onchain DeepBook fills for optional USDC reference prices. If a price lookup fails, report the observed account amounts and range with the returned price status. Net flows do not establish held balances or portfolio value.
 - Activity `quantitySemantics` marks balance `amountRaw` and `*Raw` fields as raw integer facts requiring verified decimals or returned display amounts before display conversion.
 - Account effect rows include `accountBalanceChangeInferencePolicy` so truncated or unavailable requested-account evidence cannot be filled from transaction-level context, visible recipient patterns, or current wallet balances.
 - Gas display facts, when returned, use `@mysten/sui MIST_PER_SUI`.

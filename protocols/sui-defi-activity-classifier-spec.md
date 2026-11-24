@@ -203,11 +203,8 @@ registry policy and do not imply support beyond transaction activity labels.
 
 Boundary:
 
-- The survey records a conflict between newer Sui docs and this repository's
-  pinned SDK/local registry. A classifier implementation must choose the package
-  source that matches the transaction path it actually inspects.
-- Current product DeepBook read tools follow the pinned SDK/local registry path.
-  Do not infer execution or signing support from that.
+- Match direct calls against the [recorded package lineage](../src/core/activity/transactionActivityLineages.ts). For an event or changed object type, use the package defining its outer type. The survey records the package IDs observed at its source snapshot.
+- The pinned SDK determines the swap builder's package target. The [SDK reference](../docs/SDK_API.md#deepbook-read-methods) describes that integration. An activity label alone grants no execution or signing support.
 
 Direct Move-call evidence:
 

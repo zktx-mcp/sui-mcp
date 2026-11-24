@@ -1,141 +1,53 @@
 # Sui MCP
 
-Sui MCP is a local-first Sui review and evidence layer for AI clients.
+Use your AI app to look up balances for a public Sui address, inspect a transaction receipt, or open a DeepBook price chart. All three work without connecting a wallet.
 
-It turns a supported Sui action into an internal Review card where you inspect
-verified transaction facts and a PTB graph, then request approval in your own
-wallet. The backend builds or verifies the material, binds the reviewed account
-and digest, and uses WalletConnect for a sign-only request. It verifies the
-wallet's returned bytes and signature before one submission to Sui mainnet.
-
-The AI and card never receive executable transaction bytes or signatures.
-Neither a review nor a wallet connection is standing transaction permission.
-Only an explicit user action and that transaction's wallet approval authorize
-the request. Lost replies are resolved by reading the known digest; they do not
-cause another signing or submission request. Request failures and unknown
-outcomes are separate from independently observed chain success/failure.
-
-Account, Receipt and Chart cards provide read-only evidence independently of
-signing. Connect, Disconnect, Review and Settings also run inside the MCP host. Settings
-provides local data controls and explicit connection-service recovery. Human-readable review is not a guarantee of safety or
-of complete interpretation of every transaction detail; the raw PTB structure
-and addresses remain inspectable.
-
-Users can ask ordinary questions:
-
-- "Can I cover a 1000 dollar payment with my assets?"
-- "How much are my USD-denominated assets together?"
-- "What is the shortfall?"
+For a supported DeepBook swap, the Review card shows your account, how much you expect to spend and receive, the minimum you would receive on success, and fees. You choose **Request wallet approval** on the card and approve that transaction in your own wallet through WalletConnect. Your assistant can read the result. If the submission reply is lost, Sui MCP checks the same transaction on Sui mainnet.
 
 ## Install
 
-Install once with npm, then register the command in each AI app. You need [Node.js 22 or newer](https://nodejs.org/en/download), including npm. No Git checkout, build, custom installation folder, database server, Sui API key or endpoint setup is required for the normal path.
-
-Already used an earlier release? Follow [Updating an Existing Sui MCP Installation](docs/MCP_SETUP.md#updating-an-existing-sui-mcp-installation) first. New installations can continue below.
-
-This guide describes **0.9.0**. First confirm it is published, then install that exact version:
+**Choose your version first.** This README describes **0.9.0**. Run the following in Terminal or PowerShell to see the stable version on [npm](https://www.npmjs.com/package/@zktx.io/sui-mcp):
 
 ```sh
-npm view @zktx.io/sui-mcp@0.9.0 version
+npm view @zktx.io/sui-mcp@latest version
+```
+
+- If it returns **0.8.2**, use the [0.8.2 installation and app setup guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.8.2/docs/MCP_SETUP.md).
+- For **0.9.0**, existing users should follow [Updating an existing installation](docs/MCP_SETUP.md#updating-an-existing-sui-mcp-installation) before replacing the package. For a new installation, use [Node.js 24 LTS with npm](https://nodejs.org/en/download), then run the command below once. If npm reports another version, choose the guide for that release.
+
+```sh
 npm install -g @zktx.io/sui-mcp@0.9.0
 ```
 
-The first command must return `0.9.0`. If it is unavailable, follow the [version availability guidance](docs/MCP_SETUP.md#npm-command-returns-404); do not drop the version and assume an older release matches this guide. Contributors can use the optional [developer checkout](docs/MCP_SETUP.md#developer-checkout-setup).
+### Connect your app
 
-Register the installed command in your app. This is the complete default configuration for Claude Desktop; Cursor's example is in the setup guide:
+Register the installed command `sui-mcp` once in each app. The npm package name includes the scope `@zktx.io/`; the unscoped npm package belongs to another project. For a new global installation, leave arguments and environment variables empty. Your app starts the server. The package includes its WalletConnect project ID and default Sui mainnet endpoints.
 
-```json
-{
-  "mcpServers": {
-    "sui-mcp": {
-      "command": "sui-mcp"
-    }
-  }
-}
-```
+| Where you use Sui MCP | Where to register it |
+| --- | --- |
+| [Codex Desktop or CLI](docs/MCP_SETUP.md#codex) | Use MCP settings in the desktop app, the CLI, or your Codex configuration file. |
+| [Claude Desktop](docs/MCP_SETUP.md#claude-desktop) | Open **Settings → Developer → Edit Config**. |
+| [Claude Code](docs/MCP_SETUP.md#claude-code) | Use `claude mcp add` in a terminal. |
+| [Cursor](docs/MCP_SETUP.md#cursor) | Add it to `mcp.json` and enable it for your local Agent. |
+| [Antigravity App](docs/MCP_SETUP.md#antigravity-app) | Add the local command to the MCP configuration, then refresh it under **Installed MCP Servers**. |
 
-Codex uses TOML in `~/.codex/config.toml` instead:
+If a coding agent is setting this up for you, use the [installation request for an agent](docs/MCP_SETUP.md#ask-an-agent-to-set-it-up). You can use several apps on the same computer under the same OS user. They share one backend and one current wallet connection when configured with the same release, data directory and port. [Using multiple apps](docs/MCP_SETUP.md#using-multiple-apps)
 
-```toml
-[mcp_servers.sui-mcp]
-command = "sui-mcp"
-```
+### Try it without a wallet
 
-Keep existing settings and other servers when adding these entries. Choose your app's walkthrough for the file location, registration and startup confirmation:
+1. In a new chat, ask **“What Sui MCP package, version and network are you using?”** The response should identify `@zktx.io/sui-mcp`, server `sui-mcp`, the version you installed, and `mainnet`.
+2. Ask **“List the DeepBook pools available in Sui MCP.”** Expect pool names and trading assets in chat. These come from the registry packaged with the SDK.
+3. To try an interactive card, ask **“Open the SUI/USDC price chart in Sui MCP.”** In an app with card support, look for the Chart inside the app. It can show progress while reading the market or report that data is unavailable. A text response alone confirms only tool access. [First-use walkthrough](docs/MCP_SETUP.md#first-use-flow)
 
-- [Codex Desktop / CLI](docs/MCP_SETUP.md#codex)
-- [Claude Desktop](docs/MCP_SETUP.md#claude-desktop)
-- [Claude Code](docs/MCP_SETUP.md#claude-code)
-- [Cursor](docs/MCP_SETUP.md#cursor)
+## What happens during a review?
 
-After the app loads the registration, ask: **"Use Sui MCP to show its package name, server name, version and network."** Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.9.0` and `mainnet`. Then ask: **"Use Sui MCP to list the available DeepBook pools on Sui mainnet."** This first read needs no wallet or transaction. The [first-use tutorial](docs/MCP_SETUP.md#first-use-flow) explains expected results, optional cards and wallet connection. If the app cannot find `sui-mcp`, use [Command not found](docs/MCP_SETUP.md#command-not-found).
+For a DeepBook swap, the local backend builds the transaction for the connected Sui account and checks its inputs, ownership, quoted amounts, limits and simulation. The Review card shows the amounts and a graph of the programmable transaction block (PTB), so you can inspect its steps and addresses. A review cannot guarantee that a transaction is safe.
 
-### Using several apps at once
+Only your action on the Review card and approval in your wallet authorize that swap. The backend verifies the signed transaction's digest (its identifier) and signer before submitting it once. The assistant and card never receive executable transaction bytes or signatures. The Receipt shows the observed chain outcome. Reopening a card reads its stored state.
 
-Codex, Claude Desktop and other local MCP apps can use the same installation at the same time on one computer under the same OS user. Register `sui-mcp` in each app. With defaults, they share the local backend, settings, records and **one current wallet connection**; no separate wallet pairing per app is needed. Changing that connection in one app affects the others, while completed cards keep their original results.
+An external payment or action proposal can also be opened for inspection. It has no signing action. For local data, endpoints and connection recovery, open Settings and confirm the change there.
 
-All apps must use the same package release and configuration. Updates require stopping all participating Sui MCP connections before restarting the shared backend. See [Using Multiple Apps](docs/MCP_SETUP.md#using-multiple-apps) for sharing and update conditions. Interactive wallet, Review and Settings workflows require MCP Apps card support; ordinary reads can be used without it.
-
-### Package identity and local data
-
-The npm package is `@zktx.io/sui-mcp`, and its repository is
-`zktx-mcp/sui-mcp`. Confirm the requested version is available before changing
-your client registration.
-
-Use the full scoped package name: the unscoped `sui-mcp` package is a different
-project. Use `sui-mcp` as the default MCP registration name. A client-defined registration
-alias is a local label, not server identity or authorization. Local data formats can change between releases.
-Preserve your existing data directory when upgrading from 0.8.2.
-Compatible updates preserve the current data directory. Incompatible databases
-and backups are rejected without conversion or automatic deletion. If startup
-reports a database format mismatch, follow the [recovery instructions](docs/MCP_SETUP.md#database-format-mismatch).
-You can retain the old files and use a new empty data directory, or explicitly
-choose to discard the old local data and settings and start fresh with defaults.
-Data from a different package is not discovered or imported. See the
-[setup guide](docs/MCP_SETUP.md#switching-the-installed-package) for installation
-and shared-server restart instructions.
-
-## Product Scope in Two Layers
-
-- **Implemented:** Sui mainnet read evidence, non-signable external proposal review, and account-bound DeepBook swap review using protocol-agnostic adapters. Account, Receipt, Chart, Connect, Disconnect, Review and Settings cards use the same SQLite state and scoped permission model. The backend verifies stored material, ownership, quote/policy provenance, human-readable facts, simulation and PTB evidence before an explicit user request. WalletConnect carries bytes only between the backend and wallet; ordinary MCP responses expose facts, request status and observed execution results. Settings owns endpoint and read-address controls, local backup/import/reset, and explicit connection-service recovery. Settings operations require scoped user confirmation; ordinary MCP calls only create the card or read settings.
-- **Safety boundaries:** no private-key custody, no MCP or AI autonomous execution, no forwarding of opaque external transaction bytes to a wallet, and no peg guarantee. The current product does not silently choose settlement tokens or routes. It does not provide fiat cash-out, P&L, tax or cost-basis support.
-
-DeepBook provides the current scoped Sui conversion, price, and orderbook
-evidence through the shared protocol adapter contracts. Wallet and Sui balance reads
-describe held assets. They do not define the whole product.
-
-Sui MCP does not custody funds, hold private keys, or autonomously trade
-on behalf of users.
-By current design, it does not rank venues, choose routes, make best-price
-recommendations, or silently choose settlement tokens for users.
-
-Account-bound transaction building, signing requests and chain observation stay
-in the local backend. The Review card displays evidence and current permitted
-actions. Public review JSON, model-facing card data and backups never contain transaction
-bytes, signatures, SDK keys or signing permission. Reopening a card reads its
-stored state and never replays a financial request.
-
-The current release flow is:
-
-```text
-The user states an intent in natural language.
-Sui MCP resolves the supported Sui mainnet evidence surface.
-The AI answers only from returned evidence and boundaries.
-Supported swap transaction material build is an account-bound review step, not
-part of the natural-language intent evidence answer.
-```
-
-The current release implements intent evidence for supported Sui mainnet reads.
-It can also create a read-only, non-signable local review session from a
-structured external payment or Sui action proposal. External proposal ingestion
-does not trust external transaction material or send anything for wallet signing.
-
-For setup, see [docs/MCP_SETUP.md](docs/MCP_SETUP.md).
-For the MCP API reference, see [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md).
-For the AI-client answer playbook, see [docs/AGENT_BEHAVIOR.md](docs/AGENT_BEHAVIOR.md).
-For manual maintainer and developer utilities, see [docs/UTILITY_INDEX.md](docs/UTILITY_INDEX.md).
-
-User-question flows for USD-denominated coverage, balance totals, and shortfall answers live in [docs/AGENT_BEHAVIOR.md](docs/AGENT_BEHAVIOR.md). The response fields for those answers live in [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md).
+For tool names and responses, see [MCP Tools](docs/MCP_TOOLS.md). For guidance on answering questions such as “Can I cover a 1000 dollar payment with my assets?”, see the [AI-client answer playbook](docs/AGENT_BEHAVIOR.md).
 
 ## What Works Today
 
@@ -149,7 +61,7 @@ The current release can run as a local stdio MCP server and expose mainnet Sui D
 - user-requested bounded Sui transaction digest lookup, account activity scans, sent-function activity scans with known-wallet-only persistence, and stored normalized activity summaries;
 - read-only external proposal review sessions that display proposed action, asset flow, recipient or target, freshness, missing evidence, user choices, unsupported claims, and non-signable reason;
 - local Sui MCP review evidence and review-session status reads;
-- account-bound DeepBook review with verified material, digest, ownership, policy, human-readable facts, simulation and PTB visualization, followed by explicit card selection and wallet approval through the backend;
+- account-bound DeepBook swap review through protocol-agnostic adapter contracts that define the evidence a Review needs from any supported protocol;
 - separately recorded request state and chain success/failure, shown in the Review card and available through ordinary reads;
 - a Receipt card for server-read facts about any transaction digest, independent of signing.
 

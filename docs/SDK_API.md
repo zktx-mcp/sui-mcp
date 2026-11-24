@@ -40,6 +40,7 @@ The diagram is display evidence; it does not authorize signing or execution.
 resource and records the modules included in that resource. Check
 `dist/mcp-app/review.notices.txt` and `receipt.notices.txt`, or the dependency
 notices embedded in their HTML, for the actual browser-library versions.
+The package also ships versioned license texts under `LICENSES/`. A filename there alone does not identify which version a card contains. Use that card’s bundled notices for attribution and the lockfile for its build dependencies.
 The dependency versions in a new source-checkout build come from
 `package-lock.json`. Reinstalling a published package's runtime dependencies
 does not replace the libraries already embedded in its card HTML. A browser

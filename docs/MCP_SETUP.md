@@ -6,19 +6,19 @@ It does not define tool field contracts or response wording. Use `docs/MCP_TOOLS
 
 The normal path is **install once with npm → register the command in each app → ask your first question**. No source checkout or special installation folder is required.
 
-These instructions describe `@zktx.io/sui-mcp@0.9.0`. The npm commands work only after that exact version is published. A repository commit, local build or successful package check does not publish it. Do not substitute an older release and assume it has the behavior described here.
+These instructions describe `@zktx.io/sui-mcp@0.9.0`. Check the version available from npm before installing or changing an existing registration. If you are installing 0.8.2, follow its [versioned setup guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.8.2/docs/MCP_SETUP.md).
 
 Already using Sui MCP? Follow [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation) before replacing a running installation.
 
 - [Install with npm](#published-package-setup)
-- Register: [Codex](#codex), [Claude Desktop](#claude-desktop), [Claude Code](#claude-code), or [Cursor](#cursor)
+- Choose your app: [Codex](#codex), [Claude Desktop](#claude-desktop), [Claude Code](#claude-code), [Cursor](#cursor), or [Antigravity App](#antigravity-app)
 - [Try it without a wallet](#first-use-flow)
 - [Use several apps together](#using-multiple-apps)
 - [Troubleshooting](#troubleshooting)
 
 ## Requirements
 
-- Install Node.js 22 or newer; Node 24 LTS is a suitable choice. The [Node.js download page](https://nodejs.org/en/download) provides installers that include npm.
+- For a new installation, choose [Node.js 24 LTS with npm](https://nodejs.org/en/download). An existing Node 22 LTS installation also satisfies the package's runtime requirements.
 - Install the AI app you want to use. It must support running a local MCP server. MCP (Model Context Protocol) lets the app call Sui MCP's tools.
 - Allow network access to npm for installation and Sui mainnet services for reads. Default Sui endpoints are built in; no API key or endpoint configuration is needed for the default path.
 
@@ -29,7 +29,7 @@ node --version
 npm --version
 ```
 
-Node must report `v22` or newer, and npm must print a version. If either command is missing, install Node.js and reopen the terminal before continuing. You can run the installation commands from any folder.
+Look for `v24.x` or `v22.x` and an npm version number. If either command is missing, install Node.js and reopen the terminal. You can run the installation commands from any folder.
 
 Interactive cards require the app's MCP Apps support. A local stdio connection alone does not establish card support. Clients without it can use ordinary read tools, including public-address reads, but cannot run Connect, Disconnect, Review or Settings workflows. The wallet-free text example below works without cards.
 
@@ -43,7 +43,7 @@ Check that the version described by this guide is available:
 npm view @zktx.io/sui-mcp@0.9.0 version
 ```
 
-The result must be `0.9.0`. If the version is unavailable, stop here; see [NPM command returns 404](#npm-command-returns-404). Wait for publication, use the documentation for an available release, or deliberately choose the optional [developer checkout](#developer-checkout-setup). Dropping the version from the install command can install a different release.
+Continue below when the result is `0.9.0`. On a 404, run `npm view @zktx.io/sui-mcp@latest version` to find the public stable version. If that prints `0.8.2`, use the [0.8.2 guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.8.2/docs/MCP_SETUP.md) to install it. To use 0.9.0 specifically, see [version availability](#npm-command-returns-404) or the optional [developer checkout](#developer-checkout-setup).
 
 Install the published package:
 
@@ -57,9 +57,17 @@ Use the full scoped name `@zktx.io/sui-mcp`: the unscoped npm package `sui-mcp` 
 
 If installation reports a permission error, see [Global installation permission error](#global-installation-permission-error). If the app cannot find the installed command, see [Command not found](#command-not-found).
 
+### Ask an agent to set it up
+
+Tell the agent which app you use and which published version you want. For example:
+
+> Set up the published Sui MCP package for **[my app]**. Check the available version of `@zktx.io/sui-mcp` on npm and use the matching setup guide. Preserve my other MCP servers. If Sui MCP is already registered, inspect that registration and follow the update instructions before replacing anything. After the app reloads, use its server-status tool to report the running package, version and network. If you cannot operate that app, tell me exactly what to open and what response to look for.
+
 ## Codex
 
 Codex Desktop, CLI and IDE integrations on the same Codex host share MCP configuration. You can configure the desktop app without installing the CLI separately.
+
+In Codex Desktop, open **Settings → MCP servers** and add a local stdio server named `sui-mcp`. Set **Command** to `sui-mcp` and leave arguments and environment variables empty on a fresh install. Enable the entry and use the [first-use status check](#1-confirm-the-running-server) in a new chat. If you already have that entry, edit it in place. To configure it in a file instead, use the steps below.
 
 1. Open `~/.codex/config.toml` in a plain-text editor; create the folder/file if it does not exist. On macOS, Finder → Go → Go to Folder accepts `~/.codex`. On Windows, the default file is `%USERPROFILE%\.codex\config.toml`.
 2. Add the following table. If it already exists, update it instead of adding another one. Keep unrelated configuration in the file.
@@ -115,7 +123,7 @@ With Claude Code installed, run this in a terminal:
 claude mcp add --transport stdio --scope user sui-mcp -- sui-mcp
 ```
 
-The user scope makes this registration available across your projects. Use `--scope local` for only the current project, or `--scope project` to share a `.mcp.json` registration with a project. Choose one scope; do not register duplicate copies for normal setup. CLI options precede the server name; `--` separates them from the server command.
+The user scope makes this registration available across your projects. Use `--scope local` for only the current project, or `--scope project` to share a `.mcp.json` registration with a project. Choose one scope. The `--` separates the registration options and name from the server command.
 
 Start a new Claude Code session. Use `/mcp` to inspect the connection, then ask the [first question](#first-use-flow). You can also inspect the registration with:
 
@@ -142,9 +150,26 @@ After a configuration change, restart the session so it starts the new command. 
 ```
 
 3. Save and restart Cursor. Open its MCP management view (Customize → MCP in current versions), check that `sui-mcp` is enabled, and allow the connection if prompted.
-4. Start an Agent chat and ask the [first question](#first-use-flow). A returned server status confirms startup. If it fails, inspect the server's error in the MCP management view or the MCP Logs channel in Output.
+4. Start a **local** Agent chat and ask the [first question](#first-use-flow). A returned server status confirms startup. Cursor's hosted Cloud Agents do not read your computer's `~/.cursor/mcp.json`. If local startup fails, inspect the server's error in the MCP management view or the MCP Logs channel in Output.
 
 See the [official Cursor MCP guide](https://cursor.com/docs/mcp) if your version presents these settings differently.
+
+## Antigravity App
+
+1. Add the following entry to the shared global MCP configuration, `~/.gemini/config/mcp_config.json`. If the file already contains `mcpServers`, add only the `sui-mcp` member. Keep a single registration for this server.
+
+   ```json
+   {
+     "mcpServers": {
+       "sui-mcp": {
+         "command": "sui-mcp"
+       }
+     }
+   }
+   ```
+
+2. In **Antigravity App**, open **Settings → Customizations → Installed MCP Servers**. Refresh the list and enable `sui-mcp`. In **Antigravity IDE**, the configuration editor is under the agent panel's **… → MCP Servers → Manage MCP Servers → View raw config**. [Google's MCP setup guide](https://antigravity.google/docs/ide-mcp)
+3. In a new chat ask for the [running package and version](#1-confirm-the-running-server). To check card display separately, ask for the SUI/USDC Chart. Look for the card in the app. If the tool returns `ui_unavailable`, report that result for this connection. Ask the user before offering a separate visualization.
 
 ## First Use Flow
 
@@ -164,7 +189,7 @@ The app should call `read_get_server_status`. Confirm `packageName` is `@zktx.io
 Use Sui MCP to list the available DeepBook pools on Sui mainnet.
 ```
 
-The app should call `read_list_deepbook_pools` and return pool names and trading assets. Results can change; no fixed pool count or price is required. This request needs no wallet, funds, card, signature or transaction. A successful status response followed by this read confirms that the app can reach Sui MCP and use a mainnet read tool. If a network read fails, use the returned reason and [Troubleshooting](#troubleshooting); do not connect a wallet to fix it.
+The app should call `read_list_deepbook_pools` and return pool names and trading assets from its installed DeepBook SDK. This confirms that the app can call a Sui MCP tool and display its text result. The pool lookup itself reads static package data. Live prices and inline cards have separate checks.
 
 If you want to try an interactive read card in an MCP Apps-capable app, ask:
 
@@ -172,7 +197,7 @@ If you want to try an interactive read card in an MCP Apps-capable app, ask:
 Show a DeepBook SUI/USDC price chart in Sui MCP.
 ```
 
-Expect a read-only Chart card with candle data, or an explicit source/availability result. A chart-data failure is separate from installation failure. No wallet connection or signing is involved. An app without the required card support can still use the text read above.
+Look for the read-only Chart card inside the app. It may show progress before candles appear. A visible card reporting unavailable market data confirms rendering and tells you that the data request failed. A returned card ID alone cannot confirm rendering. An app without the required card support can still use the text read above. No wallet connection or signing is needed.
 
 ### 3. Optionally connect your wallet for asset reads
 
@@ -326,48 +351,48 @@ command = "npx"
 args = ["-y", "@zktx.io/sui-mcp@0.9.0"]
 ```
 
-This downloads the requested published package as needed. A cold cache can exceed the app's startup timeout; the global install avoids per-launch package resolution. Keep the exact version in every app's configuration. Neither an unversioned package name nor `@latest` guarantees the version described by this guide.
+This downloads the requested published package as needed. On native Windows clients that require the command shim, use `cmd` as the command and `["/c", "npx", "-y", "@zktx.io/sui-mcp@0.9.0"]` as its arguments. A cold cache can exceed the app's startup timeout. The global install avoids per-launch package resolution. Keep the exact version in every app's configuration.
 
 ## Switching the Installed Package
 
 ### Updating an Existing Sui MCP Installation
 
-Version 0.9.0 changes the SQLite layout and the public backup format. Preserve the complete data directory from 0.8.2. Start 0.9.0 with a separate, empty `SUI_MCP_DATA_DIR`. Reconfigure the saved endpoints and networks and establish a new wallet connection there. The earlier local review history, closed cards and backups are accessible using the earlier version and directory.
+For **0.8.2 → 0.9.0**, keep the complete 0.8.2 data directory. The database and backup formats differ. You can read the old history with 0.8.2 and its original directory. A compatible update can reuse its directory.
 
-Clients using `read_summarize_sui_account_activity` must read `accountCoinFlows.rows` in place of the 0.8.2 `analysis.coinFlows`. The new totals include only complete balance changes for the selected account among the returned stored transactions. Use `completeTransactions` and `incompleteTransactions` under `accountCoinFlows` to report how many contributed. Check `accountCoinFlows.rowsTruncated` separately to see whether more asset types contributed than the summary lists. Live scan analysis still exposes transaction-wide `analysis.coinFlows`.
+1. Check that npm has the exact version you intend to install. Before closing 0.8.2, settle pending wallet prompts. For an admitted transaction with an unknown outcome, keep the attempt ID and look up the same transaction digest. Resending a swap could execute it twice.
+2. Disable Sui MCP in every participating app or fully quit those apps. Wait for the shared backend to exit. Closing just a chat or window can leave the old process running.
+3. Choose one **new, empty directory** for 0.9.0. Set `SUI_MCP_DATA_DIR` to its absolute path in **each app's existing server registration** as shown below. All apps sharing the backend must use the same directory and review port. Setting a variable in a terminal alone does not configure a desktop app launched separately.
+4. For a global install, run `npm install -g @zktx.io/sui-mcp@0.9.0` once and keep the `sui-mcp` launch command. If you use npx, update the exact package version in each registration.
+5. Reopen the connections. In each app ask for the running package, server name, version and network. Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.9.0` and `mainnet`. The new directory starts with default settings. Reapply any custom endpoints or networks you use. Connect a wallet when you need wallet features.
 
-Before switching versions, settle any pending wallet prompt in the earlier installation. For a submission already admitted or an unconfirmed outcome, retain the attempt ID and transaction digest. Check that digest using the earlier installation or an independent Receipt read. A missing response leaves execution unconfirmed. Sending another transaction could duplicate a payment or swap.
+**Set the directory in the registration.** Replace `/absolute/path/to/sui-mcp-0.9.0` below with the same real folder on this computer. On Windows a path such as `C:/local-data/sui-mcp-0.9.0` also works in JSON and TOML. Preserve the server's other settings.
 
+- **Claude Desktop, Cursor and Antigravity:** Merge this member into the existing `mcpServers.sui-mcp` entry. If it already has an `env` object, add the variable there.
 
-Confirm that the requested package version is available before changing every
-participating client's configuration. A compatible update can retain the current
-data directory, backups and private WalletConnect store. Use the same directory
-and review port in every participating client. Stop the participating MCP
-connections and wait for the shared backend to exit, update
-the installed package or configured version, then reopen them and check
-`read_get_server_status` in each client. The package name, version and server
-name must match the intended installation. Updating the package does not
-replace a backend that is already running.
+  ```json
+  {
+    "env": {
+      "SUI_MCP_DATA_DIR": "/absolute/path/to/sui-mcp-0.9.0"
+    }
+  }
+  ```
 
-Closing a chat or app window can leave its MCP process running in the
-background. Disable Sui MCP in each participating app or fully quit those apps,
-and confirm the shared backend has exited before replacing the package. With
-a global installation, keep the existing `command = "sui-mcp"` or JSON
-`"command": "sui-mcp"` registration; updating the package does not require a
-new executable path.
+- **Codex:** Set the environment variable in the server's MCP settings or in its existing TOML configuration. Add the table only if it is absent.
 
-Local data formats can change between releases. The runtime rejects an
-incompatible database before writing to it. An npm update or reinstall leaves
-that database in its original format.
-If startup reports a database format mismatch, follow [Database format mismatch](#database-format-mismatch).
-You may keep the old files and select a new empty directory, or explicitly
-choose to discard the old local data and settings and restart with defaults.
-Neither the runtime nor an installation agent may make that deletion choice
-for the user. A compatible update does not require a reset.
-Never resend a transaction as an update step. Coordinate a safe restart if a
-transaction request is still in progress. See
-[Local Database Architecture](LOCAL_DB_ARCHITECTURE.md#current-format-and-backups)
-for the storage and backup boundary.
+  ```toml
+  [mcp_servers.sui-mcp.env]
+  SUI_MCP_DATA_DIR = "/absolute/path/to/sui-mcp-0.9.0"
+  ```
+
+- **Claude Code:** Use `claude mcp get sui-mcp` to identify the existing scope. For a user registration in `~/.claude.json` or a project registration in `.mcp.json`, merge the same JSON `env` member into that server. Local-scope registrations are under the project's entry in `~/.claude.json`. If you are adding a **new** user registration to share the upgraded backend, use:
+
+  ```sh
+  claude mcp add --transport stdio --scope user sui-mcp --env "SUI_MCP_DATA_DIR=/absolute/path/to/sui-mcp-0.9.0" -- sui-mcp
+  ```
+
+If startup reports a [database format mismatch](#database-format-mismatch), check which data directory the failing app actually uses. Reinstalling npm leaves the database intact. Deleting old data or settings requires a separate choice by the user.
+
+For agents reading stored activity, 0.9.0 returns account amounts under `accountCoinFlows.rows`. Its transaction counts describe the completeness of the returned transactions, and `rowsTruncated` describes the list of asset types. Live scan `analysis.coinFlows` remains transaction-wide. [Activity tool contracts](MCP_TOOLS.md)
 
 ### Switching from a Different Package
 
@@ -474,7 +499,7 @@ Receipt and Chart do not sign or submit.
 
 ## Internal read cards
 
-Ask the AI client to show an account asset card, a transaction result card, or a DeepBook USDC chart. The corresponding tools are `ui_open_account`, `ui_open_receipt`, and `ui_open_chart`. Claude Desktop and Codex desktop use their internal MCP Apps view. If the connection receives `ui_unavailable`, check whether the Host surface and version you opened support inline MCP Apps. An updated Host advertises its capabilities when it establishes a new MCP connection.
+Ask the AI client to show an account asset card, a transaction result card, or a DeepBook USDC chart. The corresponding tools are `ui_open_account`, `ui_open_receipt`, and `ui_open_chart`. A compatible connection displays the card inside the app. If the tool returns `ui_unavailable`, explain that this connection could not open the requested card. Get the user's agreement before providing a text answer or a separate visualization. After changing the app or its MCP settings, use a new connection to check its card capability.
 
 A card accepts one read selection. Moving between chats or recreating its frame does not close valid unsubmitted input. After the server accepts the selection or its input period expires, the original input stays closed. Request a new card for a different selection. A server restart ends unfinished cards without repeating their queries; completed results remain readable. If a reply is lost, use the same card’s saved-state recovery before starting another request. These read cards do not connect a wallet, sign or submit transactions. Cards do not provide clipboard or copy-button features.
 
@@ -697,13 +722,7 @@ It is not part of CI or `release:check`.
 
 ### Global installation permission error
 
-An `EACCES` or administrator-permission error means npm cannot write to its global installation directory. On macOS/Linux, if that directory is administrator-owned and you intend to install there, run the installer with administrator authorization:
-
-```sh
-sudo npm install -g @zktx.io/sui-mcp@0.9.0
-```
-
-Enter the administrator password only in your terminal, never in chat. Launch the AI apps normally afterward; running Sui MCP does not require administrator privileges. If you cannot authorize that installation, follow npm's [global installation permission guidance](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally). This step is only for a permission failure, not an extra installation step for everyone.
+If npm reports `EACCES` while writing its global installation directory, use a Node version manager or select a user-writable npm prefix as described in [npm's global installation permission guidance](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally). Retry the exact-version install, then ensure the app can find the executable. The [npx configuration](#download-on-demand-npx) is also available for a published version. Running Sui MCP requires only your ordinary user account.
 
 ### Command not found
 
@@ -787,7 +806,7 @@ Choose how to handle the old data:
 
 - **Keep the files:** Leave the existing folder untouched and set
   `SUI_MCP_DATA_DIR` to a new empty folder in every participating app. Use the
-  same folder for all apps; see [Advanced Runtime Settings](#advanced-runtime-settings).
+  same folder for all apps; see the [per-app configuration examples](#updating-an-existing-sui-mcp-installation).
   Old-format backups cannot be restored into the new format.
 - **Start fresh with default settings:** Explicitly choose to delete the old
   Sui MCP data folder, then follow the steps below. This removes local activity
@@ -851,7 +870,7 @@ neither substitutes for public publication.
 
 ## Client Snippets
 
-The registration formats follow the official [Codex MCP guide](https://developers.openai.com/codex/mcp), [Claude Desktop walkthrough](https://modelcontextprotocol.io/docs/develop/connect-local-servers), [Claude Code MCP guide](https://code.claude.com/docs/en/mcp), and [Cursor MCP guide](https://cursor.com/docs/mcp). App menu labels can vary by version; use the official guide for your installed version. These configuration examples do not claim that every app supports the same card or file functions. Sui MCP uses the actual connection's capabilities and function responses.
+The app sections above link to each client's configuration guide. Menu labels can vary by version. Card display and file transfer depend on the capabilities and function responses of the current connection.
 
 ### Optional account-bound review smoke
 

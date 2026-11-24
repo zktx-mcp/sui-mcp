@@ -51,7 +51,7 @@ When the user requests a Sui transaction digest lookup or account activity scan,
 
 A returned scan row is tied to a known local account only when the sender or a returned balance-change owner matches that account.
 
-An affected-address filter can establish the live relationship. Rows lacking sender or balance-owner evidence remain in the live response and count as skipped for storage. A completed scan describes the provider window. Stored flow totals use only the returned stored transactions with complete account balance changes. Earlier unpublished rc.6 builds could retain rows based on the affected-address filter alone. Existing records and restored snapshots preserve those observations.
+An affected-address filter can establish the live relationship. Rows lacking sender or balance-owner evidence remain in the live response and count as skipped for storage. A completed scan describes the provider window. Stored flow totals use only the returned stored transactions with complete account balance changes. Restoring a current-format backup preserves its recorded observations and their detail status.
 
 Stored scan rows include:
 
@@ -187,7 +187,7 @@ Timeline output uses account-scoped raw balance-change facts only. `netFlowBars`
 
 Optional `usdcReferences` read pool-bound DeepBook USDC candle evidence for supported USDC-quoted assets. Those references are token-denominated USDC evidence only. They are not fiat USD value, a USDC/USD peg guarantee, P&L, tax, cost basis, route advice, transaction-building input, signing data, or signing readiness.
 
-Scan completion uses the GraphQL transaction filter’s retained checkpoint range and the linked pages. Stored observations from earlier candidates that lack the retention boundary cannot establish complete coverage. Local fetch times describe observations and do not order pages. Provider retention and rate limits depend on the endpoint.
+Scan completion uses the GraphQL transaction filter’s retained checkpoint range and the linked pages. An observation without that retention boundary cannot establish complete coverage. Local fetch times describe observations and do not order pages. Provider retention and rate limits depend on the endpoint.
 
 Empty pages, bounded pages, and stored local summaries must not be treated as complete history.
 
