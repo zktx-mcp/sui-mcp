@@ -6,17 +6,23 @@ For a supported DeepBook swap, the Review card shows your account, how much you 
 
 ## Install
 
-**Choose your version first.** This README describes **0.9.0**. Run the following in Terminal or PowerShell to see the stable version on [npm](https://www.npmjs.com/package/@zktx.io/sui-mcp):
+> **Upgrading from 0.8.2? Keep your old data folder.** The database format changed in 0.9.0. Opening a 0.8.2 database stops the server at startup, so your app may show Sui MCP as disconnected or list none of its tools even after npm installs successfully.
+>
+> Check any pending wallet requests or submitted transactions in the old installation first. Stop Sui MCP in every app, keep the original folder intact, and set `SUI_MCP_DATA_DIR` to the **same new, empty folder** in each app before restarting. Your old history remains accessible with 0.8.2 and the original folder. [Follow the per-app upgrade instructions](docs/MCP_SETUP.md#updating-an-existing-sui-mcp-installation). Fresh installs can use the defaults. If you already use 0.9.0, keep its data folder when updating to 0.9.1.
+
+**If your assistant cannot find `read_get_server_status`:** An empty tool list alone does not explain why. Check the app’s existing local registration and its Sui MCP startup log. The message `Local database format does not match this runtime` confirms a database mismatch. If the assistant cannot see the log, it should ask for the startup error line before suggesting a fix. [Troubleshoot a missing server](docs/MCP_SETUP.md#server-does-not-appear-in-the-client)
+
+**Choose your version first.** This README describes **0.9.1**. Run the following in Terminal or PowerShell to see the stable version on [npm](https://www.npmjs.com/package/@zktx.io/sui-mcp):
 
 ```sh
 npm view @zktx.io/sui-mcp@latest version
 ```
 
-- If it returns **0.8.2**, use the [0.8.2 installation and app setup guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.8.2/docs/MCP_SETUP.md).
-- For **0.9.0**, existing users should follow [Updating an existing installation](docs/MCP_SETUP.md#updating-an-existing-sui-mcp-installation) before replacing the package. For a new installation, use [Node.js 24 LTS with npm](https://nodejs.org/en/download), then run the command below once. If npm reports another version, choose the guide for that release.
+- If it returns **0.9.0**, follow the [published 0.9.0 setup guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.9.0/docs/MCP_SETUP.md).
+- For a new **0.9.1** installation, use [Node.js 24 LTS with npm](https://nodejs.org/en/download), then run the command below once. If npm reports another version, choose the guide for that release.
 
 ```sh
-npm install -g @zktx.io/sui-mcp@0.9.0
+npm install -g @zktx.io/sui-mcp@0.9.1
 ```
 
 ### Connect your app
