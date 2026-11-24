@@ -94,15 +94,17 @@ jobs:
           import { readFileSync } from 'node:fs';
           import { createHash } from 'node:crypto';
           import { execFileSync } from 'node:child_process';
+          import { resolve } from 'node:path';
           const r = JSON.parse(readFileSync('release/release.json', 'utf8'));
-          const integrity = 'sha512-' + createHash('sha512').update(readFileSync('release/package.tgz')).digest('base64');
+          const tarballPath = resolve('release/package.tgz');
+          const integrity = 'sha512-' + createHash('sha512').update(readFileSync(tarballPath)).digest('base64');
           if (integrity !== r.integrity) throw Error('Unexpected release bytes');
           const response = await fetch('https://registry.npmjs.org/' + encodeURIComponent(r.name) + '/' + encodeURIComponent(r.version));
           if (response.ok) {
             const known = await response.json();
             if (known.name !== r.name || known.version !== r.version || known.mcpName !== r.mcpName || known.dist?.integrity !== integrity) throw Error('Published version differs from verified release');
           } else if (response.status === 404) {
-            execFileSync('npm', ['publish', 'release/package.tgz', '--access', 'public', '--ignore-scripts', '--tag', process.env.RELEASE_TAG,
+            execFileSync('npm', ['publish', tarballPath, '--access', 'public', '--ignore-scripts', '--tag', process.env.RELEASE_TAG,
               ...(process.env.PUBLIC_REPOSITORY === 'true' ? ['--provenance'] : [])], { stdio: 'inherit' });
           } else throw Error('Cannot verify public version before publish');
           NODE
