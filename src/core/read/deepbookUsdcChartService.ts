@@ -2,7 +2,7 @@ import { normalizeCoinType } from "./coinMetadata.js";
 import { INDEXER_SOURCE_STATEMENT, type DeepbookChartIndexer, type IndexedChartCatalog, type IndexedChartResult } from "./deepbookChartIndexer.js";
 import type { ChartCardInput, OfferedChartMarket } from "./readCardInputs.js";
 import {
-  ambiguousMarketName, marketIdentity, type MarketIdentity, type ReadCandlePreview,
+  ambiguousMarketName, candleMarketIdentityKey, marketIdentity, type MarketIdentity, type ReadCandlePreview,
   candleBucketStart, candleQueryWindow,
   validatePoolCandles,
   DEFAULT_DEEPBOOK_CANDLE_INTERVAL,
@@ -157,6 +157,14 @@ function chartMarkets(catalog: ChartCatalog, index?: IndexedChartCatalog, regist
   return { ...catalog, pools: [...byName.values()], indexedNames, conflicts, mixed: !!index && !registryOnly };
 }
 
+// A market retains its revision across snapshots with the same binding, even
+// when another market changes. A replacement gets a new revision on each change.
+type CatalogObservation = IndexedChartCatalog & {
+  directory: ReturnType<typeof chartMarkets>;
+  markets: ReadonlyMap<string, { identity: string | null; revision: number }>;
+};
+type ChartDirectory = ReturnType<typeof chartMarkets> & { observedIndex?: CatalogObservation };
+
 type CacheEntry<T> = {
   expiresAtMs: number;
   value: T;
@@ -189,8 +197,9 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
   let registrySequence = 0;
   const unresolved = new Map<string, MarketIdentity[]>();
 
-  let catalogFlight: Promise<IndexedChartCatalog> | undefined;
-  let lastCatalog: CacheEntry<IndexedChartCatalog> | undefined;
+  let catalogFlight: Promise<CatalogObservation> | undefined;
+  let lastCatalog: CacheEntry<CatalogObservation> | undefined;
+  let catalogSequence = 0;
   const indexedReads = new Map<string, Promise<IndexedChartResult>>();
 
   // A new selection checks the current catalog. Only simultaneous lookups share it.
@@ -198,8 +207,19 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     if (catalogFlight) return catalogFlight;
     const pending = indexer.fetchPools().then(value => {
       options.assertCurrent?.();
-      if (catalogFlight === pending) lastCatalog = { value, expiresAtMs: now().getTime() + cacheTtlMs };
-      return value;
+      if (catalogFlight !== pending) throw new Error("The chart source was reset.");
+      const directory = chartMarkets(value);
+      const revision = ++catalogSequence;
+      const markets: Map<string, { identity: string | null; revision: number }> = new Map();
+      for (const pool of directory.pools) {
+        const name = pool.pool_name;
+        const identity = directory.conflicts.has(name) ? null : candleMarketIdentityKey(pool);
+        const prior = lastCatalog?.value.markets.get(name);
+        markets.set(name, prior && prior.identity === identity ? prior : { identity, revision });
+      }
+      const observed = { ...value, directory, markets };
+      lastCatalog = { value: observed, expiresAtMs: now().getTime() + cacheTtlMs };
+      return observed;
     }).finally(() => {
       if (catalogFlight === pending) catalogFlight = undefined;
     });
@@ -233,10 +253,11 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
 
   // Only a current observation of both catalogs can resolve a previously
   // disputed name. An unrelated unread row must not erase that observation.
-  function reconcile(registry: ChartCatalog, index?: IndexedChartCatalog, registryOnly = false, fresh = false) {
-    const directory = chartMarkets(registry, index, registryOnly);
+  function reconcile(registry: ChartCatalog, index?: CatalogObservation, registryOnly = false, fresh = false): ChartDirectory {
     options.assertCurrent?.();
-    if (index && index !== lastCatalog?.value) throw new Error("The market catalog changed during lookup.");
+    const latest = index && lastCatalog?.value;
+    if (index && !latest) throw new Error("The chart source was reset.");
+    const directory = chartMarkets(registry, latest, registryOnly);
     for (const [name, previous] of unresolved) {
       const current = directory.conflicts.get(name);
       const unreadCandidate = registry.unavailablePools?.some(p => previous.some(candidate => candidate.poolId === p.poolId));
@@ -248,17 +269,18 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
             current.push(candidate);
           }
         }
-      } else if (fresh && !unreadCandidate && registry.pools.some(p => p.pool_name === name && p.active !== false)) {
+      } else if (fresh && index?.markets.get(name)?.revision === latest?.markets.get(name)?.revision &&
+          !unreadCandidate && registry.pools.some(p => p.pool_name === name && p.active !== false)) {
         unresolved.delete(name);
       } else {
         directory.conflicts.set(name, previous);
       }
     }
     for (const [name, candidates] of directory.conflicts) unresolved.set(name, candidates);
-    return directory;
+    return index ? { ...directory, observedIndex: index } : directory;
   }
 
-  async function marketsFor(name?: string, selected?: Selection) {
+  async function marketsFor(name?: string, selected?: Selection): Promise<ChartDirectory> {
     const registryOffer = selected?.catalogEndpoint === "pool_registry";
     const registry = () => selected && source
       ? source.fetchPools(selected.poolId, true)
@@ -273,7 +295,7 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       return reconcile(current, registryOffer ? prior : undefined, true);
     }
 
-    let index: IndexedChartCatalog;
+    let index: CatalogObservation;
     try {
       index = await readCatalog(options.indexer);
     } catch (error) {
@@ -297,7 +319,7 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       const observed = observedRegistry();
       if (observed) reconcile(observed, index);
     }
-    if (canUseIndex && !relevantConflict(unresolved)) return chartMarkets(index);
+    if (canUseIndex && !relevantConflict(unresolved)) return { ...index.directory, observedIndex: index };
 
     const recheckRegistry = !complete || !!selected || listed || relevantConflict(unresolved);
     let currentRegistry: PoolList;
@@ -308,7 +330,9 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       if (!canUseIndex || !relevantConflict(unresolved) || (error instanceof Error && error.name === "AbortError")) throw error;
       // A failed recheck keeps the disputed choices blocked. Independent
       // indexed markets in the same menu still have a usable price source.
-      return reconcile(index, undefined);
+      const latest = lastCatalog?.value;
+      if (!latest) throw error;
+      return { ...reconcile(latest), observedIndex: index };
     }
     const evidence = observedRegistry();
     return reconcile(evidence ?? currentRegistry, index, registryOffer,
@@ -386,6 +410,24 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     const pool = pools.find(candidate => query.poolId ? candidate.pool_id === query.poolId : candidate.active !== false && candidate.pool_name === query.poolName);
     const marketName = selected?.poolName ?? pool?.pool_name ?? query.poolName;
     const indexed = !directId && selected?.catalogEndpoint !== "pool_registry" && directory.indexedNames.has(marketName);
+    const observed = directory.observedIndex;
+    const revision = observed?.markets.get(marketName)?.revision;
+    const bindingChanged = () => {
+      if (!observed) return false;
+      if (!lastCatalog) return true;
+      const latest = lastCatalog.value.markets.get(marketName);
+      if (revision === latest?.revision) return false;
+      // A registry offer remains bound to its own source if the index starts
+      // or stops listing that same market while the card is open.
+      if (selected?.catalogEndpoint === "pool_registry" && pool) {
+        return latest !== undefined && latest.identity !== candleMarketIdentityKey(pool);
+      }
+      return true;
+    };
+    const changedMarket = (): DeepbookUsdcChartCandlesResponse => ({
+      status: "unsupported_pool", reason: "selected_market_changed", query,
+      availablePoolNames: [], source: directory.source, ...chartReadFacts("market_lookup")
+    });
     const conflict = !directId && directory.conflicts.get(marketName);
     if (selected && (!pool || selected.poolId !== pool.pool_id || pool.active === false || conflict ||
         (selected.catalogEndpoint === "get_pools" && !indexed))) {
@@ -412,12 +454,15 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       };
     }
 
+    if (bindingChanged()) return changedMarket();
     const pair = deepbookUsdcPriceHistoryPairFromPool(pool);
     if ((named && pool.pool_name !== query.poolName) || selected && ((selected.poolName !== undefined && selected.poolName !== pool.pool_name) || selected.baseAsset.coinType !== pair.baseAsset.coinType ||
         selected.quoteAsset.coinType !== pair.quoteAsset.coinType)) {
       return { status: "unsupported_pool", reason: "selected_market_changed", query,
         availablePoolNames: pools.map(p => p.pool_name), source: directory.source, ...chartReadFacts("market_lookup") };
     }
+    const allAtSelection = poolCache.get("all");
+    const menuAtSelection = poolCache.get("menu");
     let candleResult: CandleList | IndexedChartResult;
     const marketQuery = { ...query, poolName: pool.pool_name };
     try {
@@ -427,7 +472,7 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       }
       if (indexed && options.indexer) {
         const window = candleQueryWindow(marketQuery, now().getTime());
-        const key = JSON.stringify([pool.pool_name, pool.pool_id, pair.baseAsset.coinType, pair.quoteAsset.coinType,
+        const key = JSON.stringify([revision, pool.pool_name, pool.pool_id, pair.baseAsset.coinType, pair.quoteAsset.coinType,
           query.interval, query.startTimeMs, query.endTimeMs, window.firstBucket, window.lastBucket, query.limit]);
         let read = indexedReads.get(key);
         if (!read) {
@@ -466,6 +511,16 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     if (pendingConflict) {
       return { status: "unsupported_pool", reason: selected ? "selected_market_changed" : "ambiguous_pool_name",
         candidates: pendingConflict, availablePoolNames: [], query, source: directory.source, ...chartReadFacts("market_lookup") };
+    }
+    if (bindingChanged()) return changedMarket();
+    if (!directId && (allAtSelection !== poolCache.get("all") ||
+        menuAtSelection !== poolCache.get("menu") && curatedChartCoinTypes.includes(pair.baseAsset.coinType))) {
+      const registry = observedRegistry();
+      if (!registry) return changedMarket();
+      const latest = chartMarkets(registry, lastCatalog?.value, selected?.catalogEndpoint === "pool_registry");
+      const current = latest.pools.find(candidate => candidate.pool_name === marketName);
+      if (latest.conflicts.has(marketName) || !current || candleMarketIdentityKey(current) !== candleMarketIdentityKey(pool) ||
+          latest.indexedNames.has(marketName) !== indexed) return changedMarket();
     }
     const partial = "coverage" in candleResult.source && candleResult.source.coverage === "partial_tail";
     if (candleResult.candles.length === 0 && !partial) {

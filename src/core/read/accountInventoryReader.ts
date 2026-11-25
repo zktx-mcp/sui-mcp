@@ -131,6 +131,7 @@ export class AccountInventoryReader {
   async scanBalancePages(account: string, startCursor?: string, keepAvailableBalances = false) {
     const balances = new Map<string, SuiClientTypes.Balance>(), conflicting = new Set<string>(), requested = new Set<string>();
     let cursor = startCursor, pages = 0, blockedReason: IntentEvidenceBlockedReason | undefined;
+    let reachedLastPage = false;
     while (pages < MAX_WALLET_BALANCE_SCAN_PAGES) {
       let page;
       try { page = await this.client.core.listBalances({ owner: account, ...(cursor ? { cursor } : {}) }); }
@@ -155,7 +156,10 @@ export class AccountInventoryReader {
           balances.delete(type);
         } else if (!prior) balances.set(type, balance);
       }
-      if (!page.hasNextPage) break;
+      if (!page.hasNextPage) {
+        reachedLastPage = true;
+        break;
+      }
       if (cursor) requested.add(cursor);
       if (!page.cursor || requested.has(page.cursor)) { blockedReason = "wallet_balance_pagination_did_not_advance"; break; }
       cursor = page.cursor;
@@ -170,7 +174,9 @@ export class AccountInventoryReader {
     } else {
       resolved = await Promise.all(values.map(balance => this.withUnit(balance)));
     }
-    return { balances: resolved, pages, observedTypes: balances.size + conflicting.size, conflicts: conflicting.size,
+    return { balances: resolved, pages, observedBalances: balances, conflictingTypes: conflicting,
+      enumerationComplete: startCursor === undefined && reachedLastPage && blockedReason === undefined,
+      observedTypes: balances.size + conflicting.size, conflicts: conflicting.size,
       blockedReason: conflicting.size ? "wallet_balance_conflict" as const : blockedReason };
 
   }

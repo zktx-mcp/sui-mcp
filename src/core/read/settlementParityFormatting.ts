@@ -40,9 +40,14 @@ export function settlementAssetGroupParityQuantitySemantics(): SettlementAssetGr
 }
 
 export function settlementAssetGroupParityStatistics(
-  samples: Extract<SettlementAssetGroupParityAsset, { status: "reference_asset" | "measured" }>[],
-  unavailableAssetCount: number
+  assets: SettlementAssetGroupParityAsset[]
 ): SettlementAssetGroupParitySummary["statistics"] {
+  const samples = assets.filter(asset => asset.status === "reference_asset" || asset.status === "measured");
+  const unavailableAssetCount = assets.length - samples.length;
+  if (!samples.some(asset => asset.status === "measured")) {
+    return { status: "unavailable", sampleCount: 0, unavailableAssetCount,
+      parityDirection: "reference_asset_per_group_asset", reason: "no_measured_market_prices" };
+  }
   const sorted = [...samples].sort((left, right) => left.priceInReferenceAsset - right.priceInReferenceAsset);
   const min = sorted[0]!;
   const max = sorted[sorted.length - 1]!;
@@ -70,17 +75,13 @@ export function settlementAssetGroupParityResponseSummary(input: {
   referenceAssetSymbol: string;
   statistics: SettlementAssetGroupParitySummary["statistics"];
 }): SettlementAssetGroupParityResponseSummary {
-  return {
+  const { statistics } = input;
+  const common = {
     questionKind: "settlement_asset_group_parity",
-    conclusionKind: "parity_statistics_available",
     assetGroupId: input.assetGroupId,
     referenceAssetSymbol: input.referenceAssetSymbol,
     referenceAssetRole: "measurement_reference_not_settlement_choice",
-    parityDirection: input.statistics.parityDirection,
-    min: input.statistics.min,
-    max: input.statistics.max,
-    mean: input.statistics.mean,
-    median: input.statistics.median,
+    parityDirection: statistics.parityDirection,
     excludedFromConclusion: [
       "settlement_token_selection",
       "fiat_usd_cash_out",
@@ -92,7 +93,12 @@ export function settlementAssetGroupParityResponseSummary(input: {
       "profit_or_pnl",
       "cost_basis"
     ]
-  };
+  } satisfies Omit<SettlementAssetGroupParityResponseSummary, "conclusionKind">;
+  if (statistics.status === "unavailable") {
+    return { ...common, conclusionKind: "parity_statistics_unavailable", reason: statistics.reason };
+  }
+  return { ...common, conclusionKind: "parity_statistics_available",
+    min: statistics.min, max: statistics.max, mean: statistics.mean, median: statistics.median };
 }
 
 export function roundPriceInReferenceAsset(price: number): number {

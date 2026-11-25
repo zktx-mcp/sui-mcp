@@ -306,6 +306,21 @@ export type SettlementAssetGroupParityAsset =
       reason: string;
     });
 
+type ParityValues = {
+  min: { symbol: string; priceInReferenceAsset: number };
+  max: { symbol: string; priceInReferenceAsset: number };
+  mean: { priceInReferenceAsset: number };
+  median: { priceInReferenceAsset: number };
+};
+
+export type SettlementAssetGroupParityStatistics = {
+  unavailableAssetCount: number;
+  parityDirection: "reference_asset_per_group_asset";
+} & (
+  | ({ status: "available"; sampleCount: number; calculation: "computed_from_available_direct_deepbook_mid_price_snapshots" } & ParityValues)
+  | { status: "unavailable"; sampleCount: 0; reason: "no_measured_market_prices" }
+);
+
 export type SettlementAssetGroupParitySummary = {
   status: "ok";
   fetchedAt: string;
@@ -327,27 +342,7 @@ export type SettlementAssetGroupParitySummary = {
     };
   };
   assets: SettlementAssetGroupParityAsset[];
-  statistics: {
-    status: "available";
-    sampleCount: number;
-    unavailableAssetCount: number;
-    parityDirection: "reference_asset_per_group_asset";
-    calculation: "computed_from_available_direct_deepbook_mid_price_snapshots";
-    min: {
-      symbol: string;
-      priceInReferenceAsset: number;
-    };
-    max: {
-      symbol: string;
-      priceInReferenceAsset: number;
-    };
-    mean: {
-      priceInReferenceAsset: number;
-    };
-    median: {
-      priceInReferenceAsset: number;
-    };
-  };
+  statistics: SettlementAssetGroupParityStatistics;
   responseSummary: SettlementAssetGroupParityResponseSummary;
   unsupportedClaims: [
     "settlement_token_selection",
@@ -364,25 +359,10 @@ export type SettlementAssetGroupParitySummary = {
 
 export type SettlementAssetGroupParityResponseSummary = {
   questionKind: "settlement_asset_group_parity";
-  conclusionKind: "parity_statistics_available";
   assetGroupId: typeof SUI_USD_SETTLEMENT_ASSET_GROUP_ID;
   referenceAssetSymbol: string;
   referenceAssetRole: "measurement_reference_not_settlement_choice";
   parityDirection: "reference_asset_per_group_asset";
-  min: {
-    symbol: string;
-    priceInReferenceAsset: number;
-  };
-  max: {
-    symbol: string;
-    priceInReferenceAsset: number;
-  };
-  mean: {
-    priceInReferenceAsset: number;
-  };
-  median: {
-    priceInReferenceAsset: number;
-  };
   excludedFromConclusion: [
     "settlement_token_selection",
     "fiat_usd_cash_out",
@@ -394,7 +374,10 @@ export type SettlementAssetGroupParityResponseSummary = {
     "profit_or_pnl",
     "cost_basis"
   ];
-};
+} & (
+  | ({ conclusionKind: "parity_statistics_available" } & ParityValues)
+  | { conclusionKind: "parity_statistics_unavailable"; reason: "no_measured_market_prices" }
+);
 
 export type IntentEvidenceKind = "cover_payment_like_amount" | "summarize_settlement_asset_group_balance";
 export type IntentEvidenceDenomination = SettlementAssetGroupAlias;
@@ -455,11 +438,15 @@ export type IntentEvidenceQuantitySemantics = {
   ];
 };
 
-export type IntentEvidenceSettlementAssetBalance = SettlementAssetGroupAsset & {
+export type KnownSettlementAssetBalance = SettlementAssetGroupAsset & {
   currentRawAmount: string;
   currentDisplayAmount: string;
   walletBalanceEvidence: "current_wallet_coin_balance_snapshot";
 };
+
+export type IntentEvidenceSettlementAssetBalance =
+  | KnownSettlementAssetBalance
+  | (SettlementAssetGroupAsset & { walletBalanceEvidence: "unavailable" });
 
 export type IntentEvidenceAggregate =
   | {

@@ -279,7 +279,7 @@ Treat `quantitySemantics.kind: "settlement_asset_group_parity_snapshot"` as inte
 
 The returned `responseSummary.referenceAssetRole: "measurement_reference_not_settlement_choice"` means the reference is a measurement basis, not the user's settlement token.
 
-The summary exposes min, max, mean, and median parity from available direct DeepBook mid-price snapshots.
+When the summary reports `parity_statistics_available`, use its min, max, mean, and median. When it reports `parity_statistics_unavailable`, explain that no market price was measured. The reference asset alone establishes no market statistics.
 
 Do not treat parity output as fiat USD value, USDC/USD peg assumption, payment readiness, route recommendation, transaction building, signing readiness, P&L, or cost basis.
 
@@ -290,6 +290,8 @@ If it repeats, say the local coin metadata cache is unavailable and the wallet d
 Treat `details.operation` as diagnostic context, not as a user action field.
 
 When the user says only `$1000`, "1000 dollars", "stablecoins", or Korean dollar-word wording, do not choose USDC, USDT, source assets, or routes. Use the intent-evidence flow and ask only for `responseSummary.requiredUserChoices`.
+
+For intent evidence, report an individual balance as unknown when its row has `walletBalanceEvidence: "unavailable"`. Use the summary to answer coverage and total questions.
 
 For common USD-denominated evidence questions:
 

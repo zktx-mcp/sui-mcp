@@ -2,7 +2,7 @@ import type { UserAnswerUse } from "../evidence/userAnswerUse.js";
 import type {
   DeepbookAccountInventoryDetailStatus, DeepbookUsdcPriceHistorySummary, DeepbookUsdcPriceAtTimeSummary,
   IntentEvidenceResponseEvidence,
-  IntentEvidenceSettlementAssetCoverage
+  IntentEvidenceSettlementAssetCoverage, SettlementAssetGroupParityStatistics
 } from "./readServiceTypes.js";
 import {
   DEEPBOOK_ANSWER_USE,
@@ -90,13 +90,16 @@ export function walletClassificationUserAnswerUse(): UserAnswerUse {
   };
 }
 
-export function settlementAssetGroupParityUserAnswerUse(): UserAnswerUse {
+export function settlementAssetGroupParityUserAnswerUse(status: SettlementAssetGroupParityStatistics["status"]): UserAnswerUse {
+  const available = status === "available";
+  const numericClaims = [
+    "settlement_asset_group_internal_parity_statistics",
+    "highest_lowest_mean_or_median_parity_from_available_direct_deepbook_mid_price_snapshots"
+  ];
   return {
-    canAnswer: [
-      "settlement_asset_group_internal_parity_statistics",
-      "highest_lowest_mean_or_median_parity_from_available_direct_deepbook_mid_price_snapshots"
-    ],
+    canAnswer: available ? numericClaims : ["why_parity_statistics_are_unavailable"],
     cannotAnswer: [
+      ...(available ? [] : numericClaims),
       "settlement_token_selection",
       "payment_coverage_or_shortfall",
       "fiat_usd_cash_out",
@@ -111,10 +114,9 @@ export function settlementAssetGroupParityUserAnswerUse(): UserAnswerUse {
     ],
     answerFields: [
       "responseSummary",
-      "responseSummary.min",
-      "responseSummary.max",
-      "responseSummary.mean",
-      "responseSummary.median",
+      ...(available
+        ? ["responseSummary.min", "responseSummary.max", "responseSummary.mean", "responseSummary.median"]
+        : ["responseSummary.reason"]),
       "responseSummary.referenceAssetRole",
       "fetchedAt"
     ],

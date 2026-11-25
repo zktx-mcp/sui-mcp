@@ -67,6 +67,39 @@ describe("DeepBook USDC chart service", () => {
     expect(calls.filter(u => u.pathname.startsWith("/ohclv"))).toHaveLength(1);
   });
 
+  it("finishes overlapping named reads when independent catalog responses keep the selected market", async () => {
+    const started = Promise.withResolvers<void>(), registry = Promise.withResolvers<void>(), candles = Promise.withResolvers<void>();
+    const source = fakeSource();
+    const pools = officialPools();
+    let catalogs = 0, registryReads = 0, candleReads = 0;
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async () => {
+      catalogs++;
+      // The selected SUI market is registry-only in both catalogs.
+      return Response.json(catalogs === 1 ? [pools[1]] : [pools[1], pools[2]]);
+    });
+    const api = createDeepbookUsdcChartService({ indexer, source: {
+      ...source, async fetchPools() {
+        registryReads++; started.resolve(); await registry.promise;
+        return source.fetchPools();
+      }, async fetchCandles(query) {
+        candleReads++; await candles.promise; return source.fetchCandles(query);
+      }
+    } });
+    const query = prepared({ poolName: "SUI_USDC", interval: "15m" });
+    const first = api.readCandles(query);
+    await started.promise;
+    const second = api.readCandles(query);
+    // Drain the ready continuations before releasing each source, without a time threshold.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    registry.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    candles.resolve();
+    for (const result of await Promise.all([first, second])) {
+      expect(result).toMatchObject({ status: "ok", pair: { poolId: suiPoolId }, candles: officialCandles() });
+    }
+    expect([catalogs, registryReads, candleReads]).toEqual([2, 1, 1]);
+  });
+
   it("rejects a conflicting name across both catalogs and recovers after their identities agree", async () => {
     const registry = officialPools();
     let indexedId = suiPoolId, candleReads = 0;

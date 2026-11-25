@@ -415,10 +415,10 @@ The response includes:
 - each inspected group asset;
 - direct DeepBook pool evidence when available;
 - `priceInReferenceAsset` as reference asset per group asset;
-- `responseSummary` with minimum, maximum, mean, and median;
+- minimum, maximum, mean, and median in `responseSummary` when at least one market price was measured;
 - `referenceAssetRole: "measurement_reference_not_settlement_choice"`.
 
-Use `responseSummary` for questions about internal USD-denominated parity, highest/lowest stablecoin-like asset, or max/min/mean parity evidence.
+The reference asset has a defined relative price of 1. If no market price was measured, `statistics.status` is `unavailable`, `sampleCount` is 0, and `responseSummary.conclusionKind` is `parity_statistics_unavailable`. The asset rows retain their individual reasons. With a measured price, statistics include the reference asset and all measured assets. Use the statistics in `responseSummary` only when its conclusion is `parity_statistics_available`.
 
 This tool is not settlement-token choice, fiat USD cash-out, external market lookup, USDC/USD peg assumption, payment readiness, best route, route recommendation, transaction building, signing readiness, P&L, or cost basis.
 
@@ -430,7 +430,7 @@ Use it this way:
 - AssetGroup-total question: `intentKind: "summarize_settlement_asset_group_balance"` and `denomination: "dollar"` without a target amount.
 - Account scope: explicit public `account` or the saved Sui read address with a usable current wallet connection.
 
-For settlement-asset-only coverage, shortfall, and balance-total answers, use `responseSummary`.
+For settlement-asset-only coverage, shortfall, and balance-total answers, use `responseSummary`. In the supporting `balances` rows, `walletBalanceEvidence: "unavailable"` omits the raw and display amounts. A zero requires an observed zero balance or a complete scan confirming the asset is absent. An incomplete scan can still report individual amounts it observed consistently.
 
 The response also exposes `userAnswerUse.answerFields` with the response-specific answer path.
 

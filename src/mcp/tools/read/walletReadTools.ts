@@ -278,27 +278,25 @@ const settlementAssetGroupParityUnsupportedClaimsSchema = z.enum([
   "cost_basis"
 ]);
 
-const settlementAssetGroupParityResponseSummarySchema = z.object({
+const parityPrice = z.object({ priceInReferenceAsset: z.number().positive() });
+const parityExtreme = parityPrice.extend({ symbol: z.string() });
+const parityValues = { min: parityExtreme, max: parityExtreme, mean: parityPrice, median: parityPrice };
+const parityDirection = z.literal("reference_asset_per_group_asset");
+const noMeasuredPrices = z.literal("no_measured_market_prices");
+const parityStatisticsSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("available"), sampleCount: z.number().int().positive(),
+    unavailableAssetCount: z.number().int().nonnegative(), parityDirection,
+    calculation: z.literal("computed_from_available_direct_deepbook_mid_price_snapshots"), ...parityValues }).strict(),
+  z.object({ status: z.literal("unavailable"), sampleCount: z.literal(0),
+    unavailableAssetCount: z.number().int().nonnegative(), parityDirection, reason: noMeasuredPrices }).strict()
+]);
+
+const paritySummaryBase = z.object({
   questionKind: z.literal("settlement_asset_group_parity"),
-  conclusionKind: z.literal("parity_statistics_available"),
   assetGroupId: z.literal(SUI_USD_SETTLEMENT_ASSET_GROUP_ID),
   referenceAssetSymbol: z.string(),
   referenceAssetRole: z.literal("measurement_reference_not_settlement_choice"),
-  parityDirection: z.literal("reference_asset_per_group_asset"),
-  min: z.object({
-    symbol: z.string(),
-    priceInReferenceAsset: z.number().positive()
-  }),
-  max: z.object({
-    symbol: z.string(),
-    priceInReferenceAsset: z.number().positive()
-  }),
-  mean: z.object({
-    priceInReferenceAsset: z.number().positive()
-  }),
-  median: z.object({
-    priceInReferenceAsset: z.number().positive()
-  }),
+  parityDirection,
   excludedFromConclusion: z.tuple([
     z.literal("settlement_token_selection"),
     z.literal("fiat_usd_cash_out"),
@@ -311,6 +309,11 @@ const settlementAssetGroupParityResponseSummarySchema = z.object({
     z.literal("cost_basis")
   ])
 });
+
+const settlementAssetGroupParityResponseSummarySchema = z.discriminatedUnion("conclusionKind", [
+  paritySummaryBase.extend({ conclusionKind: z.literal("parity_statistics_available"), ...parityValues }).strict(),
+  paritySummaryBase.extend({ conclusionKind: z.literal("parity_statistics_unavailable"), reason: noMeasuredPrices }).strict()
+]);
 
 const intentEvidenceQuantitySemanticsSchema = z.object({
   kind: z.literal(INTENT_EVIDENCE_QUANTITY_KIND),
@@ -349,11 +352,14 @@ const intentEvidenceUnsupportedClaimsSchema = z.enum([
   "cost_basis"
 ]);
 
-const intentEvidenceAssetGroupBalanceSchema = settlementAssetGroupAssetSchema.extend({
-  currentRawAmount: z.string().regex(/^\d+$/),
-  currentDisplayAmount: z.string(),
-  walletBalanceEvidence: z.literal("current_wallet_coin_balance_snapshot")
-});
+const intentEvidenceAssetGroupBalanceSchema = z.discriminatedUnion("walletBalanceEvidence", [
+  settlementAssetGroupAssetSchema.extend({
+    walletBalanceEvidence: z.literal("current_wallet_coin_balance_snapshot"),
+    currentRawAmount: z.string().regex(/^\d+$/),
+    currentDisplayAmount: z.string()
+  }).strict(),
+  settlementAssetGroupAssetSchema.extend({ walletBalanceEvidence: z.literal("unavailable") }).strict()
+]);
 
 const intentEvidenceAggregateSchema = z.discriminatedUnion("status", [
   z.object({
@@ -704,27 +710,7 @@ export function registerWalletReadTools(server: McpServer, deps: McpServerDeps, 
           })
         }),
         assets: z.array(settlementAssetGroupParityAssetSchema),
-        statistics: z.object({
-          status: z.literal("available"),
-          sampleCount: z.number().int().nonnegative(),
-          unavailableAssetCount: z.number().int().nonnegative(),
-          parityDirection: z.literal("reference_asset_per_group_asset"),
-          calculation: z.literal("computed_from_available_direct_deepbook_mid_price_snapshots"),
-          min: z.object({
-            symbol: z.string(),
-            priceInReferenceAsset: z.number().positive()
-          }),
-          max: z.object({
-            symbol: z.string(),
-            priceInReferenceAsset: z.number().positive()
-          }),
-          mean: z.object({
-            priceInReferenceAsset: z.number().positive()
-          }),
-          median: z.object({
-            priceInReferenceAsset: z.number().positive()
-          })
-        }),
+        statistics: parityStatisticsSchema,
         responseSummary: settlementAssetGroupParityResponseSummarySchema,
         unsupportedClaims: z.array(settlementAssetGroupParityUnsupportedClaimsSchema)
       }),

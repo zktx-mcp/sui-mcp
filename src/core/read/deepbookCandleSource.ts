@@ -218,9 +218,13 @@ export function validatePoolCandles(candles: DeepbookTradeCandle[], input: Deepb
 // Name-based selectors require one market identity. Reject a name attached to
 // multiple identities, even if a selector matched just one of those rows.
 export function ambiguousMarketName(pools: DeepbookCandlePool[], name: string): boolean {
-  const identities = new Set(pools.filter((p) => p.pool_name === name).map((p) =>
-    JSON.stringify([p.pool_id, normalizeCoinType(p.base_asset_id), normalizeCoinType(p.quote_asset_id), p.base_asset_decimals, p.quote_asset_decimals])));
+  const identities = new Set(pools.filter((pool) => pool.pool_name === name).map(candleMarketIdentityKey));
   return identities.size > 1;
+}
+
+export function candleMarketIdentityKey(pool: DeepbookCandlePool): string {
+  return JSON.stringify([pool.pool_id, normalizeCoinType(pool.base_asset_id), normalizeCoinType(pool.quote_asset_id),
+    pool.base_asset_decimals, pool.quote_asset_decimals]);
 }
 
 export function isDeepbookCandleCanonicalUsdcPool(pool: DeepbookCandlePool): boolean {

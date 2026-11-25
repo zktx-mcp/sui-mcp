@@ -96,7 +96,6 @@ import {
   NOT_INSPECTED_ASSET_CLASSES,
   ReadServiceCacheError,
   ReadServiceInputError,
-  type ClassifiedWalletAsset,
   type DeepBookCoinRegistry,
   type DeepBookFactoryOptions,
   type DeepBookReadClient,
@@ -117,11 +116,11 @@ import {
   type IntentEvidenceInput,
   type IntentEvidenceSummary,
   type IntentEvidenceSettlementAssetBalance,
+  type KnownSettlementAssetBalance,
   type IntentEvidenceSettlementAssetCoverage,
   type IntentEvidenceSelectedTarget,
   type IntentEvidenceKind,
   type IntentEvidenceTargetAssetSelectionSource,
-  type UninspectedAssetClass,
   type QuoteDirection,
   type SettlementAssetGroup,
   type SettlementAssetGroupAsset,
@@ -139,14 +138,6 @@ import {
 
 export * from "./readServiceTypes.js";
 export { listDeepbookTokenRegistry } from "./deepbookRegistry.js";
-
-type WalletBalanceClassificationScan = {
-  classifiedAssets: ClassifiedWalletAsset[];
-  uninspectedAssetClasses: UninspectedAssetClass[];
-  inspectedBalancePages: number;
-  inspectedCoinBalanceCount: number;
-  blockedReason?: IntentEvidenceBlockedReason | undefined;
-};
 
 export class SuiReadService {
   readonly #client: SuiReadCoreClient;
@@ -270,24 +261,14 @@ export class SuiReadService {
     const assets = await Promise.all(
       assetGroup.includedAssets.map((asset) => this.#settlementAssetGroupParityAsset(asset, referenceAsset, deepbook))
     );
-    const samples = assets.filter(
-      (asset): asset is Extract<SettlementAssetGroupParityAsset, { status: "reference_asset" | "measured" }> =>
-        asset.status === "reference_asset" || asset.status === "measured"
-    );
-    if (samples.length === 0) {
-      throw new ReadServiceInputError("registry_miss", "No parity samples are available for the settlement asset group", {
-        assetGroupId: assetGroup.id,
-        referenceAssetSymbol: referenceAsset.symbol
-      });
-    }
-    const statistics = settlementAssetGroupParityStatistics(samples, assets.length - samples.length);
+    const statistics = settlementAssetGroupParityStatistics(assets);
 
     return {
       status: "ok",
       fetchedAt: this.#fetchedAt(),
       denomination,
       assetGroupId: assetGroup.id,
-      userAnswerUse: settlementAssetGroupParityUserAnswerUse(),
+      userAnswerUse: settlementAssetGroupParityUserAnswerUse(statistics.status),
       referenceAsset: {
         ...referenceAsset,
         role: "measurement_reference_not_settlement_choice"
@@ -444,12 +425,13 @@ export class SuiReadService {
     const acceptedSourceSet =
       acceptedSourceSymbols === undefined ? undefined : new Set(acceptedSourceSymbols);
 
-    const scan = await this.#scanWalletAssetClassificationPages(input.account);
-    const balances = this.#intentEvidenceAssetGroupBalances(assetGroup, scan.classifiedAssets);
+    const scan = await this.#accounts.scanBalancePages(input.account);
+    const balances = this.#intentEvidenceAssetGroupBalances(assetGroup, scan);
+    const knownBalances = balances.filter(balance => balance.walletBalanceEvidence === "current_wallet_coin_balance_snapshot");
     const commonDecimals = commonAssetGroupDecimals(assetGroup.includedAssets);
     const aggregate = this.#intentEvidenceAggregate({
       requiredDisplayAmount: input.requiredDisplayAmount,
-      balances,
+      balances: knownBalances,
       commonDecimals,
       blockedReason: scan.blockedReason
     });
@@ -468,7 +450,7 @@ export class SuiReadService {
           targetAsset,
           selectionSource: targetAssetSelectionSource,
           requiredDisplayAmount,
-          balances
+          balances: knownBalances
         });
       }
     }
@@ -477,7 +459,7 @@ export class SuiReadService {
       input.intentKind === "cover_payment_like_amount" && scan.blockedReason === undefined
         ? await this.#intentEvidenceCandidateConversions({
             targetAsset,
-            balances,
+            balances: knownBalances,
             acceptedSourceSet
           })
         : [];
@@ -543,9 +525,9 @@ export class SuiReadService {
         "profit_or_pnl",
         "cost_basis"
       ],
-      uninspectedAssetClasses: scan.uninspectedAssetClasses,
-      inspectedBalancePages: scan.inspectedBalancePages,
-      inspectedCoinBalanceCount: scan.inspectedCoinBalanceCount
+      uninspectedAssetClasses: NOT_INSPECTED_ASSET_CLASSES.map(value => ({ ...value })),
+      inspectedBalancePages: scan.pages,
+      inspectedCoinBalanceCount: scan.balances.length
     };
   }
 
@@ -888,19 +870,14 @@ export class SuiReadService {
 
   #intentEvidenceAssetGroupBalances(
     assetGroup: SettlementAssetGroup,
-    classifiedAssets: ClassifiedWalletAsset[]
+    scan: Awaited<ReturnType<AccountInventoryReader["scanBalancePages"]>>
   ): IntentEvidenceSettlementAssetBalance[] {
     return assetGroup.includedAssets.map((asset) => {
-      const matchingBalances = classifiedAssets
-        .filter((classified) => {
-          try {
-            return normalizeCoinType(classified.balance.coinType) === asset.coinType;
-          } catch {
-            return false;
-          }
-        })
-        .map((classified) => classified.balance.balance);
-      const currentRawAmount = sumRawAmounts(matchingBalances);
+      const observed = scan.observedBalances.get(asset.coinType);
+      if (!observed && (!scan.enumerationComplete || scan.conflictingTypes.has(asset.coinType))) {
+        return { ...asset, walletBalanceEvidence: "unavailable" };
+      }
+      const currentRawAmount = observed?.balance ?? "0";
       return {
         ...asset,
         currentRawAmount,
@@ -912,7 +889,7 @@ export class SuiReadService {
 
   #intentEvidenceAggregate(input: {
     requiredDisplayAmount: string | undefined;
-    balances: IntentEvidenceSettlementAssetBalance[];
+    balances: KnownSettlementAssetBalance[];
     commonDecimals: number | undefined;
     blockedReason: IntentEvidenceBlockedReason | undefined;
   }): IntentEvidenceSummary["aggregate"] {
@@ -1025,10 +1002,11 @@ export class SuiReadService {
     targetAsset: SettlementAssetGroupAsset;
     selectionSource: IntentEvidenceTargetAssetSelectionSource;
     requiredDisplayAmount: string;
-    balances: IntentEvidenceSettlementAssetBalance[];
+    balances: KnownSettlementAssetBalance[];
   }): IntentEvidenceSelectedTarget {
     const targetBalance = input.balances.find((balance) => balance.symbol === input.targetAsset.symbol);
-    const currentRawAmount = targetBalance?.currentRawAmount ?? "0";
+    if (!targetBalance) throw new Error("The selected asset requires a confirmed wallet balance.");
+    const currentRawAmount = targetBalance.currentRawAmount;
     const requiredRawAmount = this.#parseIntentDisplayAmount(
       input.requiredDisplayAmount,
       input.targetAsset.decimals,
@@ -1106,7 +1084,7 @@ export class SuiReadService {
 
   async #intentEvidenceCandidateConversions(input: {
     targetAsset: SettlementAssetGroupAsset | undefined;
-    balances: IntentEvidenceSettlementAssetBalance[];
+    balances: KnownSettlementAssetBalance[];
     acceptedSourceSet: Set<string> | undefined;
   }): Promise<IntentEvidenceCandidateConversion[]> {
     const candidates: IntentEvidenceCandidateConversion[] = [];
@@ -1306,13 +1284,6 @@ export class SuiReadService {
       throw error;
     }
     return unavailableUnit("metadata_not_found");
-  }
-
-  async #scanWalletAssetClassificationPages(account: string): Promise<WalletBalanceClassificationScan> {
-    const scan = await this.#accounts.scanBalancePages(account);
-    const classifiedAssets = scan.balances.map((balance) => classifyWalletBalance(balance, this.#deepbookCoins));
-    return { classifiedAssets, uninspectedAssetClasses: NOT_INSPECTED_ASSET_CLASSES.map((value) => ({ ...value })),
-      inspectedBalancePages: scan.pages, inspectedCoinBalanceCount: classifiedAssets.length, blockedReason: scan.blockedReason };
   }
 
   #cacheRecordFromMetadata(

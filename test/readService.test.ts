@@ -943,6 +943,20 @@ describe("SuiReadService", () => {
     );
   });
 
+  it("returns a reference but no parity statistics when every market price is unavailable", async () => {
+    const result = await createService({ deepbook: { async midPrice() { throw new Error("Unavailable"); } } })
+      .summarizeSettlementAssetGroupParity({ denomination: "USD", simulationSender: managerAddress });
+    expect(result.assets).toContainEqual(expect.objectContaining({ status: "reference_asset", priceInReferenceAsset: 1 }));
+    expect(result.statistics).toMatchObject({ status: "unavailable", sampleCount: 0 });
+    expect(result.responseSummary).toMatchObject({ conclusionKind: "parity_statistics_unavailable", reason: "no_measured_market_prices" });
+    for (const key of ["min", "max", "mean", "median"]) {
+      expect(result.statistics).not.toHaveProperty(key);
+      expect(result.responseSummary).not.toHaveProperty(key);
+      expect(result.userAnswerUse.answerFields).not.toContain("responseSummary." + key);
+    }
+    expect(result.userAnswerUse.canAnswer).not.toContain("settlement_asset_group_internal_parity_statistics");
+  });
+
   it("builds intent evidence for a natural-language dollar target across wallet balance pages", async () => {
     const usdc = (mainnetCoins as DeepBookCoinRegistry).USDC;
     if (!usdc) {
@@ -1679,6 +1693,11 @@ describe("SuiReadService", () => {
       denomination: "dollar",
       requiredDisplayAmount: "1"
     });
+    expect(repeatedCursor.balances.find(asset => asset.symbol === "USDC")).toMatchObject({ currentRawAmount: "400000000" });
+    const unknown = repeatedCursor.balances.find(asset => asset.symbol === "USDT");
+    expect(unknown?.walletBalanceEvidence).toBe("unavailable");
+    expect(unknown).not.toHaveProperty("currentRawAmount");
+    expect(unknown).not.toHaveProperty("currentDisplayAmount");
     expect(repeatedCursor).toMatchObject({
       blockedReasons: ["wallet_balance_pagination_did_not_advance"],
       aggregate: {

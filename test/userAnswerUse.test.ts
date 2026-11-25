@@ -372,7 +372,7 @@ describe("userAnswerUse field references", () => {
       },
       {
         name: "settlement asset group parity",
-        userAnswerUse: settlementAssetGroupParityUserAnswerUse(),
+        userAnswerUse: settlementAssetGroupParityUserAnswerUse("available"),
         sourceShape: {
           responseSummary: {
             min: {},
