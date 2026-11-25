@@ -4,6 +4,7 @@ import { chartInputSchema, offeredChartMarket } from "../src/core/read/readCardI
 import { mainnetCoins } from "@mysten/deepbook-v3";
 import { describe, expect, it, vi } from "vitest";
 import {
+  marketIdentity,
   DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
   DEEPBOOK_CANDLE_SOURCE_STATEMENT,
   DEEPBOOK_REGISTRY_SOURCE_STATEMENT,
@@ -99,6 +100,55 @@ describe("DeepBook USDC chart service", () => {
     }
     expect([catalogs, registryReads, candleReads]).toEqual([2, 1, 1]);
   });
+
+  it.each(["coin_metadata_unavailable", "conflicting_name"] as const)(
+    "closes only the affected name-bound chart on %s while the same exact-pool read continues", async (observation) => {
+      const source = fakeSource();
+      const [sui, deep] = officialPools() as [DeepbookCandlePool, DeepbookCandlePool];
+      const unread = { ...marketIdentity(sui), unavailableReason: "coin_metadata_unavailable" as const };
+      const gate = Promise.withResolvers<void>();
+      const preview = Promise.withResolvers<() => DeepbookUsdcChartResult>();
+      const exactPreview = Promise.withResolvers<() => DeepbookUsdcChartResult>();
+      let refreshed = false, candleReads = 0;
+      const api = createDeepbookUsdcChartService({
+        indexer: new DeepbookChartIndexer(() => new AbortController().signal, async () => Response.json([deep])),
+        source: { ...source,
+          async fetchPools(poolId) {
+            const catalog = await source.fetchPools();
+            if (poolId || !refreshed) return catalog;
+            if (observation === "coin_metadata_unavailable") return { ...catalog, pools: [deep], unavailablePools: [unread] };
+            return { ...catalog, pools: [sui, { ...deep, pool_name: sui.pool_name }] };
+          },
+          async fetchCandles(query, signal, onPreview) {
+            candleReads++;
+            const result = await source.fetchCandles(query, signal);
+            onPreview?.(() => ({ ...result, source: { ...result.source, indexedAt: result.candles[1]!.end } }));
+            await gate.promise;
+            return result;
+          }
+        }
+      });
+      const range = { interval: "15m", startTimeMs: 1782541800000, endTimeMs: 1782544500000 };
+      const named = api.readCandles(prepared({ ...range, poolName: sui.pool_name }), undefined, preview.resolve);
+      try {
+        const readNamedPreview = await preview.promise;
+        expect(readNamedPreview()).toMatchObject({ status: "preview", pair: { poolId: suiPoolId } });
+        const exact = api.readCandles(prepared({ ...range, poolId: suiPoolId }), undefined, exactPreview.resolve);
+        const readExactPreview = await exactPreview.promise;
+        refreshed = true;
+        await api.getPools();
+        const expected = observation === "coin_metadata_unavailable"
+          ? { status: "source_unavailable", reason: "pool_list_incomplete", candidates: [unread] }
+          : { status: "unsupported_pool", reason: "ambiguous_pool_name" };
+        expect(await named).toMatchObject(expected);
+        expect(readNamedPreview()).toMatchObject(expected);
+        expect(readExactPreview()).toMatchObject({ status: "preview", pair: { poolId: suiPoolId } });
+        gate.resolve();
+        expect(await exact).toMatchObject({ status: "ok", candles: officialCandles() });
+        expect(candleReads).toBe(1);
+      } finally { gate.resolve(); }
+    }
+  );
 
   it("rejects a conflicting name across both catalogs and recovers after their identities agree", async () => {
     const registry = officialPools();

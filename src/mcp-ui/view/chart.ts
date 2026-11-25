@@ -120,7 +120,9 @@ export const chartRenderer = {
     return { node: form, statusText: () => "Choose a trading pair.", selectionRecovery: { label: "Retry chart", retry: submitSelection } };
   },
   result(snapshot, _display?, _act?, _wallet?, context?) {
-    if (snapshot.state === "running" && (snapshot.data as { status?: string } | undefined)?.status !== "preview") {
+    const outcome = snapshot.data as { status?: string; reason?: string } | undefined;
+    const marketFailure = outcome?.status === "source_unavailable" || outcome?.status === "unsupported_pool";
+    if (snapshot.state === "running" && outcome?.status !== "preview" && !marketFailure) {
       const { poolName, poolId, interval, startTimeMs, endTimeMs } = snapshot.input;
       const node = element("div");
       node.append(element("p", "ui-note", [poolName ?? poolId, interval].filter(Boolean).join(" · ")));
@@ -147,7 +149,7 @@ export const chartRenderer = {
             market.unavailableReason && marketReadFailureLabels[market.unavailableReason]].filter(Boolean).join(" · ")));
         }
         details.body.append(element("p", undefined, `Reported reason: ${reason}`)); node.append(details.details);
-        return { node };
+        return { node, statusText: () => "" };
       }
       throw new Error("The saved chart does not contain verified pool-bound candles. Open a new chart.");
     }
@@ -295,7 +297,7 @@ export const chartRenderer = {
       const count = `${data.candleCount} ${preview ? "verified closed " : ""}${data.candleCount === 1 ? "candle" : "candles"}`;
       return preview ? `Showing ${count}. Reading older trades…` : `Loaded ${count}.`;
     }, displayRecovery: () => drawFailed && resizeFrame === undefined ? recovery : undefined, update: (next) => {
-      if (!preview || disposed || next.state !== "running") return false;
+      if (!preview || disposed || next.state !== "running" || (next.data as {status?: string} | undefined)?.status !== "preview") return false;
       const updated = chartResultSchema.parse(next.data);
       if (updated.status !== "preview" || updated.pair.poolId !== data.pair.poolId || updated.query.interval !== data.query.interval) return false;
       const visible = chart?.timeScale().getVisibleLogicalRange();

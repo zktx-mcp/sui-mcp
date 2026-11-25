@@ -165,6 +165,29 @@ type CatalogObservation = IndexedChartCatalog & {
 };
 type ChartDirectory = ReturnType<typeof chartMarkets> & { observedIndex?: CatalogObservation };
 
+type MarketFailure = Extract<DeepbookUsdcChartCandlesResponse, { status: "unsupported_pool" | "source_unavailable" }>;
+
+function marketFailure(
+  query: DeepbookUsdcChartCandlesQuery, catalog: ChartCatalog,
+  reason: "selected_market_changed" | "ambiguous_pool_name" | "pool_list_incomplete",
+  candidates?: MarketIdentity[], availablePoolNames: string[] = []
+): MarketFailure {
+  const facts = { query, source: catalog.source, ...(candidates ? { candidates } : {}), ...chartReadFacts("market_lookup") };
+  return reason === "pool_list_incomplete" ? { ...facts, status: "source_unavailable", reason }
+    : { ...facts, status: "unsupported_pool", reason, availablePoolNames };
+}
+
+// A registry row retains its object ID and coin types even when its metadata or object read failed.
+function missingBoundMarket(query: DeepbookUsdcChartCandlesQuery, catalog: ChartCatalog, expected: MarketIdentity): MarketFailure {
+  const row = catalog.unavailablePools?.find(candidate => candidate.poolId === expected.poolId);
+  if (row && row.unavailableReason !== "pool_identity_mismatch" &&
+      normalizeCoinType(row.baseCoinType) === normalizeCoinType(expected.baseCoinType) &&
+      normalizeCoinType(row.quoteCoinType) === normalizeCoinType(expected.quoteCoinType)) {
+    return marketFailure(query, catalog, "pool_list_incomplete", [row]);
+  }
+  return marketFailure(query, catalog, "selected_market_changed", row ? [row] : undefined);
+}
+
 type CacheEntry<T> = {
   expiresAtMs: number;
   value: T;
@@ -280,7 +303,19 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     return index ? { ...directory, observedIndex: index } : directory;
   }
 
+  // Only unfinished, name-bound card reads follow market observations. An exact-ID
+  // reader can keep consuming the same candle request after a name becomes disputed.
+  const pendingSelections = new Set<() => void>();
+
   async function marketsFor(name?: string, selected?: Selection): Promise<ChartDirectory> {
+    try {
+      return await loadMarkets(name, selected);
+    } finally {
+      for (const check of pendingSelections) check();
+    }
+  }
+
+  async function loadMarkets(name?: string, selected?: Selection): Promise<ChartDirectory> {
     const registryOffer = selected?.catalogEndpoint === "pool_registry";
     const registry = () => selected && source
       ? source.fetchPools(selected.poolId, true)
@@ -412,41 +447,30 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     const indexed = !directId && selected?.catalogEndpoint !== "pool_registry" && directory.indexedNames.has(marketName);
     const observed = directory.observedIndex;
     const revision = observed?.markets.get(marketName)?.revision;
-    const bindingChanged = () => {
-      if (!observed) return false;
-      if (!lastCatalog) return true;
-      const latest = lastCatalog.value.markets.get(marketName);
-      if (revision === latest?.revision) return false;
-      // A registry offer remains bound to its own source if the index starts
-      // or stops listing that same market while the card is open.
-      if (selected?.catalogEndpoint === "pool_registry" && pool) {
-        return latest !== undefined && latest.identity !== candleMarketIdentityKey(pool);
-      }
-      return true;
-    };
-    const changedMarket = (): DeepbookUsdcChartCandlesResponse => ({
-      status: "unsupported_pool", reason: "selected_market_changed", query,
-      availablePoolNames: [], source: directory.source, ...chartReadFacts("market_lookup")
-    });
     const conflict = !directId && directory.conflicts.get(marketName);
-    if (selected && (!pool || selected.poolId !== pool.pool_id || pool.active === false || conflict ||
-        (selected.catalogEndpoint === "get_pools" && !indexed))) {
-      // Retain a current registry observation that establishes a conflict.
-      // Even a subsequently complete index must reconcile that disagreement.
-      if (!conflict) invalidateRegistryLists();
-      return { status: "unsupported_pool", reason: "selected_market_changed", query,
-        ...(conflict ? { candidates: conflict } : {}), availablePoolNames: [], source: directory.source, ...chartReadFacts("market_lookup") };
+    const conflictReason = selected ? "selected_market_changed" : "ambiguous_pool_name";
+    if (conflict) return marketFailure(query, directory, conflictReason, conflict,
+      selected ? [] : pools.map(candidate => candidate.pool_name));
+    if (selected && !pool) {
+      const failure = missingBoundMarket(query, directory, { poolId: selected.poolId,
+        baseCoinType: selected.baseAsset.coinType, quoteCoinType: selected.quoteAsset.coinType });
+      if (failure.status === "unsupported_pool") invalidateRegistryLists();
+      return failure;
     }
-    const ambiguous = !!conflict;
-    const matches = conflict || pools.filter(candidate => candidate.active !== false && candidate.pool_name === query.poolName).map(marketIdentity);
-    if (!indexed && !query.poolId && !ambiguous && directory.unavailablePools?.length) {
-      return {status:"source_unavailable", reason:"pool_list_incomplete", candidates:[...matches,...directory.unavailablePools], query, ...chartReadFacts("market_lookup")};
+    if (selected && (selected.poolId !== pool?.pool_id || pool.active === false ||
+        selected.catalogEndpoint === "get_pools" && !indexed)) {
+      invalidateRegistryLists();
+      return marketFailure(query, directory, "selected_market_changed");
     }
-    if (pool === undefined || ambiguous) {
+    const matches = pools.filter(candidate => candidate.active !== false && candidate.pool_name === query.poolName).map(marketIdentity);
+    if (!indexed && !query.poolId && directory.unavailablePools?.length) {
+      return marketFailure(query, directory, "pool_list_incomplete", [...matches, ...directory.unavailablePools]);
+    }
+    if (pool === undefined) {
       return {
         status: "unsupported_pool",
         candidates: matches,
-        reason: ambiguous ? "ambiguous_pool_name" : "pool_not_in_mainnet_usdc_markets",
+        reason: "pool_not_in_mainnet_usdc_markets",
         query,
         availablePoolNames: pools.map((candidate) => candidate.pool_name),
         source: directory.source,
@@ -454,48 +478,102 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       };
     }
 
-    if (bindingChanged()) return changedMarket();
     const pair = deepbookUsdcPriceHistoryPairFromPool(pool);
     if ((named && pool.pool_name !== query.poolName) || selected && ((selected.poolName !== undefined && selected.poolName !== pool.pool_name) || selected.baseAsset.coinType !== pair.baseAsset.coinType ||
         selected.quoteAsset.coinType !== pair.quoteAsset.coinType)) {
-      return { status: "unsupported_pool", reason: "selected_market_changed", query,
-        availablePoolNames: pools.map(p => p.pool_name), source: directory.source, ...chartReadFacts("market_lookup") };
+      return marketFailure(query, directory, "selected_market_changed", undefined, pools.map(candidate => candidate.pool_name));
     }
-    const allAtSelection = poolCache.get("all");
-    const menuAtSelection = poolCache.get("menu");
-    let candleResult: CandleList | IndexedChartResult;
-    const marketQuery = { ...query, poolName: pool.pool_name };
-    try {
-      if (!indexed && !query.poolId && !selected && source?.currentPoolId &&
-          await source.currentPoolId(pool.base_asset_id, pool.quote_asset_id) !== pool.pool_id) {
-        throw new DeepbookCandleSourceError("market_changed", "The registered pool changed.");
+    let checkedAll = poolCache.get("all");
+    let checkedMenu = poolCache.get("menu");
+    const identity = marketIdentity(pool);
+    const registryOnly = selected?.catalogEndpoint === "pool_registry";
+    const checkSelection = (): MarketFailure | undefined => {
+      if (directId) return;
+      const pendingConflict = unresolved.get(marketName);
+      if (pendingConflict) return marketFailure(query, directory, conflictReason, pendingConflict);
+      if (observed) {
+        const latest = lastCatalog?.value.markets.get(marketName);
+        // A registry offer keeps its source if the index starts or stops listing the same pool.
+        if (!lastCatalog || (revision !== latest?.revision &&
+            (!registryOnly || latest && latest.identity !== candleMarketIdentityKey(pool)))) {
+          return marketFailure(query, directory, "selected_market_changed");
+        }
       }
+      const all = poolCache.get("all"), menu = poolCache.get("menu");
+      if (checkedAll === all && (checkedMenu === menu || !curatedChartCoinTypes.includes(pair.baseAsset.coinType))) return;
+      checkedAll = all;
+      checkedMenu = menu;
+      const registry = observedRegistry();
+      if (!registry) return marketFailure(query, directory, "pool_list_incomplete");
+      const latest = chartMarkets(registry, lastCatalog?.value, registryOnly);
+      const conflicts = latest.conflicts.get(marketName);
+      if (conflicts) return marketFailure(query, latest, conflictReason, conflicts);
+      const current = latest.pools.find(candidate => candidate.pool_name === marketName);
+      if (!current) return missingBoundMarket(query, latest, identity);
+      if (current.active === false || candleMarketIdentityKey(current) !== candleMarketIdentityKey(pool) ||
+          latest.indexedNames.has(marketName) !== indexed) return marketFailure(query, latest, "selected_market_changed");
+    };
+
+    const marketQuery = { ...query, poolName: pool.pool_name };
+    let failure: MarketFailure | undefined;
+    const invalidated = Promise.withResolvers<MarketFailure>();
+    const recheck = () => {
+      failure ??= checkSelection();
+      if (failure) invalidated.resolve(failure);
+      return failure;
+    };
+    if (!directId) pendingSelections.add(recheck);
+    let candleResult: CandleList | IndexedChartResult;
+    let releaseScan: (() => void) | undefined;
+    try {
+      const initialIssue = recheck();
+      if (initialIssue) return initialIssue;
+      if (!indexed && !query.poolId && !selected && source?.currentPoolId) {
+        const currentId = await source.currentPoolId(pool.base_asset_id, pool.quote_asset_id);
+        const issue = recheck();
+        if (issue) return issue;
+        if (currentId !== pool.pool_id) throw new DeepbookCandleSourceError("market_changed", "The registered pool changed.");
+      }
+
+      let read: Promise<CandleList | IndexedChartResult>;
       if (indexed && options.indexer) {
         const window = candleQueryWindow(marketQuery, now().getTime());
         const key = JSON.stringify([revision, pool.pool_name, pool.pool_id, pair.baseAsset.coinType, pair.quoteAsset.coinType,
           query.interval, query.startTimeMs, query.endTimeMs, window.firstBucket, window.lastBucket, query.limit]);
-        let read = indexedReads.get(key);
-        if (!read) {
-          read = options.indexer.fetchCandles(marketQuery, pool.pool_id, window).finally(() => {
-            if (indexedReads.get(key) === read) indexedReads.delete(key);
+        let shared = indexedReads.get(key);
+        if (!shared) {
+          shared = options.indexer.fetchCandles(marketQuery, pool.pool_id, window).finally(() => {
+            if (indexedReads.get(key) === shared) indexedReads.delete(key);
           });
-          indexedReads.set(key, read);
+          indexedReads.set(key, shared);
         }
-        candleResult = await read;
-        options.assertCurrent?.();
+        read = shared;
       } else {
-        candleResult = await readChainCandles(marketQuery, pool, !!query.poolId && !selected, onPreview && (preview => {
+        const scan = readChainCandles(marketQuery, pool, directId, onPreview && (preview => {
+          if (failure) return;
           onPreview(() => {
+            const issue = recheck();
+            if (issue) return issue;
             const { candles, source } = preview();
             return { status: "preview", query: marketQuery, pair, candles, candleCount: candles.length, source, ...chartCandleFacts() };
           });
         }));
+        read = scan.result;
+        releaseScan = scan.release;
       }
+      const result = directId ? await read : await Promise.race([read, invalidated.promise]);
+      options.assertCurrent?.();
+      if ("status" in result) return result;
+      const issue = recheck();
+      if (issue) return issue;
+      candleResult = result;
     } catch (error) {
+      const issue = recheck();
+      if (issue) return issue;
       if (error instanceof DeepbookCandleSourceError && error.reason === "market_changed") {
         invalidateRegistryLists();
-        return { status: "unsupported_pool", reason: "selected_market_changed", query,
-          availablePoolNames: pools.filter(p => p.active !== false).map(p => p.pool_name), source: directory.source, ...chartReadFacts("market_lookup") };
+        return marketFailure(query, directory, "selected_market_changed", undefined,
+          pools.filter(candidate => candidate.active !== false).map(candidate => candidate.pool_name));
       }
       return {
         status: "source_unavailable",
@@ -505,23 +583,11 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
         source: directory.source,
         ...chartReadFacts(indexed ? "indexer_candles" : "onchain_candles")
       };
+    } finally {
+      pendingSelections.delete(recheck);
+      releaseScan?.();
     }
 
-    const pendingConflict = !directId && unresolved.get(marketName);
-    if (pendingConflict) {
-      return { status: "unsupported_pool", reason: selected ? "selected_market_changed" : "ambiguous_pool_name",
-        candidates: pendingConflict, availablePoolNames: [], query, source: directory.source, ...chartReadFacts("market_lookup") };
-    }
-    if (bindingChanged()) return changedMarket();
-    if (!directId && (allAtSelection !== poolCache.get("all") ||
-        menuAtSelection !== poolCache.get("menu") && curatedChartCoinTypes.includes(pair.baseAsset.coinType))) {
-      const registry = observedRegistry();
-      if (!registry) return changedMarket();
-      const latest = chartMarkets(registry, lastCatalog?.value, selected?.catalogEndpoint === "pool_registry");
-      const current = latest.pools.find(candidate => candidate.pool_name === marketName);
-      if (latest.conflicts.has(marketName) || !current || candleMarketIdentityKey(current) !== candleMarketIdentityKey(pool) ||
-          latest.indexedNames.has(marketName) !== indexed) return changedMarket();
-    }
     const partial = "coverage" in candleResult.source && candleResult.source.coverage === "partial_tail";
     if (candleResult.candles.length === 0 && !partial) {
       return {
@@ -550,7 +616,13 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
   type CandleList = Awaited<ReturnType<DeepbookCandleSourceClient["fetchCandles"]>>;
   const fetchingPools = new Map<string, Promise<PoolList>>();
   type Listener = (preview: ReadCandlePreview) => void;
-  type Flight = {result: Promise<CandleList>; listeners:Set<Listener>; preview?:ReadCandlePreview};
+  type Flight = {
+    result: Promise<CandleList>;
+    controller: AbortController;
+    readers: number;
+    listeners: Set<Listener>;
+    preview?: ReadCandlePreview;
+  };
   const fetchingCandles = new Map<string, Flight>();
   async function fetchPoolsCached(menu = false, fresh = false): Promise<PoolList> {
     if (!source) throw new Error("Market source unavailable.");
@@ -571,7 +643,7 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     fetchingPools.set(key,pending);
     return pending;
   }
-  async function readChainCandles(query: DeepbookUsdcChartCandlesQuery, market: DeepbookCandlePool, directId: boolean, listener?: Listener): Promise<CandleList> {
+  function readChainCandles(query: DeepbookUsdcChartCandlesQuery, market: DeepbookCandlePool, directId: boolean, listener?: Listener) {
     if (!source) throw new Error("Market source unavailable.");
     // Selection and current-registration checks precede sharing. Only values that
     // determine the verified OHLCV result belong to its identity.
@@ -582,14 +654,23 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       market.quote_asset_id, market.quote_asset_decimals, query.interval, query.startTimeMs,
       query.endTimeMs, query.endMode, window.firstBucket, window.lastBucket, query.limit
     ]);
-    const current = fetchingCandles.get(key);
-    if (current) {
-      if (listener && current.preview) listener(current.preview);
-      else if (listener) current.listeners.add(listener);
-      return current.result;
+    function join(flight: Flight) {
+      if (listener && flight.preview) listener(flight.preview);
+      else if (listener) flight.listeners.add(listener);
+      flight.readers++;
+      return { result: flight.result, release() {
+        if (listener) flight.listeners.delete(listener);
+        if (--flight.readers === 0 && fetchingCandles.get(key) === flight) {
+          fetchingCandles.delete(key);
+          flight.controller.abort();
+        }
+      } };
     }
-    const listeners = new Set(listener ? [listener] : []);
-    const pending = Promise.resolve().then(() => source.fetchCandles({ ...query, market, poolId: market.pool_id, directId }, undefined, preview => {
+    const current = fetchingCandles.get(key);
+    if (current) return join(current);
+    const controller = new AbortController();
+    const listeners = new Set<Listener>();
+    const pending = Promise.resolve().then(() => source.fetchCandles({ ...query, market, poolId: market.pool_id, directId }, controller.signal, preview => {
       if (fetchingCandles.get(key) !== flight || flight.preview) return;
       options.assertCurrent?.();
       let verified: CandleList | undefined;
@@ -614,9 +695,9 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       options.assertCurrent?.();
       return value;
     }).finally(() => { if (fetchingCandles.get(key) === flight) fetchingCandles.delete(key); });
-    const flight: Flight = {result:pending, listeners};
+    const flight: Flight = { result: pending, listeners, controller, readers: 0 };
     fetchingCandles.set(key, flight);
-    return pending;
+    return join(flight);
   }
   return { getPools, readCandles, clearCache: () => {
     catalogFlight = undefined; lastCatalog = undefined; indexedReads.clear();

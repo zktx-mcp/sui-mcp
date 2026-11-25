@@ -598,9 +598,9 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       ...(settings && object(snapshot.data)?.download ? { download: { ...object(object(snapshot.data)?.download), remainingMs: undefined } } : {}) } : undefined;
     const settingsProgress = settings && commandFlight?.phase === "sending" && confirmation.status === "confirmed"
       ? settingsCommandProgress(commandFlight.basis, snapshot, commandFlight.input) : undefined;
-    const chartPreview = snapshot.kind === "chart" && snapshot.state === "running" && object(snapshot.data)?.status === "preview";
-    const previewCount = chartPreview ? object(snapshot.data)?.candleCount : undefined;
-    const key = `${previewCount}:${automation === "paused"}:${JSON.stringify(settingsProgress)}:${snapshot.revision}:${reference !== undefined}:${display !== undefined}:${walletDisplay !== undefined}:${JSON.stringify(projection)}`;
+    const chartProgress = snapshot.kind === "chart" && snapshot.state === "running" ? object(snapshot.data) : undefined;
+    const chartUpdate = chartProgress?.status === "preview" ? chartProgress.candleCount : chartProgress?.reason;
+    const key = `${chartUpdate}:${automation === "paused"}:${JSON.stringify(settingsProgress)}:${snapshot.revision}:${reference !== undefined}:${display !== undefined}:${walletDisplay !== undefined}:${JSON.stringify(projection)}`;
     if (key === renderedKey || (key === attemptedKey && !retryFailed)) return;
     attemptedKey = key;
     const previousNodes = [...content.children];
