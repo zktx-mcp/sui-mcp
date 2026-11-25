@@ -586,6 +586,8 @@ export async function* historicalPoolFills(
 
 // Page and transport boundaries can split a UTC bucket. Complete that bucket
 // before emitting it, retaining only its extrema, volume and boundary transactions.
+type SegmentBoundary = { bar: RawCandle; newestTime: string; oldestTime: string };
+
 export async function* scanPoolBars(
   reader: MarketGraphqlReader,
   source: AsyncIterable<RawFill>,
@@ -594,9 +596,11 @@ export async function* scanPoolBars(
   size: number,
   signal: AbortSignal,
   interval: DeepbookCandleInterval,
+  boundary?: (edge: SegmentBoundary) => void,
 ): AsyncGenerator<RawCandle> {
   let height = until;
   let current: RawFill["checkpoint"] | undefined;
+  let newestTime: string | undefined;
   const fills = new Map<string, RawFill>();
   let bar: RawCandle | undefined;
   let earliest: RawFill[] = [],
@@ -644,6 +648,7 @@ export async function* scanPoolBars(
   }
   for await (const fill of source) {
     const cp = fill.checkpoint;
+    newestTime ??= cp.timestamp;
     if (
       cp.sequenceNumber < from ||
       cp.sequenceNumber >= until ||
@@ -672,5 +677,61 @@ export async function* scanPoolBars(
     fills.set(key, fill);
   }
   consumeCheckpoint();
-  if (bar) yield await completeBucket(bar);
+  if (bar) {
+    const tail = await completeBucket(bar);
+    if (boundary) boundary({bar: tail, newestTime: newestTime!, oldestTime: current!.timestamp});
+    else yield tail;
+  }
+}
+
+// Each checkpoint belongs to one reader. Only the oldest bucket of the newer
+// segment can continue into the older one. Keep it private until both sides
+// have established coverage and transaction order.
+export async function* scanSplitPoolBars(
+  reader: MarketGraphqlReader,
+  fills: (from: number, until: number, signal: AbortSignal) => AsyncIterable<RawFill>,
+  from: number, until: number, size: number, owner: AbortSignal,
+  interval: DeepbookCandleInterval, indexedAt: number,
+): AsyncGenerator<RawCandle> {
+  const mid = from + Math.floor((until - from) / 2);
+  const controller = new AbortController();
+  const signal = AbortSignal.any([owner, controller.signal]);
+  let newerEdge: SegmentBoundary | undefined, olderEdge: SegmentBoundary | undefined;
+  let olderJob: Promise<void> | undefined;
+  const older: RawCandle[] = [];
+  const startOlder = () => {
+    olderJob ??= (async () => {
+      for await (const bar of scanPoolBars(reader, fills(from, mid, signal), from, mid, size, signal, interval, edge => { olderEdge = edge; })) {
+        older.push(bar);
+      }
+      if (olderEdge) older.push(olderEdge.bar);
+    })().catch(error => { controller.abort(error); });
+    return olderJob;
+  };
+  try {
+    for await (const bar of scanPoolBars(reader, fills(mid, until, signal), mid, until, size, signal, interval, edge => { newerEdge = edge; })) {
+      yield bar;
+      // Give the first closed candle the full connection before overlapping
+      // the remaining work. An empty newer segment still starts the older one.
+      if (bar.start + deepbookCandleIntervalDurationMs(interval) <= indexedAt + 1) startOlder();
+    }
+    await startOlder();
+    signal.throwIfAborted();
+    const adjacent = older[0];
+    if (newerEdge) {
+      if (olderEdge && Date.parse(olderEdge.newestTime) > Date.parse(newerEdge.oldestTime))
+        throw new Error("Checkpoint times conflict across the split.");
+      const recent = newerEdge.bar;
+      if (adjacent?.start === recent.start) {
+        older[0] = { start: recent.start, open: adjacent.open, close: recent.close,
+          high: BigInt(adjacent.high) > BigInt(recent.high) ? adjacent.high : recent.high,
+          low: BigInt(adjacent.low) < BigInt(recent.low) ? adjacent.low : recent.low,
+          volume: String(BigInt(adjacent.volume) + BigInt(recent.volume)), fills: adjacent.fills + recent.fills };
+      } else yield recent;
+    }
+    yield* older;
+  } finally {
+    controller.abort();
+    await olderJob;
+  }
 }

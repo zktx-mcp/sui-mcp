@@ -113,9 +113,20 @@ export const chartRenderer = {
     }
     form.addEventListener("submit", (event) => { event.preventDefault(); submitSelection(); });
     for (const control of [pool, interval, start, end]) control.addEventListener("change", submitSelection);
-    return { node: form, selectionRecovery: { label: "Retry chart", retry: submitSelection } };
+    return { node: form, statusText: () => "Choose a trading pair.", selectionRecovery: { label: "Retry chart", retry: submitSelection } };
   },
-  result(snapshot) {
+  result(snapshot, _display?, _act?, _wallet?, context?) {
+    if (snapshot.state === "running" && (snapshot.data as { status?: string } | undefined)?.status !== "preview") {
+      const { poolName, poolId, interval, startTimeMs, endTimeMs } = snapshot.input;
+      const node = element("div");
+      node.append(element("p", "ui-note", [poolName ?? poolId, interval].filter(Boolean).join(" · ")));
+      const range = {startTimeMs: typeof startTimeMs === "number" ? startTimeMs : undefined,
+        endTimeMs: typeof endTimeMs === "number" ? endTimeMs : undefined};
+      const period = range.startTimeMs === undefined ? range.endTimeMs === undefined
+        ? "Last 7 days · UTC" : `Seven days ending ${formatUtc(range.endTimeMs)}` : chartQueryText(range);
+      node.append(element("p", "ui-note", period), element("div", "chart-status-slot"));
+      return { node };
+    }
     const parsed = chartResultSchema.safeParse(snapshot.data);
     if (!parsed.success) {
       const data = snapshot.data as { status?: unknown; reason?: unknown } | undefined;
@@ -155,30 +166,32 @@ export const chartRenderer = {
       new Date(value).toJSON() ?? formatUtc(value);
     detail.body.append(element("p", undefined,
       `Start: ${exactTime(range.startTimeMs)} · End: ${exactTime(range.endTimeMs)}`));
-    if (data.status === "partial_coverage") node.append(element("p", "ui-note", "The source has verified only the period before " + data.source.coveredUntil + "."));
+    if (data.status === "partial_coverage") node.append(element("p", "ui-note", data.source.indexedAt
+      ? `Data verified through ${data.source.indexedAt}.`
+      : `Data verified before ${data.source.coveredUntil!}.`));
     if (data.status !== "preview" && data.candleCount >= data.query.limit) node.append(element("p", "ui-note", `This view is limited to ${data.query.limit} candles; the requested period may contain more.`));
     const boundary = element("p", "ui-note", `${t.chart.boundaryUsdc} ${t.chart.boundaryScope} ${t.chart.source}`);
     const attribution = link(t.chart.library, "https://www.tradingview.com/");
     attribution.target = "_blank"; attribution.rel = "noopener noreferrer";
     boundary.append(` ${t.chart.renderedWith} `, attribution, ".");
-    if (data.candles.length === 0) { detail.body.append(boundary); node.append(element("p", "ui-note", data.status === "partial_coverage" ? "No fills in the verified portion." : "No candles returned for this range."), detail.details); return { node }; }
+    if (data.candles.length === 0) { detail.body.append(boundary); node.append(detail.details); return {
+      node, statusText: () => data.status === "partial_coverage" ? "No trades in the verified portion." : "No trades in the selected period."
+    }; }
     const container = element("div", "card-chart"); const legend = element("p", "ui-note");
     const last = data.candles.at(-1)!;
     const describe = (candle: ChartCandle) => `${formatUtc(candle.start)} · Open ${candle.open} · High ${candle.high} · Low ${candle.low} · Close ${candle.close} · Volume ${candle.volume}`;
-    const progress = data.status === "preview" ? element("p", "ui-note") : undefined;
-    const progressText = () => `Showing ${data.candleCount} verified closed ${data.candleCount === 1 ? "candle" : "candles"}. Reading older trades…`;
-    if (progress) { progress.textContent = progressText(); node.append(progress); }
+    const preview = data.status === "preview";
     if (data.source.indexedAt && data.source.coveredUntil && last.timestampMs <= Date.parse(data.source.indexedAt) &&
         Date.parse(data.source.indexedAt) + 1 === Date.parse(data.source.coveredUntil) &&
         last.end && Date.parse(last.end) > Date.parse(data.source.coveredUntil)) {
-      node.append(element("p", "ui-note", "The last candle is forming. Its values include fills through " + data.source.indexedAt + "."));
+      node.append(element("p", "ui-note", "The latest candle is still forming."));
     }
     legend.textContent = describe(last); detail.body.append(legend, boundary); node.append(container, detail.details);
     let chart: ReturnType<typeof createChart> | undefined;
     let resizeObserver: ResizeObserver | undefined;
     let themeObserver: MutationObserver | undefined;
-    let resizeFrame: number | undefined;
-    let mounted = false, disposed = false;
+    let resizeFrame: number | undefined, drawnFrame: number | undefined;
+    let mounted = false, disposed = false, drawn = false, drawFailed = false;
     let updateSeries: ((fit: boolean) => void) | undefined;
     let previousWidth = 0, previousHeight = 0;
     const theme = () => {
@@ -191,6 +204,7 @@ export const chartRenderer = {
       if (disposed) return;
       disposed = true; resizeObserver?.disconnect(); themeObserver?.disconnect(); chart?.remove();
       if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
+      if (drawnFrame !== undefined) cancelAnimationFrame(drawnFrame);
     };
     const resize = () => {
       if (disposed || !container.isConnected) return;
@@ -211,7 +225,7 @@ export const chartRenderer = {
           const byTime = new Map<number, ChartCandle>();
           const timeScale = chart.timeScale();
           updateSeries = (fit) => {
-            const display = chartSeriesData(data.candles, progress ? undefined : data.query);
+            const display = chartSeriesData(data.candles, preview ? undefined : data.query);
             series.setData(display.prices); volume.setData(display.volumes);
             byTime.clear();
             for (const candle of data.candles) byTime.set(candleTime(candle), candle);
@@ -226,12 +240,21 @@ export const chartRenderer = {
           themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
         }
         previousWidth = width; previousHeight = height;
+        if (!drawn && drawnFrame === undefined) {
+          drawnFrame = requestAnimationFrame(() => {
+            drawnFrame = undefined;
+            if (!disposed && !drawFailed) { drawn = true; context?.onDisplayChange?.(); }
+          });
+        }
       } catch {
-        dispose();
-        container.replaceChildren(element("p", "ui-error", "The chart could not be displayed. The saved query and source data are unchanged."));
+        drawFailed = true;
+        if (drawnFrame !== undefined) { cancelAnimationFrame(drawnFrame); drawnFrame = undefined; }
+        resizeObserver?.disconnect(); themeObserver?.disconnect(); chart?.remove(); chart = undefined;
+        updateSeries = undefined; drawn = false; previousWidth = 0; previousHeight = 0;
+        queueMicrotask(() => { if (!disposed) context?.onDisplayChange?.(); });
       }
     };
-    return { node, mount: () => {
+    const mount = () => {
       if (mounted || disposed) return;
       mounted = true;
       // Own sizing instead of autoSize so later zero-size notifications cannot
@@ -244,15 +267,21 @@ export const chartRenderer = {
       });
       resizeObserver.observe(container);
       resize();
-    }, update: (next) => {
-      if (!progress || disposed || next.state !== "running") return false;
+    };
+    return { node, mount, statusText: () => {
+      if (!drawn) return "Drawing chart…";
+      const count = `${data.candleCount} ${preview ? "verified closed " : ""}${data.candleCount === 1 ? "candle" : "candles"}`;
+      return preview ? `Showing ${count}. Reading older trades…` : `Loaded ${count}.`;
+    }, displayRecovery: () => drawFailed ? {message: "Couldn’t display the chart.", retry: () => {
+      drawFailed = false; mounted = false; mount();
+    }} : undefined, update: (next) => {
+      if (!preview || disposed || next.state !== "running") return false;
       const updated = chartResultSchema.parse(next.data);
       if (updated.status !== "preview" || updated.pair.poolId !== data.pair.poolId || updated.query.interval !== data.query.interval) return false;
       const visible = chart?.timeScale().getVisibleLogicalRange();
       const fit = !visible || (visible.from <= 0 && visible.to >= data.candleCount - 1);
       data = updated;
       updateSeries?.(fit);
-      progress.textContent = progressText();
       checked.replaceChildren(`${t.common.retrievedAt}: `, timeValue(data.source.fetchedAt));
       return true;
     }, dispose };

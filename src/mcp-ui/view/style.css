@@ -8,5 +8,13 @@ body { color: var(--ui-text); background: var(--ui-bg); }
 .card-actions, .card-actions > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 /* Keep room for price, volume and time axes on narrow cards; preserve the
    existing 400px chart height when the card has sufficient width. */
-.card-chart { height: clamp(280px, 75cqi, 400px); width: 100%; min-width: 0; }
+.card-chart, .chart-status-slot:has(.chart-loading) { height: clamp(280px, 75cqi, 400px); width: 100%; min-width: 0; }
+.chart-status-slot:has(.chart-loading) { display: grid; place-items: center; }
+.chart-loading::before {
+  content: ""; display: inline-block; width: 0.9em; height: 0.9em; margin-inline-end: 0.55em;
+  vertical-align: -0.1em; border: 2px solid currentColor; border-inline-end-color: transparent;
+  border-radius: 50%; animation: chart-loading-turn 1s linear infinite;
+}
+@keyframes chart-loading-turn { to { transform: rotate(1turn); } }
+@media (prefers-reduced-motion: reduce) { .chart-loading::before { animation: none; } }
 .card-progress-hint { display: flex; gap: 10px; align-items: center; color: var(--ui-text-muted); font-size: 12px; margin-block: 12px; }

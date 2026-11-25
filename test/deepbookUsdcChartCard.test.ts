@@ -153,4 +153,18 @@ describe("DeepBook chart input and display", () => {
     expect(resizeDisconnect).toHaveBeenCalledOnce();
     expect(chartApi.create).not.toHaveBeenCalled(); expect(chartApi.remove).not.toHaveBeenCalled();
   });
+  it("reports a display failure and only announces completion after a successful layout and draw", () => {
+    const { result, container, flushFrame } = prepareLayout();
+    chartApi.create.mockImplementationOnce(() => { throw Error("canvas unavailable"); });
+    container.isConnected = true; container.clientWidth = 800; container.clientHeight = 360;
+    result.mount!();
+    expect(result.displayRecovery?.()?.message).toBe("Couldn’t display the chart.");
+    expect(result.statusText?.()).not.toContain("Loaded");
+    result.displayRecovery?.()?.retry();
+    expect(result.displayRecovery?.()).toBeUndefined();
+    expect(result.statusText?.()).toBe("Drawing chart…");
+    flushFrame();
+    expect(result.statusText?.()).toBe("Loaded 1 candle.");
+    result.dispose!();
+  });
 });

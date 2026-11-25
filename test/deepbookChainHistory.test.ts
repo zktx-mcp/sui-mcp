@@ -7,9 +7,11 @@ import {
   ORDER_FILLED,
   renderCandles,
   scanPoolBars,
+  scanSplitPoolBars,
   historicalPoolFills,
   grpcPoolFills,
   type ChainEvent,
+  type RawFill,
 } from "../src/core/read/deepbookChainHistory.js";
 import { SUI_MAINNET_CHAIN_IDENTIFIER } from "../src/core/suiEndpoint.js";
 import { normalizeStructTag, toBase58 } from "@mysten/sui/utils";
@@ -45,6 +47,63 @@ async function collect<T>(items: AsyncIterable<T>) {
   for await (const item of items) values.push(item);
   return values;
 }
+
+describe("checkpoint-split Chart scans", () => {
+  const reader = new MarketGraphqlReader();
+  const t0 = Date.parse(time);
+  // Checkpoints 2–5 share one minute across the midpoint at checkpoint 4.
+  const seconds = [0, 60, 120, 121, 122, 130, 180, 240];
+  const prices = ["3", "5", "10", "90", "20", "30", "60", "80"];
+  const fill = (i: number): RawFill => ({
+    checkpoint: {sequenceNumber: i, timestamp: new Date(t0 + seconds[i]! * 1000).toISOString()},
+    digest: toBase58(new Uint8Array(32).fill(i + 1)), sequence: 0, position: 0,
+    poolId: pool, price: prices[i]!, base: "9007199254740993", quote: "1"
+  });
+  it("publishes the latest closed bucket before speculative reads and holds the split bucket until both sides finish", async () => {
+    const older = Promise.withResolvers<void>();
+    const spans: number[][] = [];
+    const read = async function* (from: number, until: number) {
+      spans.push([from, until]);
+      if (from === 0) await older.promise;
+      for (let i = until - 1; i >= from; i--) yield fill(i);
+    };
+    const scan = scanSplitPoolBars(reader, read, 0, 8, 50, new AbortController().signal, "1m", t0 + 300_000);
+    try {
+      expect((await scan.next()).value).toMatchObject({start: t0 + 240_000, close: "80"});
+      expect(spans).toEqual([[4, 8]]);
+      expect((await scan.next()).value).toMatchObject({start: t0 + 180_000, close: "60"});
+      expect(spans).toEqual([[4, 8], [0, 4]]);
+      const rest = collect(scan);
+      older.resolve();
+      expect(await rest).toEqual([
+        {start: t0 + 120_000, open: "10", high: "90", low: "10", close: "30", volume: "36028797018963972", fills: 4},
+        {start: t0 + 60_000, open: "5", high: "5", low: "5", close: "5", volume: "9007199254740993", fills: 1},
+        {start: t0, open: "3", high: "3", low: "3", close: "3", volume: "9007199254740993", fills: 1},
+      ]);
+    } finally { older.resolve(); await scan.return(undefined); }
+  });
+  it.each([0, 7])("retains the only trade at checkpoint %i when the other side proves empty", async index => {
+    const read = async function* (from: number, until: number) { if (from <= index && index < until) yield fill(index); };
+    const bars = await collect(scanSplitPoolBars(reader, read, 0, 8, 50, new AbortController().signal, "1m", t0 + 300_000));
+    expect(bars.map(b => b.close)).toEqual([prices[index]]);
+  });
+  it("propagates a required range failure and releases the sibling stream", async () => {
+    let released = false;
+    const failure = Error("archive coverage lost");
+    const read = async function* (from: number, _until: number, signal: AbortSignal) {
+      if (!from) throw failure;
+      try {
+        yield fill(7); yield fill(6);
+        await new Promise<void>((_, reject) => {
+          signal.throwIfAborted();
+          signal.addEventListener("abort", () => reject(signal.reason), {once:true});
+        });
+      } finally { released = true; }
+    };
+    await expect(collect(scanSplitPoolBars(reader, read, 0, 8, 50, new AbortController().signal, "1m", t0 + 300_000))).rejects.toBe(failure);
+    expect(released).toBe(true);
+  });
+});
 
 function wire(row: ChainEvent) {
   const { pool_id, price, base_quantity, quote_quantity } = row.contents.json;

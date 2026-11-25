@@ -16,6 +16,7 @@ export type CardDisplayRecovery = { message: string; retry: () => void };
 export type CardConfirmation = "disconnect";
 export type CardContent = {
   node: HTMLElement; mount?: () => void; dispose?: () => void;
+  statusText?: () => string;
   update?: (snapshot: CardSnapshot, context: CardViewContext) => boolean;
   pending?: () => boolean;
   selectionRecovery?: { label: string; retry: () => void };
@@ -210,6 +211,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   if (!root) throw new Error("Card root is unavailable.");
   const heading = document.createElement("h1"); heading.textContent = renderer.title;
   const status = document.createElement("p"); status.className = "ui-note"; status.setAttribute("role", "status");
+  if (kind === "chart") { status.textContent = "Opening chart…"; status.classList.add("chart-loading"); }
   const issue = document.createElement("p"); issue.className = "ui-error"; issue.setAttribute("role", "alert");
   const notice = document.createElement("p"); notice.className = "ui-note card-guidance";
   const content = document.createElement("section");
@@ -436,7 +438,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       reviewHint: reviewPeriodElapsed ? undefined : reviewUpdatePending ? (displayPending || review?.preparing || commandFlight?.input.action === "prepare_review" ? "Updating review…" : "Checking status…") :
         reviewInput && object(review?.state)?.refreshReason === "review_evidence_stale" ? "Review details are out of date." : undefined,
       errors: [confirmation.status === "rejected" ? confirmation.message : confirmation.status === "read_failed"
-        ? `This card's status could not be checked. Reported message: “${confirmation.message}”` : undefined,
+        ? kind === "chart" ? "Couldn’t refresh this chart." : `This card's status could not be checked. Reported message: “${confirmation.message}”` : undefined,
         openingError && confirmation.status !== "rejected" ? `This card could not be opened. Reported message: “${openingError}”` : undefined,
         activeFailure && failedCommand ? `Message for this ${commandLabel(failedCommand)}: “${failedCommand.message}”` : undefined,
         displayError, partialDisplayFailure?.message],
@@ -500,18 +502,34 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     }
     else { root!.insertBefore(issue, content); root!.insertBefore(progressHint, actions); root!.insertBefore(notice, progressHint); }
     issue.className = feedback ? "ui-note" : "ui-error";
+    let message: string;
     if (snapshot) {
       heading.textContent = renderer.titleFor?.(snapshot) ?? renderer.title;
-      status.textContent = confirmation.status === "rejected" ? "Card unavailable" :
+      message = confirmation.status === "rejected" ? "Card unavailable" :
+        kind === "chart" && d.errors.some(Boolean) ? "" :
         !d.current && snapshot.state === "ready" ? (feedback ? "" : !lifetime.signal.aborted && (reading || d.read) ? "Checking whether actions are available in this card…" : "Actions are unavailable until this card's status is checked.") :
+        kind === "chart" && snapshot.state === "ready" && commandFlight?.phase === "sending" ? "Sending chart request…" :
+        displayedView?.statusText ? displayedView.statusText() :
+        kind === "chart" && snapshot.state === "running" ? "Loading chart data…" :
+        !interactive && snapshot.state === "running" ? "Reading the requested data…" :
         !reference && snapshot.state !== "closed" ? "View only." :
         interactive ? (object(workflow?.progress)?.status === "unavailable" ? "Current progress is unavailable. The last recorded state is shown." :
           !workflow?.request && snapshot.state === "closed" && ["expired", "server_restarted", "cancelled"].includes(snapshot.reason ?? "")
             ? "This card no longer accepts actions." : "") :
-        snapshot.state === "running" ? "Reading the requested data…" : snapshot.reason === "completed" ? "" : snapshot.error ??
+        snapshot.reason === "completed" ? "" : snapshot.error ??
         (snapshot.reason === "expired" ? "The time to make a selection has ended." :
           snapshot.reason === "server_restarted" ? "This request ended when Sui MCP restarted." : "");
-    } else status.textContent = inputRequest ? "" : confirmation.status === "read_failed" ? "Card status unavailable" : openingError || confirmation.status === "rejected" ? "Card unavailable" : "Opening card…";
+    } else message = inputRequest ? "" : confirmation.status === "read_failed" ? "Card status unavailable" : openingError || confirmation.status === "rejected" ? "Card unavailable" : kind === "chart" ? "Opening chart…" : "Opening card…";
+    if (status.textContent !== message) status.textContent = message;
+    const waitingForChart = kind === "chart" && !d.errors.some(Boolean) && !inputRequest &&
+      (!snapshot || (snapshot.state === "running" && workflow?.status !== "preview"));
+    status.className = waitingForChart ? "ui-note chart-loading" : "ui-note";
+    if (kind === "chart") {
+      const slot = content.querySelector<HTMLElement>(".chart-status-slot");
+      if (slot && waitingForChart) {
+        if (!slot.contains(status)) slot.append(status);
+      } else if (status.parentElement !== root) root!.insertBefore(status, issue);
+    }
     status.hidden = !status.textContent;
     issue.textContent = [...new Set(d.errors.filter(Boolean))].join(" ");
     issue.hidden = !issue.textContent;
@@ -583,7 +601,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
         const controls = renderer.controls(snapshot, (input) => { void submit(input); }, display, walletDisplay, context);
         candidate = "node" in controls ? controls : { node: controls };
         nextInput = true;
-      } else if ((interactive || chartPreview || snapshot.reason === "completed") && snapshot.data !== undefined) {
+      } else if ((kind === "chart" && snapshot.state === "running") ||
+          ((interactive || snapshot.reason === "completed") && snapshot.data !== undefined)) {
         candidate = renderer.result(snapshot, display, reference && snapshot.reason !== "cancelled" ? (input) => { void submit(input); } : undefined, walletDisplay, context);
       }
       content.replaceChildren(...(candidate ? [candidate.node] : [])); inserted = true;

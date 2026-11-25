@@ -21,6 +21,7 @@ import {
   DEEPBOOK_TYPE_ORIGIN,
   renderCandles,
   scanPoolBars,
+  scanSplitPoolBars,
   grpcPoolFills,
   historicalPoolFills,
   type RawCandle,
@@ -343,15 +344,15 @@ export class ChainCandleSource {
       graphqlUrl = this.publicGraphqlUrl,
       grpcUrl = this.grpcUrl;
     const id = market.pool_id;
-    async function* archive(from: number, until: number) {
+    async function* archive(from: number, until: number, rangeSignal: AbortSignal) {
       if (from >= until) return;
       endpoints.add(graphqlUrl);
       const typedAvailable =
         !!limits.fills && from >= limits.fills.first.sequenceNumber && until - 1 <= limits.fills.last.sequenceNumber;
-      yield* historicalPoolFills(reader, id, from, until, maxPageSize, signal, typedAvailable);
+      yield* historicalPoolFills(reader, id, from, until, maxPageSize, rangeSignal, typedAvailable);
     }
-    async function* fills(from: number, until: number) {
-      yield* archive(Math.max(from, grpcEnd), until);
+    async function* fills(from: number, until: number, rangeSignal: AbortSignal) {
+      yield* archive(Math.max(from, grpcEnd), until, rangeSignal);
       let remaining = Math.min(until, grpcEnd);
       let floor = grpcFrom;
       while (Math.max(from, floor) < remaining) {
@@ -361,7 +362,7 @@ export class ChainCandleSource {
         let height = remaining;
         let group: RawFill[] = [];
         try {
-          for await (const fill of grpcPoolFills(rpc, id, lower, remaining, signal)) {
+          for await (const fill of grpcPoolFills(rpc, id, lower, remaining, rangeSignal)) {
             if (fill.checkpoint.sequenceNumber !== height) {
               if (group.length) endpoints.add(grpcUrl);
               yield* group;
@@ -374,7 +375,7 @@ export class ChainCandleSource {
           yield* group;
           remaining = lower;
         } catch (error) {
-          signal.throwIfAborted();
+          rangeSignal.throwIfAborted();
           if (!(
             error instanceof Error &&
             "code" in error &&
@@ -383,14 +384,14 @@ export class ChainCandleSource {
             throw error;
           remaining = Math.min(remaining, height + 1);
           if (error.code === "UNIMPLEMENTED") break;
-          const update = await rpc.ledgerService.getServiceInfo({}, { abort: signal }).response;
+          const update = await rpc.ledgerService.getServiceInfo({}, { abort: rangeSignal }).response;
           if (update.chainId !== SUI_MAINNET_CHAIN_IDENTIFIER) throw new Error("Ledger chain changed during the read.");
           const nextFloor = Number(update.lowestAvailableCheckpoint);
           if (!Number.isSafeInteger(nextFloor) || nextFloor <= floor) break;
           floor = nextFloor;
         }
       }
-      yield* archive(from, remaining);
+      yield* archive(from, remaining, rangeSignal);
     }
     const bars: RawCandle[] = [];
     let coveredFrom = pruned ? retained : window.coveredFrom;
@@ -398,20 +399,25 @@ export class ChainCandleSource {
     while (before > lo) {
       let from = lo;
       const width = deepbookCandleIntervalDurationMs(interval);
-      if (
-        query.limit !== undefined &&
-        candleBucketStart(observedEnd, interval) - candleBucketStart(first, interval) >= query.limit * width
-      ) {
+      const bucketSpan = candleBucketStart(observedEnd, interval) - candleBucketStart(first, interval);
+      const limit = query.limit;
+      const limitMayTruncate = limit !== undefined && bucketSpan >= limit * width;
+      if (limitMayTruncate) {
         const latest = await reader.lastPoolUse(id, lo, before, signal);
         if (!latest) { endpoints.add(graphqlUrl); break; }
         before = latest.sequenceNumber + 1;
-        const bucketsNeeded = query.limit - bars.length;
+        const bucketsNeeded = limit - bars.length;
         const window =
           candleBucketStart(Date.parse(latest.timestamp), interval) -
           (bucketsNeeded - 1) * deepbookCandleIntervalDurationMs(interval);
         if (window > first) from = Math.max(lo, await reader.firstAtOrAfter(window, range.first, latest, signal));
       }
-      for await (const bar of scanPoolBars(reader, fills(from, before), from, before, maxPageSize, signal, interval)) {
+      const split = query.window !== "history" && !pruned && !limitMayTruncate && bucketSpan >= width &&
+        from > grpcFrom && before <= grpcEnd && before - from >= 2;
+      const scan = split
+        ? scanSplitPoolBars(reader, fills, from, before, maxPageSize, signal, interval, asOf)
+        : scanPoolBars(reader, fills(from, before, signal), from, before, maxPageSize, signal, interval);
+      for await (const bar of scan) {
         if (pruned && bar.start <= retained)
           throw new DeepbookCandleSourceError("candle_coverage_incomplete", "Incomplete oldest candle.");
         bars.push(bar);

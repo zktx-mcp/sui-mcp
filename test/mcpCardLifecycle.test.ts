@@ -609,7 +609,7 @@ it("consumes real MCP/SQLite chart preparation failures and valid choices in the
     expect(candleCalls).toBe(0);
     start!.value = "2026-06-26T00:00";
     start!.dispatchEvent(new Event("change"));
-    await vi.waitFor(() => expect(root.textContent).toContain("No candles returned for this range"));
+    await vi.waitFor(() => expect(root.textContent).toContain("No trades in the selected period"));
     expect(root.textContent).not.toContain("Saved result");
     expect(poolCalls).toBe(2); expect(exactReads).toEqual([`0x${"1".repeat(64)}`]); expect(candleCalls).toBe(1);
     expect(app.callServerTool.mock.calls.at(-1)?.[0].arguments).toMatchObject({ input: { endTimeMs } });
@@ -1282,6 +1282,30 @@ it("observes the same running public Chart until its final revision without resu
   await vi.advanceTimersByTimeAsync(2 * running.pollAfterMs);
   expect(app.readServerResource).toHaveBeenCalledTimes(2);
   for (const [request] of app.readServerResource.mock.calls) expect(request.uri).toBe(CARD_RESOURCE_PREFIX + running.cardId);
+  expect(app.callServerTool).not.toHaveBeenCalled();
+  await app.onteardown!();
+});
+
+it("shows English loading in the graph area and stops on a saved Chart read error until explicit recovery", async () => {
+  const running = state("chart", { state: "running", input: {poolName: "SUI_USDC", interval: "1d"} });
+  const failure = { ...running, state: "closed" as const, reason: "completed" as const, revision: 2,
+    data: { status: "source_unavailable", reason: "source_timeout" } };
+  const app = host(async () => { throw Error("No input authority"); });
+  app.readServerResource.mockResolvedValueOnce(savedResource(running)).mockRejectedValueOnce(Error("fixture timeout"))
+    .mockResolvedValueOnce(savedResource(failure));
+  startCard("chart", chartRenderer);
+  expect(root.textContent).toContain("Opening chart…");
+  app.ontoolresult!(result(running));
+  await vi.waitFor(() => expect(root.querySelector(".chart-status-slot")?.textContent).toBe("Loading chart data…"));
+  expect(root.textContent).toContain("Last 7 days");
+  await vi.advanceTimersByTimeAsync(running.pollAfterMs);
+  expect(root.textContent).toContain("Couldn’t refresh this chart.");
+  expect(root.textContent).not.toContain("Loading chart data");
+  await vi.advanceTimersByTimeAsync(running.pollAfterMs);
+  expect(app.readServerResource).toHaveBeenCalledTimes(2);
+  recoveryButton("Check status")!.click();
+  await vi.waitFor(() => expect(root.textContent).toContain("The chart data source did not respond in time."));
+  expect(root.textContent).not.toMatch(/Loaded \d|Couldn’t refresh|Loading chart data/);
   expect(app.callServerTool).not.toHaveBeenCalled();
   await app.onteardown!();
 });
@@ -2435,12 +2459,12 @@ it.each(['before_result','after_result'] as const)('keeps the admitted Chart res
   root.querySelectorAll('select')[0]!.value=`0x${"1".repeat(64)}`;root.querySelectorAll('select')[0]!.dispatchEvent(new Event('change'));
   await vi.waitFor(()=>expect(sources).toBe(1));
   if(order==='before_result'){releaseRead.resolve();await vi.advanceTimersByTimeAsync(0);}
-  finishSource.resolve();await vi.waitFor(()=>expect(root.textContent).toContain('No candles returned for this range'));
+  finishSource.resolve();await vi.waitFor(()=>expect(root.textContent).toContain('No trades in the selected period'));
   const saved=await cards.read(reference);expect(saved.snapshot).toMatchObject({state:'closed',reason:'completed',input:{poolId:`0x${'1'.repeat(64)}`}});
   if(order==='after_result'){releaseRead.resolve();await vi.advanceTimersByTimeAsync(0);}
   expect(root.textContent).not.toContain('Card unavailable');
   expect(root.textContent).not.toContain('The returned information does not match this card');
-  expect(root.textContent).toContain('No candles returned for this range');
+  expect(root.textContent).toContain('No trades in the selected period');
   expect(root.querySelectorAll('button').some(x=>x.textContent==='Check status')).toBe(false);
   expect(sources).toBe(1);
   await app.onteardown!();
@@ -3245,14 +3269,14 @@ it.each(["not_admitted", "admitted"] as const)("offers one Chart retry only for 
       expect(f.candles).not.toHaveBeenCalled();
       refuse = false; recoveryButton("Retry chart")!.click();
     } else {
-      await vi.waitFor(() => expect(root.textContent).toContain("Reading the requested data"));
+      await vi.waitFor(() => expect(root.textContent).toContain("Loading chart data…"));
       expect(recoveryButton("Retry chart")).toBeUndefined();
       expect(root.querySelector("form")).toBeUndefined();
       finishQuery.resolve(); await admittedQuery;
       await vi.advanceTimersByTimeAsync(5000);
       expect(app.callServerTool.mock.calls.filter(([call]) => call.name === CARD_TOOLS.submit)).toHaveLength(1);
     }
-    await vi.waitFor(() => expect(root.textContent).toContain("No candles returned"));
+    await vi.waitFor(() => expect(root.textContent).toContain("No trades in the selected period"));
     expect(f.candles).toHaveBeenCalledOnce(); expect(root.querySelector("form")).toBeUndefined();
     expect(recoveryButton("Retry chart")).toBeUndefined();
     expect(await f.cards.readSaved(card.snapshot.cardId)).toMatchObject({ state: "closed", input: { poolId: `0x${"1".repeat(64)}`, interval: "1d", limit: 7 } });
