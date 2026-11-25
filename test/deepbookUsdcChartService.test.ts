@@ -74,7 +74,7 @@ describe("DeepBook USDC chart service", () => {
     });
   });
 
-  it("returns latest candles with default interval and limit", async () => {
+  it("passes the default interval and row cap to the source without caller-supplied dates", async () => {
     const calls: DeepbookCandleQuery[] = [];
     const api = createDeepbookUsdcChartService({
       source: fakeSource({ onFetchCandles: (input) => calls.push(input) })
@@ -117,17 +117,17 @@ describe("DeepBook USDC chart service", () => {
     expect([poolReads, candleReads]).toEqual([1, 1]);
   });
 
-  it("replays one closed-candle preview while the same selected market scan continues", async () => {
+  it("shows growing closed-candle previews to joined cards from the same selected market scan", async () => {
     const source = fakeSource();
     const gate = Promise.withResolvers<void>();
-    const first = Promise.withResolvers<DeepbookUsdcChartResult>();
-    const replay = Promise.withResolvers<DeepbookUsdcChartResult>();
+    const first = Promise.withResolvers<() => DeepbookUsdcChartResult>();
+    const replay = Promise.withResolvers<() => DeepbookUsdcChartResult>();
+    let loaded = 1;
     let reads = 0;
     const api = createDeepbookUsdcChartService({source:{...source, async fetchCandles(input, signal, preview) {
       reads++;
       const result = await source.fetchCandles(input, signal);
-      const closed = result.candles[0]!;
-      preview?.({candle:closed,source:{...result.source,indexedAt:closed.end}});
+      preview?.(() => ({candles: result.candles.slice(-loaded), source: {...result.source, indexedAt: result.candles.at(-1)!.end}}));
       await gate.promise;
       return result;
     }}});
@@ -136,10 +136,14 @@ describe("DeepBook USDC chart service", () => {
       quoteAsset:{coinType:DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE}};
     const pending = api.readCandles(prepareChartRead(query, new Date(fetchedAt)), selected, first.resolve);
     try {
-      expect(await first.promise).toMatchObject({status:"preview", candles:[{start:"2026-06-27T06:30:00.000Z",close:"0.71404"}],pair:{poolId:suiPoolId}});
+      const read = await first.promise;
+      expect(read()).toMatchObject({status:"preview", candleCount:1, candles:[{start:"2026-06-27T06:45:00.000Z"}],pair:{poolId:suiPoolId}});
       const joined = api.readCandles(prepareChartRead(query, new Date(fetchedAt)), undefined, replay.resolve);
       const byName = api.readCandles(prepared({poolName:"SUI_USDC",interval:"15m"}));
-      expect(await replay.promise).toEqual(await first.promise);
+      const readJoined = await replay.promise;
+      loaded = 2;
+      expect(read()).toMatchObject({status:"preview", candleCount:2, candles:[{close:"0.71404"},{start:"2026-06-27T06:45:00.000Z"}]});
+      expect(readJoined()).toEqual(read());
       gate.resolve();
       expect(await joined).toEqual(await pending);
       expect(await pending).toMatchObject({status:"ok",candleCount:2});

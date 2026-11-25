@@ -10,21 +10,21 @@ For a supported DeepBook swap, the Review card shows your account, how much you 
 >
 > To keep your old records, move the entire old Sui MCP data folder aside. If you choose to discard them, delete only that old folder. When you restart with default settings, Sui MCP creates its data folder automatically. No version-named folder or app configuration change is required for a default installation. [Find your data folder and review what deletion removes](docs/MCP_SETUP.md#database-format-mismatch).
 >
-> Fresh installs and working 0.9.0 installations can skip this step.
+> Fresh installs and working 0.9.0 or 0.9.1 installations can skip this step.
 
 **If your assistant cannot find `read_get_server_status`:** An empty tool list alone does not explain why. Check the app’s existing local registration and its Sui MCP startup log. The message `Local database format does not match this runtime` confirms a database mismatch. If the assistant cannot see the log, it should ask for the startup error line before suggesting a fix. [Troubleshoot a missing server](docs/MCP_SETUP.md#server-does-not-appear-in-the-client)
 
-**Choose your version first.** This README describes **0.9.1**. Run the following in Terminal or PowerShell to see the stable version on [npm](https://www.npmjs.com/package/@zktx.io/sui-mcp):
+**Choose your version first.** This README describes **0.9.2**. Run the following in Terminal or PowerShell to see the stable version on [npm](https://www.npmjs.com/package/@zktx.io/sui-mcp):
 
 ```sh
 npm view @zktx.io/sui-mcp@latest version
 ```
 
-- If it returns **0.9.0**, follow the [published 0.9.0 setup guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.9.0/docs/MCP_SETUP.md).
-- For a new **0.9.1** installation, use [Node.js 24 LTS with npm](https://nodejs.org/en/download), then run the command below once. If npm reports another version, choose the guide for that release.
+- If it returns **0.9.1**, follow the [published 0.9.1 setup guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.9.1/docs/MCP_SETUP.md).
+- For a new **0.9.2** installation, use [Node.js 24 LTS with npm](https://nodejs.org/en/download), then run the command below once. If npm reports another version, choose the guide for that release.
 
 ```sh
-npm install -g @zktx.io/sui-mcp@0.9.1
+npm install -g @zktx.io/sui-mcp@0.9.2
 ```
 
 ### Connect your app
@@ -103,7 +103,7 @@ executed graph, observed asset changes and net network fee. Details supplements
 the same facts. Missing graph or receipt data is marked unavailable.
 
 **DeepBook USDC chart.** `ui_open_chart` opens an internal MCP Apps card with
-pool-bound DeepBook candles and volume for one selected USDC pool.
+pool-bound DeepBook candles and volume for one selected USDC pool. With no time range, it shows up to 500 candles from the past seven days, adding verified candles as the scan proceeds.
 The saved result shows the selected pair, interval, UTC period and source time. Limited and empty results are identified.
 
 ## Current Limits

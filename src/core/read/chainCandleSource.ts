@@ -13,7 +13,7 @@ import {
   deepbookCandleIntervalDurationMs,
   type DeepbookCandleQuery,
   type DeepbookCandleSourceEvidence,
-  type DeepbookCandlePool, type DeepbookCandlePoolsResult, type CandlePreview, type MarketIdentity,
+  type DeepbookCandlePool, type DeepbookCandlePoolsResult, type ReadCandlePreview, type MarketIdentity,
 } from "./deepbookCandleSource.js";
 import {
   MarketGraphqlReader,
@@ -73,30 +73,35 @@ class MarketDiscoveryError extends Error {
 
 const sdkNames = new Map(Object.entries(mainnetPools).map(([name, pool]) => [pool.address, name]));
 
-// Price history selects UTC bucket starts in [start, end). A Chart can also
-// show a bucket overlapping its start and accepts an inclusive end.
-function resolveCandleWindow(query: DeepbookCandleQuery, birth: number, indexedAt: number) {
+// The 0.8.2 indexer's OHCLV_DEFAULT_WINDOW_MS was seven days. Its default
+// window selected bucket starts, independently of the maximum number of rows.
+const DEFAULT_CHART_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+function resolveCandleWindow(query: DeepbookCandleQuery, birth: number, indexedAt: number, requestedAt: number) {
   const interval = query.interval;
   const width = deepbookCandleIntervalDurationMs(interval);
   const history = query.window === "history";
-  const start = query.startTimeMs ?? birth;
-  const end = history ? query.endTimeMs - 1 : query.endTimeMs ?? indexedAt;
+  const defaultStart = query.startTimeMs === undefined;
+  const end = history ? query.endTimeMs - 1 : query.endTimeMs ?? (defaultStart ? requestedAt : indexedAt);
+  const start = query.startTimeMs ?? Math.max(0, end - DEFAULT_CHART_WINDOW_MS);
   const bucket = candleBucketStart(start, interval);
-  const firstBucket = history && bucket < start ? bucket + width : bucket;
+  // An explicit Chart start still includes its overlapping bucket. History
+  // and the default seven-day window select bucket starts within the range.
+  const firstBucket = (history || defaultStart) && bucket < start ? bucket + width : bucket;
   const partial = end > indexedAt;
   if (!history && end < birth)
     throw new DeepbookCandleSourceError("market_not_created", "The requested period precedes this pool.");
-  if (start > indexedAt || (!history && query.endMode !== "latest_indexed" &&
+  if (start > indexedAt || (!history && query.endTimeMs !== undefined && query.endMode !== "latest_indexed" &&
       partial && candleBucketStart(end, interval) > candleBucketStart(indexedAt, interval))) {
     throw new DeepbookCandleSourceError("source_unavailable", "The requested period extends beyond indexed chain data.");
   }
   const readUntil = Math.min(indexedAt + 1, candleBucketStart(end, interval) + width);
   const observedEnd = Math.min(end, indexedAt);
   // Buckets ending before creation are provably empty without reading any fills.
-  const empty = history && (readUntil <= birth || firstBucket > observedEnd);
+  const empty = (history || defaultStart) && (readUntil <= birth || firstBucket > observedEnd);
   return {
     observedEnd, readUntil, first: Math.max(birth, firstBucket),
-    coveredFrom: history ? start : Math.max(birth, firstBucket),
+    start, end, coveredFrom: history ? start : Math.max(birth, defaultStart ? start : firstBucket),
     coveredUntil: empty ? observedEnd + 1 : readUntil,
     coverage: partial ? "partial_tail" as const : "complete" as const,
     empty
@@ -275,7 +280,8 @@ export class ChainCandleSource {
     };
   }
 
-  async fetchCandles(query: DeepbookCandleQuery, caller?: AbortSignal, preview?: (value: CandlePreview) => void) {
+  async fetchCandles(query: DeepbookCandleQuery, caller?: AbortSignal, preview?: (value: ReadCandlePreview) => void) {
+    const requestedAt = Date.now();
     const { market } = query;
     if (!market?.initialSharedVersion || market.pool_id !== query.poolId)
       throw new Error("A verified pool object is required.");
@@ -302,13 +308,14 @@ export class ChainCandleSource {
     const birth = Date.parse(creation.timestamp);
     const asOf = Date.parse(range.last.timestamp);
     const interval = query.interval;
-    const window = resolveCandleWindow(query, birth, asOf);
+    const window = resolveCandleWindow(query, birth, asOf, requestedAt);
     const { first, observedEnd, readUntil } = window;
     const endpoints = new Set<string>();
     const evidence = (from: number, until: number): DeepbookCandleSourceEvidence => ({
       ...this.source("order_fills", [...endpoints][0] ?? this.publicGraphqlUrl),
       readEndpoints: endpoints.size ? [...endpoints] : [this.publicGraphqlUrl], poolId: market.pool_id,
-      poolName: market.pool_name, interval, startTimeMs: query.startTimeMs, endTimeMs: query.endTimeMs, limit: query.limit,
+      poolName: market.pool_name, interval, startTimeMs: query.startTimeMs ?? window.start,
+      endTimeMs: query.endTimeMs ?? window.end, limit: query.limit,
       coverage: window.coverage, coveredFrom: new Date(from).toISOString(), coveredUntil: new Date(until).toISOString(),
       indexedCheckpoint: range.last.sequenceNumber, indexedAt: range.last.timestamp
     });
@@ -393,8 +400,7 @@ export class ChainCandleSource {
       const width = deepbookCandleIntervalDurationMs(interval);
       if (
         query.limit !== undefined &&
-        (query.startTimeMs === undefined ||
-          candleBucketStart(observedEnd, interval) - candleBucketStart(first, interval) >= query.limit * width)
+        candleBucketStart(observedEnd, interval) - candleBucketStart(first, interval) >= query.limit * width
       ) {
         const latest = await reader.lastPoolUse(id, lo, before, signal);
         if (!latest) { endpoints.add(graphqlUrl); break; }
@@ -410,9 +416,21 @@ export class ChainCandleSource {
           throw new DeepbookCandleSourceError("candle_coverage_incomplete", "Incomplete oldest candle.");
         bars.push(bar);
         if (preview && bar.start + width <= asOf + 1) {
-          const [candle] = renderCandles([bar], interval, market.base_asset_decimals, market.quote_asset_decimals);
-          const source = evidence(Math.max(first, bar.start), bar.start + width);
-          preview({ candle: candle!, source: { ...source, coverage: "complete", startTimeMs:bar.start, endTimeMs:bar.start + width, limit:1 } });
+          // The scan walks backwards. Skip any forming bucket at its head.
+          // Joined cards materialize one snapshot per observed count, on demand.
+          const firstClosed = bars.length - 1;
+          const end = bar.start + width;
+          let snapshot: ReturnType<ReadCandlePreview> | undefined;
+          preview(() => {
+            const count = bars.length - firstClosed;
+            if (!snapshot || snapshot.candles.length !== count) {
+              const start = bars[bars.length - 1]!.start;
+              const candles = renderCandles(bars.slice(firstClosed).reverse(), interval, market.base_asset_decimals, market.quote_asset_decimals);
+              snapshot = { candles, source: { ...evidence(Math.max(first, start), end),
+                coverage: "complete", startTimeMs: start, endTimeMs: end, limit: count } };
+            }
+            return snapshot;
+          });
           preview = undefined;
         }
         if (bars.length === query.limit) {
@@ -426,7 +444,7 @@ export class ChainCandleSource {
     signal.throwIfAborted();
     if (pruned && coveredFrom <= retained)
       throw new DeepbookCandleSourceError("candle_coverage_incomplete", "Latest candles exceed indexed retention.");
-    const candles = renderCandles(bars.reverse(), interval, market.base_asset_decimals, market.quote_asset_decimals);
+    const candles = renderCandles(bars.toReversed(), interval, market.base_asset_decimals, market.quote_asset_decimals);
     return { candles, source: evidence(coveredFrom, window.coveredUntil) };
   }
 }

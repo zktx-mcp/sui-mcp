@@ -122,7 +122,8 @@ export type MarketIdentity = z.infer<typeof marketIdentitySchema>;
 export function marketIdentity(pool: DeepbookCandlePool): MarketIdentity {
   return {poolId:pool.pool_id, baseCoinType:pool.base_asset_id, quoteCoinType:pool.quote_asset_id};
 }
-export type CandlePreview = { candle: DeepbookTradeCandle; source: DeepbookCandleSourceEvidence };
+// Read the verified closed buckets accumulated by this scan without advancing it.
+export type ReadCandlePreview = () => DeepbookCandleResult;
 export type DeepbookCandlePoolsResult = {
   unavailablePools?: MarketIdentity[];
   source: DeepbookCandleSourceEvidence;
@@ -138,7 +139,7 @@ export type DeepbookCandleSourceClient = {
   currentPoolId?(base: string, quote: string): Promise<string>;
   fetchMenuPools?(): Promise<DeepbookCandlePoolsResult>;
   fetchPools(poolId?: string, checkRegistration?: boolean, signal?: AbortSignal, baseTypes?: readonly string[]): Promise<DeepbookCandlePoolsResult>;
-  fetchCandles(input: DeepbookCandleQuery, signal?: AbortSignal, preview?: (value: CandlePreview) => void): Promise<DeepbookCandleResult>;
+  fetchCandles(input: DeepbookCandleQuery, signal?: AbortSignal, preview?: (value: ReadCandlePreview) => void): Promise<DeepbookCandleResult>;
 };
 
 export function parseDeepbookCandleInterval(value: string): DeepbookCandleInterval {

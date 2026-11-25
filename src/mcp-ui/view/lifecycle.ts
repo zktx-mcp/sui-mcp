@@ -423,7 +423,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     const nextRead = terminal ? undefined : business ? data?.nextStateReadAfterMs : settings && downloadEndsAt !== undefined ? Math.max(0, downloadEndsAt - observedAt) : undefined;
     const timed = !terminal && (business ? permitted.length > 0 : snapshot?.state === "ready");
     const intervals = [timed ? remaining : undefined, nextRead].filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
-    const canObserve = !ended && !!reference && visible && !inputRequest && !openingError && confirmation.status !== "read_failed";
+    const canObserve = !ended && (!!reference || (!interactive && snapshot?.state === "running")) &&
+      visible && !inputRequest && !openingError && confirmation.status !== "read_failed";
     const review = object(data?.review);
     const reviewUpdatePending = reviewInput && !ended && !openingError && !displayError && !activeFailure && !retryRequired && !paused &&
       confirmation.status !== "read_failed" && (displayPending || commandFlight?.input.action === "prepare_review" || review?.preparing === true ||
@@ -562,7 +563,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     const settingsProgress = settings && commandFlight?.phase === "sending" && confirmation.status === "confirmed"
       ? settingsCommandProgress(commandFlight.basis, snapshot, commandFlight.input) : undefined;
     const chartPreview = snapshot.kind === "chart" && snapshot.state === "running" && object(snapshot.data)?.status === "preview";
-    const key = `${chartPreview}:${automation === "paused"}:${JSON.stringify(settingsProgress)}:${snapshot.revision}:${reference !== undefined}:${display !== undefined}:${walletDisplay !== undefined}:${JSON.stringify(projection)}`;
+    const previewCount = chartPreview ? object(snapshot.data)?.candleCount : undefined;
+    const key = `${previewCount}:${automation === "paused"}:${JSON.stringify(settingsProgress)}:${snapshot.revision}:${reference !== undefined}:${display !== undefined}:${walletDisplay !== undefined}:${JSON.stringify(projection)}`;
     if (key === renderedKey || (key === attemptedKey && !retryFailed)) return;
     attemptedKey = key;
     const previousNodes = [...content.children];
@@ -958,7 +960,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   };
   app.onhostcontextchanged = (context) => { if (context.theme) document.documentElement.dataset.theme = context.theme; };
   const onVisibility = () => {
-    if (document.visibilityState !== "hidden" && reference && initialized && confirmation.status !== "read_failed" && snapshot?.state !== "closed") requestRead(false);
+    if (document.visibilityState !== "hidden" && (reference || (!interactive && snapshot?.state === "running")) &&
+        initialized && confirmation.status !== "read_failed" && snapshot?.state !== "closed") requestRead(false);
     else publish();
   };
   document.addEventListener?.("visibilitychange", onVisibility);

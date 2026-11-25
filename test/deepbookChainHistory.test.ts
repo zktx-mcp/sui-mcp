@@ -12,13 +12,14 @@ import {
   type ChainEvent,
 } from "../src/core/read/deepbookChainHistory.js";
 import { SUI_MAINNET_CHAIN_IDENTIFIER } from "../src/core/suiEndpoint.js";
-import { normalizeStructTag } from "@mysten/sui/utils";
+import { normalizeStructTag, toBase58 } from "@mysten/sui/utils";
 import { DeepbookUsdcPriceService } from "../src/core/read/deepbookUsdcPriceService.js";
 import { ChainCandleSource } from "../src/core/read/chainCandleSource.js";
 import {
   DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
   deepbookCandlePoolsSchema,
   parseDeepbookCandleInterval,
+  type ReadCandlePreview,
 } from "../src/core/read/deepbookCandleSource.js";
 
 const pool = "0x" + "a".repeat(64),
@@ -282,6 +283,108 @@ it("keeps indexed history through a later end and searches across verified pool 
     source.close();
     vi.unstubAllGlobals();
   }
+});
+
+it("keeps a sparse default Chart inside seven days while retaining explicit ranges and pool identity", async () => {
+  const midnight = (day: number) => Date.UTC(2026, 10, day);
+  const noon = (day: number) => midnight(day) + 12 * 60 * 60_000;
+  const clock = vi.spyOn(Date, "now").mockReturnValue(noon(24));
+  const checkpointAt = (sequenceNumber: number) => ({
+    sequenceNumber, timestamp: new Date(midnight(sequenceNumber + 1)).toISOString(),
+    digest: toBase58(new Uint8Array(32).fill(sequenceNumber))
+  });
+  const first = checkpointAt(0), last = checkpointAt(23);
+  const fills = [10, 17, 18, 20, 22, 24].map(day => {
+    const fill = event(toBase58(new Uint8Array(32).fill(day + 32)), 0, day === 22 ? other : pool, "1000000", "1000000000");
+    fill.transaction.effects.checkpoint = checkpointAt(day - 1);
+    return tx(fill);
+  });
+  const windows: number[][] = [];
+  const graphql = vi.fn<typeof fetch>(async (_, init) => {
+    const { query, variables } = JSON.parse(String(init?.body));
+    if (query.includes("transactions:maxPageSize")) return reply({
+      chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
+      serviceConfig: { range: { first, last }, fills: null, fillPage: 50, transactions: 50, events: 50, order: 50 }
+    });
+    if (query.includes("previousTransaction")) return reply({ object: { previousTransaction: { effects: { checkpoint: first } } } });
+    if (query.includes("checkpoint(sequenceNumber:$cp)")) return reply({ checkpoint: checkpointAt(variables.cp) });
+    if (query.includes("transactions(")) {
+      const filter = variables.filter;
+      expect(filter.affectedObject).toBe(pool);
+      const from = (filter.afterCheckpoint ?? -1) + 1, until = filter.beforeCheckpoint;
+      windows.push([from, until]);
+      const selected = fills.filter(row => row.effects.checkpoint.sequenceNumber >= from && row.effects.checkpoint.sequenceNumber < until);
+      const nodes = query.includes("transactions(last:1") ? selected.slice(-1) : selected;
+      return archiveReply({ transactions: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } }, 0, 23);
+    }
+    throw Error("Unexpected Chart source lookup");
+  });
+  vi.stubGlobal("fetch", graphql);
+  const rpc = { ledgerService: { getServiceInfo: () => ({ response: Promise.resolve({
+    chainId: SUI_MAINNET_CHAIN_IDENTIFIER, lowestAvailableCheckpoint: 24n, checkpointHeight: 24n
+  }) }) } } as unknown as SuiGrpcClient;
+  const source = new ChainCandleSource(rpc);
+  const market = { pool_id: pool, pool_name: "SUI_USDC", base_asset_id: "0x2::sui::SUI", base_asset_symbol: "SUI",
+    base_asset_decimals: 9, quote_asset_id: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE, quote_asset_symbol: "USDC",
+    quote_asset_decimals: 6, initialSharedVersion: "1" };
+  const read = (bounds: { startTimeMs?: number; endTimeMs?: number; limit?: number }) =>
+    source.fetchCandles({ poolId: pool, market, directId: true, poolName: market.pool_name, interval: "1d", limit: 500, ...bounds });
+  try {
+    const recent = await read({});
+    expect(recent.source).toMatchObject({poolId: pool, startTimeMs: noon(17), endTimeMs: noon(24), coverage: "partial_tail"});
+    expect(recent.candles.map(c => c.timestampMs)).toEqual([18, 20, 24].map(midnight));
+    expect(windows).toEqual([[17, 24]]); // First eligible opening is Nov 18. No scan back to pool creation.
+    expect((await read({ limit: 1 })).candles.map(c => c.timestampMs)).toEqual([midnight(24)]);
+    expect((await read({ endTimeMs: noon(20) })).candles.map(c => c.timestampMs)).toEqual([17, 18, 20].map(midnight));
+    for (const bounds of [{ startTimeMs: noon(10) }, { startTimeMs: noon(10), endTimeMs: midnight(24) }]) {
+      expect((await read(bounds)).candles.map(c => c.timestampMs)).toEqual([10, 17, 18, 20, 24].map(midnight));
+    }
+  } finally { source.close(); clock.mockRestore(); vi.unstubAllGlobals(); }
+});
+
+it("plots closed buckets as the scan advances and includes the forming bucket only in the final result", async () => {
+  const start = Date.parse(time);
+  const rows = [digest, another, "11111111111111111111111111111111"].map((id, i) => {
+    const fill = event(id, 0, pool, String((i + 1) * 1_000_000), "1000000000");
+    fill.transaction.effects.checkpoint = { sequenceNumber: i + 1, timestamp: new Date(start + i * 60_000).toISOString(), digest: id };
+    return tx(fill);
+  });
+  const first = rows[0]!.effects.checkpoint, last = rows[2]!.effects.checkpoint;
+  const archive = vi.fn<typeof fetch>(async (_, init) => {
+    const { query } = JSON.parse(String(init?.body));
+    if (query.includes("transactions:maxPageSize")) return reply({
+      chainIdentifier: SUI_MAINNET_CHAIN_IDENTIFIER,
+      serviceConfig: { range: { first, last }, fills: null, fillPage: 50, transactions: 50, events: 50, order: 50 }
+    });
+    if (query.includes("previousTransaction")) return reply({ object: { previousTransaction: { effects: { checkpoint: first } } } });
+    if (query.includes("transactions(filter:$filter,last:$size")) return archiveReply({
+      transactions: { nodes: rows, pageInfo: { hasNextPage: false, endCursor: null } }
+    }, first.sequenceNumber, last.sequenceNumber);
+    throw Error("Unexpected archive request");
+  });
+  vi.stubGlobal("fetch", archive);
+  const rpc = { ledgerService: { getServiceInfo: () => ({ response: Promise.resolve({
+    chainId: SUI_MAINNET_CHAIN_IDENTIFIER, lowestAvailableCheckpoint: 4n, checkpointHeight: 5n
+  }) }) } } as unknown as SuiGrpcClient;
+  const source = new ChainCandleSource(rpc);
+  try {
+    const market = { pool_id: pool, pool_name: "SUI_USDC", base_asset_id: "0x2::sui::SUI", base_asset_symbol: "SUI",
+      base_asset_decimals: 9, quote_asset_id: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE, quote_asset_symbol: "USDC",
+      quote_asset_decimals: 6, initialSharedVersion: "1" };
+    let observed!: ReadCandlePreview;
+    const result = await source.fetchCandles({ poolId: pool, market, directId: true, poolName: market.pool_name,
+      interval: "1m", startTimeMs: start, endTimeMs: start + 120_000, limit: 500 }, undefined, read => {
+      observed = read;
+      expect(read().candles.map(c => c.close)).toEqual(["2"]);
+    });
+    const queries = archive.mock.calls.length;
+    const closed = observed();
+    expect(closed.candles.map(c => c.close)).toEqual(["1", "2"]);
+    expect(closed.source).toMatchObject({poolId: pool, coveredFrom: time, coveredUntil: last.timestamp});
+    expect(observed()).toBe(closed);
+    expect(archive).toHaveBeenCalledTimes(queries);
+    expect(result.candles.map(c => c.close)).toEqual(["1", "2", "3"]);
+  } finally { source.close(); vi.unstubAllGlobals(); }
 });
 
 it("reports only the archive origin when a moving gRPC floor leaves the range uncovered", async () => {

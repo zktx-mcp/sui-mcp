@@ -47,7 +47,7 @@ function prepareLayout() {
 
 describe("DeepBook chart input and display", () => {
   it("retains the time shortcuts and rejects invalid windows without inventing candles", () => {
-    expect(shortcutQuery("Latest 500", new Date("2026-06-27T03:00:00.000Z"))).toEqual({ limit: 500 });
+    expect(shortcutQuery("Recent", new Date("2026-06-27T03:00:00.000Z"))).toEqual({ limit: 500 });
     expect(shortcutQuery("Last 24h", new Date("2026-06-27T03:00:45.678Z"))).toEqual({
       startTimeMs: Date.parse("2026-06-26T03:00:45.678Z"), endTimeMs: Date.parse("2026-06-27T03:00:45.678Z"), limit: 10000
     });

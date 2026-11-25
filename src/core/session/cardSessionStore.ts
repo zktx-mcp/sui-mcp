@@ -24,13 +24,13 @@ type ReadExecution = Exclude<ReadCardSelection, { kind: "chart" }>
   | (Extract<ReadCardSelection, { kind: "chart" }> & { prepared: PreparedChartRead });
 
 export class CardStore {
-  private readonly chartPreviews = new Map<string, unknown>();
+  private readonly chartPreviews = new Map<string, () => unknown>();
   private stopped = false;
   constructor(private readonly options: {
     records: CardRecordStore;
     ownerId: string;
     prepare?: ((kind: CardKind) => Promise<CardPreparation>) | undefined;
-    execute(selection: ReadExecution, market?: OfferedChartMarket, preview?: (value: unknown) => void): Promise<unknown>;
+    execute(selection: ReadExecution, market?: OfferedChartMarket, preview?: (read: () => unknown) => void): Promise<unknown>;
     assertCurrent?: (() => void) | undefined;
     now?: (() => Date) | undefined;
     logger?: Logger | undefined;
@@ -246,9 +246,9 @@ export class CardStore {
   private async completeRead(admitted: CardRecord, selection: ReadExecution, market: OfferedChartMarket | undefined): Promise<CardResponse> {
     const { kind, input } = selection;
     let source: unknown;
-    const preview = kind === "chart" ? (value: unknown) => {
+    const preview = kind === "chart" ? (read: () => unknown) => {
       this.assertCurrent();
-      this.chartPreviews.set(admitted.state.cardId, projectReadCardResult("chart", input, value).data);
+      this.chartPreviews.set(admitted.state.cardId, () => projectReadCardResult("chart", input, read()).data);
     } : undefined;
     try { source = await this.options.execute(selection, market, preview); }
     catch { return this.fail(admitted, "read_service", "The requested data could not be read."); }
@@ -293,7 +293,7 @@ export class CardStore {
     return record;
   }
   private snapshot(record: CardRecord, evaluatedAt: string): CardSnapshot {
-    const preview = record.state.state === "running" && record.state.kind === "chart" ? this.chartPreviews.get(record.state.cardId) : undefined;
+    const preview = record.state.state === "running" && record.state.kind === "chart" ? this.chartPreviews.get(record.state.cardId)?.() : undefined;
     return this.stateSnapshot(preview ? {...record.state,data:preview} : record.state, record.state.state === "ready" ?
       Math.max(0, Date.parse(record.state.expiresAt) - Date.parse(evaluatedAt)) : 0);
   }

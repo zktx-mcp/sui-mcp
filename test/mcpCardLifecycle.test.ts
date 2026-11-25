@@ -1268,6 +1268,24 @@ it.each(["account", "receipt", "chart"] as const)("restores %s through a public 
   }
 });
 
+it("observes the same running public Chart until its final revision without resubmitting", async () => {
+  const running = state("chart", { state: "running", revision: 1, data: { status: "preview", candleCount: 1 } });
+  const completed = { ...running, state: "closed" as const, reason: "completed" as const, revision: 2, data: { status: "ok", candleCount: 169 } };
+  const app = host(async () => { throw new Error("No input authority"); });
+  app.readServerResource.mockResolvedValueOnce(savedResource(running)).mockResolvedValueOnce(savedResource(completed));
+  const rendered = vi.fn(renderer.result);
+  startCard("chart", { ...renderer, result: rendered });
+  app.ontoolresult!(result(running));
+  await vi.waitFor(() => expect(rendered).toHaveBeenCalled());
+  await vi.advanceTimersByTimeAsync(running.pollAfterMs);
+  expect(rendered.mock.lastCall?.[0]).toMatchObject(completed);
+  await vi.advanceTimersByTimeAsync(2 * running.pollAfterMs);
+  expect(app.readServerResource).toHaveBeenCalledTimes(2);
+  for (const [request] of app.readServerResource.mock.calls) expect(request.uri).toBe(CARD_RESOURCE_PREFIX + running.cardId);
+  expect(app.callServerTool).not.toHaveBeenCalled();
+  await app.onteardown!();
+});
+
 it.each(["resource_link", "text_link"] as const)("restores a missing snapshot from a %s without granting input authority", async (format) => {
   const completed = state("account", { state: "closed", reason: "completed", data: {} });
   const uri = CARD_RESOURCE_PREFIX + completed.cardId;

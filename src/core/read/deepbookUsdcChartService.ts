@@ -1,7 +1,7 @@
 import type { ChartCardInput } from "./readCardInputs.js";
 import {
-  ambiguousMarketName, marketIdentity, type MarketIdentity, type CandlePreview,
-  deepbookCandleIntervalDurationMs, candleBucketStart,
+  ambiguousMarketName, marketIdentity, type MarketIdentity, type ReadCandlePreview,
+  candleBucketStart,
   validatePoolCandles,
   DEFAULT_DEEPBOOK_CANDLE_INTERVAL,
   DEEPBOOK_CANDLE_INTERVALS,
@@ -187,7 +187,7 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     };
   }
 
-  async function readCandles(prepared: PreparedChartRead, selected?: { poolId: string; baseAsset: { coinType: string }; quoteAsset: { coinType: string } }, onPreview?: (result: DeepbookUsdcChartCandlesResponse) => void): Promise<DeepbookUsdcChartResult> {
+  async function readCandles(prepared: PreparedChartRead, selected?: { poolId: string; baseAsset: { coinType: string }; quoteAsset: { coinType: string } }, onPreview?: (read: () => DeepbookUsdcChartCandlesResponse) => void): Promise<DeepbookUsdcChartResult> {
     if (prepared.status !== "ready") return prepared;
     const { query, named } = prepared;
     let poolResult: Awaited<ReturnType<DeepbookCandleSourceClient["fetchPools"]>>;
@@ -240,8 +240,10 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
         throw new DeepbookCandleSourceError("market_changed", "The registered pool changed.");
       }
       candleResult = await fetchCandlesCached({ ...query, poolName: pool.pool_name }, pool, !!query.poolId && !selected, onPreview && ((preview) => {
-        onPreview({status:"preview", query, pair, candles:[preview.candle], candleCount:1,
-          source:preview.source, ...chartCommonFields()});
+        onPreview(() => {
+          const { candles, source } = preview();
+          return { status: "preview", query, pair, candles, candleCount: candles.length, source, ...chartCommonFields() };
+        });
       }));
     } catch (error) {
       if (error instanceof DeepbookCandleSourceError && error.reason === "market_changed") {
@@ -285,8 +287,8 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
   type PoolList = Awaited<ReturnType<DeepbookCandleSourceClient["fetchPools"]>>;
   type CandleList = Awaited<ReturnType<DeepbookCandleSourceClient["fetchCandles"]>>;
   const fetchingPools = new Map<string, Promise<PoolList>>();
-  type Listener = (preview: CandlePreview) => void;
-  type Flight = {result: Promise<CandleList>; listeners:Set<Listener>; preview?:CandlePreview};
+  type Listener = (preview: ReadCandlePreview) => void;
+  type Flight = {result: Promise<CandleList>; listeners:Set<Listener>; preview?:ReadCandlePreview};
   const fetchingCandles = new Map<string, Flight>();
   async function fetchPoolsCached(menu = false): Promise<PoolList> {
     if (!source) throw new Error("Market source unavailable.");
@@ -332,14 +334,21 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     const pending = Promise.resolve().then(() => source.fetchCandles({ ...query, market, poolId: market.pool_id, directId }, undefined, preview => {
       if (fetchingCandles.get(key) !== flight || flight.preview) return;
       options.assertCurrent?.();
-      const {candle, source: proof} = preview;
-      validatePoolCandles([candle],query);
-      if (proof.poolId !== market.pool_id || proof.interval !== query.interval || !proof.indexedAt ||
-          candleBucketStart(candle.timestampMs, query.interval) !== candle.timestampMs ||
-          candle.timestampMs + deepbookCandleIntervalDurationMs(query.interval) > Date.parse(proof.indexedAt) + 1)
-        throw new Error("Unconfirmed chart preview.");
-      flight.preview = preview;
-      for (const notify of listeners) notify(preview);
+      let verified: CandleList | undefined;
+      flight.preview = () => {
+        const result = preview();
+        if (result === verified) return verified;
+        const { candles, source: proof } = result;
+        validatePoolCandles(candles, query);
+        const cutoff = Date.parse(proof.indexedAt ?? "");
+        if (!candles.length || proof.poolId !== market.pool_id || proof.interval !== query.interval || !Number.isFinite(cutoff) ||
+            candles.some((candle, i) => candleBucketStart(candle.timestampMs, query.interval) !== candle.timestampMs ||
+              Date.parse(candle.end) > cutoff + 1 || (i > 0 && candle.timestampMs <= candles[i - 1]!.timestampMs)))
+          throw new Error("Unconfirmed chart preview.");
+        verified = result;
+        return result;
+      };
+      for (const notify of listeners) notify(flight.preview);
       listeners.clear();
     })).then((value) => {
       if (value.source.poolId !== market.pool_id) throw new Error("The candle source returned a different or unidentified market.");
