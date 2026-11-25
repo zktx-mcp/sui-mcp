@@ -101,6 +101,61 @@ describe("DeepBook USDC chart service", () => {
     expect([catalogs, registryReads, candleReads]).toEqual([2, 1, 1]);
   });
 
+  it.each(["listed", "replaced"] as const)("keeps the catalog and its revision together when a pool is %s before the first candle", async change => {
+    const [original, deep] = officialPools() as [DeepbookCandlePool, DeepbookCandlePool];
+    const replacement = { ...original, pool_id: "0x" + "4".repeat(64) };
+    const extra = ["WAL", "NS", "IKA", "XBTC", "USDT"].map((symbol, i) => ({ ...original,
+      pool_id: "0x" + (8 + i).toString(16).repeat(64), pool_name: symbol + "_USDC",
+      base_asset_id: mainnetCoins[symbol]!.type, base_asset_symbol: symbol }));
+    const registryStarted = Promise.withResolvers<void>(), releaseRegistry = Promise.withResolvers<void>();
+    const newCatalogRead = Promise.withResolvers<void>();
+    let waiting = false, refreshed = false, indexReads = 0, chainReads = 0;
+    const current = () => change === "replaced" && refreshed ? replacement : original;
+    const bar = officialCandles()[0]!;
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async input => {
+      if (new URL(String(input)).pathname === "/get_pools") {
+        if (refreshed) {
+          newCatalogRead.resolve();
+          return Response.json([current(), deep, ...extra]);
+        }
+        return Response.json(change === "listed" ? [deep, ...extra] : [original, deep]);
+      }
+      indexReads++;
+      return Response.json({ candles: [[bar.timestampMs, 1, 2, 1, 2, 8]] });
+    });
+    const source = fakeSource({ onFetchCandles: () => { chainReads++; } });
+    const api = createDeepbookUsdcChartService({ indexer, source: { ...source,
+      async fetchPools() {
+        if (waiting) { registryStarted.resolve(); await releaseRegistry.promise; }
+        return { ...await source.fetchPools(), pools: [deep, current()] };
+      }
+    } });
+    const range = { interval: "15m", startTimeMs: bar.timestampMs, endTimeMs: bar.timestampMs + 30 * 60_000 };
+    const menuInput = chartInputSchema.parse({ ...range, poolId: original.pool_id });
+    const offer = offeredChartMarket(menuInput, await api.getPools())!;
+    const nameInput = prepared({ ...range, poolName: original.pool_name });
+    waiting = true;
+    const named = api.readCandles(nameInput);
+    await registryStarted.promise;
+    refreshed = true;
+    const selected = api.readCandles(prepared(menuInput), offer);
+    try {
+      await newCatalogRead.promise;
+      // Let the index publish its observation while both selections await the registry.
+      await new Promise<void>(resolve => setImmediate(resolve));
+    } finally { releaseRegistry.resolve(); }
+    const results = await Promise.all([named, selected]);
+    if (change === "listed") {
+      expect(results[0]).toMatchObject({ status: "ok", pair: { poolId: original.pool_id }, source: { endpoint: "ohclv" } });
+      expect(results[1]).toMatchObject({ status: "ok", pair: { poolId: original.pool_id }, source: { endpoint: "order_fills" } });
+      expect([indexReads, chainReads]).toEqual([1, 1]);
+    } else {
+      for (const result of results) expect(result).toMatchObject({ reason: "selected_market_changed" });
+      expect([indexReads, chainReads]).toEqual([0, 0]);
+      expect(await api.readCandles(nameInput)).toMatchObject({ status: "ok", pair: { poolId: replacement.pool_id } });
+    }
+  });
+
   it.each(["coin_metadata_unavailable", "conflicting_name"] as const)(
     "closes only the affected name-bound chart on %s while the same exact-pool read continues", async (observation) => {
       const source = fakeSource();

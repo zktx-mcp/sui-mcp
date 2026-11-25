@@ -163,7 +163,10 @@ type CatalogObservation = IndexedChartCatalog & {
   directory: ReturnType<typeof chartMarkets>;
   markets: ReadonlyMap<string, { identity: string | null; revision: number }>;
 };
-type ChartDirectory = ReturnType<typeof chartMarkets> & { observedIndex?: CatalogObservation };
+type ChartDirectory = ReturnType<typeof chartMarkets> & {
+  selectionIndex?: CatalogObservation;
+  beforeRegistry?: CatalogObservation;
+};
 
 type MarketFailure = Extract<DeepbookUsdcChartCandlesResponse, { status: "unsupported_pool" | "source_unavailable" }>;
 
@@ -329,11 +332,13 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
 
   // Only a current observation of both catalogs can resolve a previously
   // disputed name. An unrelated unread row must not erase that observation.
-  function reconcile(registry: ChartCatalog, index?: CatalogObservation, registryOnly = false, fresh = false): ChartDirectory {
+  function reconcile(registry: ChartCatalog | undefined, beforeRegistry?: CatalogObservation, registryOnly = false, fresh = false): ChartDirectory {
     options.assertCurrent?.();
-    const latest = index && lastCatalog?.value;
-    if (index && !latest) throw new Error("The chart source was reset.");
-    const directory = chartMarkets(registry, latest, registryOnly);
+    const selectionIndex = beforeRegistry && lastCatalog?.value;
+    if (beforeRegistry && !selectionIndex) throw new Error("The chart source was reset.");
+    const catalog = registry ?? selectionIndex;
+    if (!catalog) throw new Error("Market source unavailable.");
+    const directory = chartMarkets(catalog, registry ? selectionIndex : undefined, registryOnly);
     for (const pool of directory.pools) {
       const registered = differentRegistration(pool);
       if (pool.active === false || !registered) continue;
@@ -343,24 +348,29 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     }
     for (const [name, previous] of unresolved) {
       const current = directory.conflicts.get(name);
-      const unreadCandidate = registry.unavailablePools?.some(p => previous.some(candidate => candidate.poolId === p.poolId));
+      const unreadCandidate = registry?.unavailablePools?.some(p => previous.some(candidate => candidate.poolId === p.poolId));
       if (current) {
         // Keep an unread contender until the registry can account for it.
         for (const candidate of previous) {
-          if (registry.unavailablePools?.some(p => p.poolId === candidate.poolId) &&
+          if (registry?.unavailablePools?.some(p => p.poolId === candidate.poolId) &&
               !current.some(p => p.poolId === candidate.poolId && p.baseCoinType === candidate.baseCoinType && p.quoteCoinType === candidate.quoteCoinType)) {
             current.push(candidate);
           }
         }
-      } else if (fresh && index?.markets.get(name)?.revision === latest?.markets.get(name)?.revision &&
-          !unreadCandidate && registry.pools.some(p => p.pool_name === name && p.active !== false)) {
+      } else if (fresh && beforeRegistry?.markets.get(name)?.revision === selectionIndex?.markets.get(name)?.revision &&
+          !unreadCandidate && registry?.pools.some(p => p.pool_name === name && p.active !== false)) {
         unresolved.delete(name);
       } else {
         directory.conflicts.set(name, previous);
       }
     }
     for (const [name, candidates] of directory.conflicts) unresolved.set(name, candidates);
-    return index ? { ...directory, observedIndex: index } : directory;
+    if (!selectionIndex) return directory;
+    // Use the same catalog for market selection and its revision. Retain an
+    // earlier observation only to guard a market already identified before the wait.
+    return beforeRegistry && beforeRegistry !== selectionIndex
+      ? { ...directory, selectionIndex, beforeRegistry }
+      : { ...directory, selectionIndex };
   }
 
   // Only unfinished, name-bound card reads follow market observations. An exact-ID
@@ -418,9 +428,9 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     if (canUseIndex) {
       const observed = observedRegistry();
       if (observed) reconcile(observed, index);
-      else if (registrations.size) reconcile(index);
+      else if (registrations.size) reconcile(undefined, index);
     }
-    if (canUseIndex && !relevantConflict(unresolved)) return { ...index.directory, observedIndex: index };
+    if (canUseIndex && !relevantConflict(unresolved)) return { ...index.directory, selectionIndex: index };
 
     const recheckRegistry = !complete || !!selected || listed || relevantConflict(unresolved);
     let currentRegistry: PoolList;
@@ -431,9 +441,7 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       if (!canUseIndex || !relevantConflict(unresolved) || (error instanceof Error && error.name === "AbortError")) throw error;
       // A failed recheck keeps the disputed choices blocked. Independent
       // indexed markets in the same menu still have a usable price source.
-      const latest = lastCatalog?.value;
-      if (!latest) throw error;
-      return { ...reconcile(latest), observedIndex: index };
+      return reconcile(undefined, index);
     }
     const evidence = observedRegistry();
     return reconcile(evidence ?? currentRegistry, index, registryOffer,
@@ -511,9 +519,19 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
     const pool = pools.find(candidate => query.poolId ? candidate.pool_id === query.poolId : candidate.active !== false && candidate.pool_name === query.poolName);
     const marketName = selected?.poolName ?? pool?.pool_name ?? query.poolName;
     const indexed = !directId && selected?.catalogEndpoint !== "pool_registry" && directory.indexedNames.has(marketName);
-    const observed = directory.observedIndex;
-    const revision = observed?.markets.get(marketName)?.revision;
-    const conflict = !directId && directory.conflicts.get(marketName);
+    const observed = directory.selectionIndex;
+    const selectedMarket = observed?.markets.get(marketName);
+    const revision = selectedMarket?.revision;
+    const conflict = directId ? undefined : directory.conflicts.get(marketName);
+    const prior = directory.beforeRegistry?.markets.get(marketName);
+    if (prior?.identity && selected?.catalogEndpoint !== "pool_registry") {
+      // An already identified market can change while waiting for registration.
+      // Its old read stays rejected even if a later request clears the conflict.
+      const changed = indexed
+        ? selectedMarket?.identity != null && prior.revision !== revision
+        : pool !== undefined && prior.identity !== candleMarketIdentityKey(pool);
+      if (changed) return marketFailure(query, directory, "selected_market_changed", conflict);
+    }
     const conflictReason = selected ? "selected_market_changed" : "ambiguous_pool_name";
     if (conflict) return marketFailure(query, directory, conflictReason, conflict,
       selected ? [] : pools.map(candidate => candidate.pool_name));
