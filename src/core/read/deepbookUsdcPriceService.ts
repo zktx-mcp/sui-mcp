@@ -306,7 +306,7 @@ export class DeepbookUsdcPriceService {
       const key = id ?? "";
       const pending = pools.get(key);
       if (pending) return pending;
-      const read = this.source!.fetchPools(id, false, signal, id ? undefined : baseTypes).then(directory => {
+      const read = this.source!.fetchPools(id, signal, id ? undefined : baseTypes).then(directory => {
         if (!id) for (const pool of directory.pools) {
           pools.set(pool.pool_id, Promise.resolve({ source: directory.source, pools: [pool] }));
         }
@@ -376,7 +376,7 @@ export class DeepbookUsdcPriceService {
     let poolResult: Awaited<ReturnType<DeepbookCandleSourceClient["fetchPools"]>>;
     try {
       const id = selector.kind === "pool_id" ? selector.value : undefined;
-      poolResult = await (readPools ? readPools(id) : this.source.fetchPools(id, false, signal, selector.kind === "coin_type" ? [selector.value] : undefined));
+      poolResult = await (readPools ? readPools(id) : this.source.fetchPools(id, signal, selector.kind === "coin_type" ? [selector.value] : undefined));
     } catch (error) {
       return {
         status: "source_unavailable",

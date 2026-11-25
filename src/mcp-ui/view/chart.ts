@@ -42,7 +42,7 @@ const poolsSchema = z.object({ status: z.literal("ok"), unavailablePools: z.arra
 export const chartResultSchema = z.object({ status: z.enum(["ok", "empty_result", "preview", "partial_coverage"]), candles: z.array(candleSchema), candleCount: z.number().int().nonnegative(),
   query: z.object({ poolName: z.string(), interval: z.string(),
     startTimeMs: z.number().int().nonnegative().optional(), endTimeMs: z.number().int().nonnegative().optional(),
-    limit: z.number().int().positive() }), source: z.object({ endpoint: z.enum(["order_fills", "ohclv"]), poolId: z.string().optional(), poolName: z.string().optional(), catalogPoolId: z.string().optional(), fetchedAt: z.string(), startTimeMs: z.number().int().optional(), endTimeMs: z.number().int().optional(), coveredUntil: z.iso.datetime().optional(), indexedAt: z.iso.datetime().optional(), indexedCheckpoint: z.number().optional() }),
+    limit: z.number().int().positive() }), source: z.object({ endpoint: z.enum(["order_fills", "ohclv"]), poolId: z.string().optional(), poolName: z.string().optional(), catalogPoolId: z.string().optional(), fetchedAt: z.string(), requestedAt: z.iso.datetime().optional(), startTimeMs: z.number().int().optional(), endTimeMs: z.number().int().optional(), coveredUntil: z.iso.datetime().optional(), indexedAt: z.iso.datetime().optional(), indexedCheckpoint: z.number().optional() }),
   pair: z.object({ poolId: z.string(), poolName: z.string().optional(), baseAsset: z.object({ symbol: z.string() }), quoteAsset: z.object({ symbol: z.literal("USDC") }) }) })
   .refine(value => value.status !== "partial_coverage" || value.source.coveredUntil !== undefined, "Partial coverage requires an indexed cutoff.")
   .refine(value => value.status !== "preview" || value.candleCount > 0, "A chart preview needs closed candles.")
@@ -187,9 +187,9 @@ export const chartRenderer = {
     const last = data.candles.at(-1)!;
     const describe = (candle: ChartCandle) => `${formatUtc(candle.start)} · Open ${candle.open} · High ${candle.high} · Low ${candle.low} · Close ${candle.close} · Volume ${candle.volume}`;
     const preview = data.status === "preview";
-    const fetchedAt = Date.parse(data.source.fetchedAt);
+    const readAt = Date.parse(data.source.requestedAt ?? data.source.fetchedAt);
     const openAtRetrieval = data.source.endpoint === "ohclv" && last.end !== undefined &&
-      last.timestampMs <= fetchedAt && fetchedAt < Date.parse(last.end);
+      last.timestampMs <= readAt && readAt < Date.parse(last.end);
     const openAtCheckpoint = data.source.endpoint === "order_fills" && data.source.indexedAt &&
         data.source.coveredUntil && last.timestampMs <= Date.parse(data.source.indexedAt) &&
         Date.parse(data.source.indexedAt) + 1 === Date.parse(data.source.coveredUntil) &&

@@ -197,9 +197,9 @@ export class ChainCandleSource {
     return id;
   }
 
-  fetchMenuPools() { return this.fetchPools(undefined, false, undefined, curatedChartCoinTypes); }
+  fetchMenuPools() { return this.fetchPools(undefined, undefined, curatedChartCoinTypes); }
 
-  async fetchPools(poolId?: string, checkRegistration = false, caller?: AbortSignal, baseTypes?: readonly string[]): Promise<DeepbookCandlePoolsResult> {
+  async fetchPools(poolId?: string, caller?: AbortSignal, baseTypes?: readonly string[]): Promise<DeepbookCandlePoolsResult> {
     const signal = caller ? AbortSignal.any([this.owner.signal, caller]) : this.owner.signal;
     const chain = await this.rpc.ledgerService.getServiceInfo({}, { abort: signal }).response;
     if (chain.chainId !== SUI_MAINNET_CHAIN_IDENTIFIER) throw new Error("Unexpected pool object chain.");
@@ -234,17 +234,12 @@ export class ChainCandleSource {
         if (quote !== canonicalUsdc) return;
         const [{ coinMetadata: b }, { coinMetadata: q }] = await Promise.all([coin(base), coin(quote)]);
         if (!b?.symbol || !q?.symbol) throw new MarketDiscoveryError("coin_metadata_unavailable");
-        const active = checkRegistration
-          ? (await this.currentPoolId(base, quote)) === address
-          : registered
-            ? true
-            : undefined;
         signal.throwIfAborted();
         return {
           pool_id: address,
           pool_name: sdkNames.get(address) ?? b.symbol.toUpperCase() + "_USDC",
           initialSharedVersion: object.owner.Shared.initialSharedVersion,
-          ...(active === undefined ? {} : { active }),
+          ...(registered ? { active: true } : {}),
           base_asset_id: base,
           base_asset_symbol: b.symbol,
           base_asset_decimals: b.decimals,

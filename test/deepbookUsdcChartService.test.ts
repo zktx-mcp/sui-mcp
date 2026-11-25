@@ -150,6 +150,54 @@ describe("DeepBook USDC chart service", () => {
     }
   );
 
+  it.each(["listed", "replaced"] as const)("applies a %s registration to charts already reading the same pool", async change => {
+    const source = fakeSource();
+    const [sui, deep] = officialPools() as [DeepbookCandlePool, DeepbookCandlePool];
+    let changed = false, reads = 0;
+    const gate = Promise.withResolvers<void>();
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async () => change === "replaced"
+      ? new Response(null, { status: 503 }) : Response.json(changed ? [sui, deep] : [deep]));
+    const api = createDeepbookUsdcChartService({ indexer, source: { ...source,
+      currentPoolId: async () => change === "replaced" && changed ? "0x" + "4".repeat(64) : suiPoolId,
+      fetchMenuPools: () => source.fetchPools(),
+      async fetchCandles(query, signal, preview) {
+        reads++;
+        const result = await source.fetchCandles(query, signal);
+        preview?.(() => ({ ...result, source: { ...result.source, indexedAt: result.candles[1]!.end } }));
+        await gate.promise;
+        return result;
+      }
+    } });
+    const range = { interval: "15m", startTimeMs: 1782541800000, endTimeMs: 1782544500000 };
+    const input = chartInputSchema.parse({ poolId: suiPoolId, ...range });
+    const offer = offeredChartMarket(input, await api.getPools())!;
+    const preview = Promise.withResolvers<() => DeepbookUsdcChartResult>();
+    const menu = api.readCandles(prepared(input), offer, preview.resolve);
+    try {
+      const menuSnapshot = await preview.promise;
+      expect(menuSnapshot()).toMatchObject({ status: "preview" });
+      const joined = Promise.withResolvers<() => DeepbookUsdcChartResult>();
+      const other = change === "listed"
+        ? api.readCandles(prepared({ poolName: sui.pool_name, ...range }), undefined, joined.resolve)
+        : api.readCandles(prepared(input), undefined, joined.resolve);
+      const otherSnapshot = await joined.promise;
+      changed = true;
+      if (change === "listed") {
+        await api.getPools();
+        expect(menuSnapshot()).toMatchObject({ status: "preview" });
+        expect(otherSnapshot()).toMatchObject({ status: "preview" });
+      } else {
+        expect(await api.readCandles(prepared(input), offer)).toMatchObject({ reason: "selected_market_changed" });
+        expect(await menu).toMatchObject({ reason: "selected_market_changed" });
+        expect(otherSnapshot()).toMatchObject({ status: "preview" });
+      }
+      gate.resolve();
+      if (change === "listed") expect(await menu).toMatchObject({ status: "ok", source: { endpoint: "order_fills" } });
+      expect(await other).toMatchObject({ status: "ok", candles: officialCandles(), pair: { poolId: suiPoolId } });
+      expect(reads).toBe(1);
+    } finally { gate.resolve(); }
+  });
+
   it("rejects a conflicting name across both catalogs and recovers after their identities agree", async () => {
     const registry = officialPools();
     let indexedId = suiPoolId, candleReads = 0;
@@ -246,6 +294,39 @@ describe("DeepBook USDC chart service", () => {
     }
   });
 
+  it("aggregates the selected hour to its close while retaining the viewport and the in-flight forming snapshot", async () => {
+    const hour = Date.parse("2026-06-26T01:00:00Z");
+    const minute = 60_000;
+    const rows = [[hour, 4, 2], [hour + 17 * minute, 2, 3], [hour + 59 * minute, 5, 7],
+      [hour + 60 * minute, 9, 19]] as const;
+    let clock = hour + 30 * minute;
+    const started = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async input => {
+      const url = new URL(String(input));
+      if (url.pathname === "/get_pools") return Response.json(officialPools());
+      const through = Number(url.searchParams.get("end_time"));
+      const included = rows.filter(([at]) => Number(url.searchParams.get("start_time")) <= at && at <= through);
+      const prices = included.map(([, price]) => price);
+      started.resolve();
+      await finish.promise;
+      return Response.json({ candles: [[hour, prices[0], Math.max(...prices), Math.min(...prices), prices.at(-1),
+        included.reduce((sum, row) => sum + row[2], 0)]] });
+    });
+    const api = createDeepbookUsdcChartService({ indexer, source: fakeSource(), now: () => new Date(clock) });
+    const range = { startTimeMs: hour + 17 * minute, endTimeMs: hour + 18 * minute };
+    const query = prepared({ poolName: "SUI_USDC", interval: "1h", ...range });
+    const forming = api.readCandles(query);
+    await started.promise;
+    clock = hour + 60 * minute;
+    const closed = api.readCandles(query);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    finish.resolve();
+    expect(await forming).toMatchObject({ status: "ok", query: range, source: { requestedAt: "2026-06-26T01:30:00.000Z" },
+      candles: [{ open: "4", high: "4", low: "2", close: "2", volume: "5" }] });
+    expect(await closed).toMatchObject({ status: "ok", query: range,
+      candles: [{ open: "4", high: "5", low: "2", close: "5", volume: "12", end: "2026-06-26T02:00:00.000Z" }] });
+  });
+
   it("keeps unlisted markets onchain and an unavailable indexed candle request retryable at its own source", async () => {
     let fail = true;
     const requests: URL[] = [];
@@ -265,7 +346,7 @@ describe("DeepBook USDC chart service", () => {
     expect(await api.readCandles(named)).toMatchObject({ status: "empty_result", source: { endpoint: "ohclv" } });
     const url = requests.at(-1)!;
     expect(url.searchParams.get("start_time")).toBe(String(Date.parse("2026-06-26T01:00:00Z")));
-    expect(url.searchParams.get("end_time")).toBe(String(Date.parse("2026-06-26T01:18:00Z")));
+    expect(url.searchParams.get("end_time")).toBe(String(Date.parse("2026-06-26T01:59:59.999Z")));
     expect(await api.readCandles(prepared({ poolName: "DEEP_USDC" }))).toMatchObject({
       status: "ok", source: { endpoint: "order_fills", poolId: deepPoolId }
     });

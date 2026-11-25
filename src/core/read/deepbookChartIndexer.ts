@@ -2,7 +2,7 @@ import { z } from "zod";
 import { withRpcDeadline } from "../suiEndpoint.js";
 import {
   candleBucketStart, deepbookCandleIntervalDurationMs, deepbookCandlePoolsSchema,
-  DEFAULT_DEEPBOOK_CANDLE_FETCH_TIMEOUT_MS, type candleQueryWindow, DeepbookCandleSourceError,
+  DEFAULT_DEEPBOOK_CANDLE_FETCH_TIMEOUT_MS, candleQueryWindow, DeepbookCandleSourceError,
   validatePoolCandles, type DeepbookCandleQuery, type DeepbookTradeCandle
 } from "./deepbookCandleSource.js";
 
@@ -14,6 +14,15 @@ const responseSchema = z.object({
 export const INDEXER_SOURCE_STATEMENT = "DeepBook Indexer supplied the candle result for this market name.";
 // A JSON number is already a double. Expand its shortest decimal representation for display.
 const decimalFormat = new Intl.NumberFormat("en-US", { useGrouping: false, maximumSignificantDigits: 21 });
+
+// The viewport selects bucket opens. The indexer's end_time is an inclusive
+// cutoff on the source rows used to build those buckets.
+export function indexedChartWindow(query: DeepbookCandleQuery, requestedAt: number) {
+  const window = candleQueryWindow(query, requestedAt);
+  const nextBucket = window.lastBucket + deepbookCandleIntervalDurationMs(query.interval);
+  return { ...window, requestedAt, lastBucketClosed: nextBucket <= requestedAt,
+    aggregateThrough: Math.min(requestedAt, nextBucket - 1) };
+}
 
 export class DeepbookChartIndexer {
   constructor(private readonly lifetime: () => AbortSignal, private readonly fetchImpl: typeof fetch = fetch) {}
@@ -48,14 +57,14 @@ export class DeepbookChartIndexer {
     } };
   }
 
-  async fetchCandles(query: DeepbookCandleQuery, catalogPoolId: string, window: ReturnType<typeof candleQueryWindow>) {
+  async fetchCandles(query: DeepbookCandleQuery, catalogPoolId: string, window: ReturnType<typeof indexedChartWindow>) {
     const { interval, poolName } = query;
     const { start: startTimeMs, end: endTimeMs, firstBucket: first } = window;
     const width = deepbookCandleIntervalDurationMs(interval);
     const url = new URL("/ohclv/" + encodeURIComponent(poolName), origin);
     url.searchParams.set("interval", interval);
     url.searchParams.set("start_time", String(Math.max(0, first)));
-    url.searchParams.set("end_time", String(endTimeMs));
+    url.searchParams.set("end_time", String(window.aggregateThrough));
     if (query.limit !== undefined) url.searchParams.set("limit", String(query.limit));
     const candles: DeepbookTradeCandle[] = [];
     if (first <= endTimeMs) {
@@ -78,7 +87,7 @@ export class DeepbookChartIndexer {
     }
     return { candles, source: {
       endpoint: "ohclv" as const, url: url.href, baseUrl: origin, poolName, catalogPoolId, interval,
-      startTimeMs, endTimeMs, fetchedAt: new Date().toISOString(), sourceStatement: INDEXER_SOURCE_STATEMENT
+      startTimeMs, endTimeMs, requestedAt: new Date(window.requestedAt).toISOString(), fetchedAt: new Date().toISOString(), sourceStatement: INDEXER_SOURCE_STATEMENT
     } };
   }
 }
