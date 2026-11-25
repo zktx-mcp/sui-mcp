@@ -178,10 +178,11 @@ invalidate pending approval as appropriate; they cannot silently rebind a review
 
 ## Rendering and recovery
 
-Use the shared lifecycle for all cards. A lost action reply reads the same
-state once; it never resends the action. Read errors stop automatic observation
-and retain previous facts with explicit Check status recovery. This reads the
-same stored card; it does not recompute a review or submit a transaction. Rendering failures keep
+Use the shared lifecycle for all cards. After a lost action reply, read the
+same card once without resending the action. Preserve the last displayed facts
+on a read error. Chart follows the retry rules under [Internal Read Cards](#internal-read-cards).
+On other cards, a failed state read stops automatic observation. Check status
+reads the same stored card without recomputing a review or submitting a transaction. Rendering failures keep
 normal DB observation obligations, preserve previous content, and dispose only
 new failed resources. A rendering failure is not a reason to repeat the business
 query. QR and graph resources are disposed once. Review and Receipt show their transaction graph first, without an additional card frame. Review uses the current verified material, except for explicitly labelled previous material retained during same-target renewal; completed results use the executed transaction. A missing graph is labelled unavailable, never presented as current by substituting a different revision or a pre-execution graph. Opening details uses the same displayed facts without a new query or action; delayed renders cannot cross transaction identities. Backend-computed remaining
@@ -191,11 +192,13 @@ A renderer that fails before returning its view owns cleanup of the resources
 it already created. The frame cannot dispose an unfinished view it never received.
 View disposal is idempotent and prevents late drawing results from being applied.
 
-A failed whole-card display offers Check status even when its UI permission is
-present. An accepted current read can retry that display from the stored facts.
+A failed whole-card display uses Retry on Chart and Check status on other
+cards, including frames with UI permission. An accepted current read can retry
+that display from the stored facts.
 A partial asynchronous drawing failure reports its actual local retry capability
-to the frame. Explicit Check status confirms the current card before retrying that
-same view's failed resource; polls and chat visibility changes do not constitute
+to the frame. A confirmed Chart retries a failed graph locally from its current
+data. On other cards, Check status confirms the current card before retrying the
+same view's failed resource. Polls and chat visibility changes do not constitute
 consent to repeatedly repaint an unchanged failed QR. Replaced or disposed views
 cannot retry their old resources. A QR failure does not disable a permitted Stop
 connecting or required observation. Missing private QR data is not a drawing
@@ -481,7 +484,7 @@ Account and Receipt targets are established in chat, without card input forms. M
 
 All read cards use one SQLite-backed input lifecycle and one View lifecycle. The View inserts a result node before invoking its mount callback. Size-dependent renderers wait for positive layout dimensions, ignore hidden zero-size layouts, and release observers and drawing resources on disposal. Chart resizing preserves the current viewport rather than reapplying the initial query range. Initialization reads the same card record. Chat navigation, frame recreation and teardown do not close input or cancel work. A valid unsubmitted selection remains available; admission or backend expiry ends that original input. A read may finish after its View closes. Completed results are static, remain stored until local data replacement/reset, and do not repeat the source query. A different selection after admission needs a new card.
 
-Chart observes an admitted read automatically in both interactive and read-only views. A persistent temporary chart read or drawing failure offers Retry. An unsupported read method terminates that operation on the current connection. Drawing recovery uses the current chart data.
+Chart observes an admitted read automatically in both interactive and read-only views. While visible, it retries a send failure or SDK request timeout once by reading the same card. A persistent temporary failure offers Retry. An unusable card reference prompts the user to open a new Chart. An unsupported read method terminates that operation on the current connection.
 
 Static presentation may read the same saved result, missing details, or the state of an admitted operation when needed. Such reads do not restore controls or start a new business operation. Polling is sequential, uses the server-provided interval, and stops on completion, view closure or read error. Keep an already displayed result when a later read fails.
 
