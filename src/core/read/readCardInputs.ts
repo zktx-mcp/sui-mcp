@@ -23,16 +23,23 @@ export type ChartCardInput = z.output<typeof chartInputSchema>;
 const admittedAccount = accountInputSchema.extend({ account: normalizedSuiAddressSchema });
 const marketOffer = z.object({
   poolName: z.string(), poolId: normalizedSuiAddressSchema,
+  catalogEndpoint: z.enum(["get_pools", "pool_registry"]).optional(),
   baseAsset: z.object({ coinType: z.string() }), quoteAsset: z.object({ coinType: z.string() })
 });
-export type OfferedChartMarket = z.output<typeof marketOffer>;
-const chartMenu = z.object({ pools: z.array(marketOffer) });
+export type OfferedChartMarket = z.output<typeof marketOffer> & { mixedCatalog?: boolean | undefined };
+const chartMenu = z.object({
+  pools: z.array(marketOffer),
+  mixedCatalog: z.literal(true).optional(),
+  source: z.object({ endpoint: z.enum(["get_pools", "pool_registry"]) }).optional()
+});
 
 export function offeredChartMarket(input: ChartCardInput, saved: unknown): OfferedChartMarket | undefined {
   const menu = chartMenu.safeParse(saved);
   if (!menu.success) throw new Error("Saved chart choices are unavailable.");
-  return menu.data.pools.find(pool => pool.poolId === input.poolId &&
+  const offered = menu.data.pools.find(pool => pool.poolId === input.poolId &&
     (input.poolName === undefined || input.poolName === pool.poolName));
+  if (!offered) return undefined;
+  return { ...offered, mixedCatalog: menu.data.mixedCatalog, catalogEndpoint: offered.catalogEndpoint ?? menu.data.source?.endpoint };
 }
 
 export function parseCardInput(kind: CardKind, input: unknown) {

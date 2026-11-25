@@ -20,7 +20,7 @@ import { chainReceiptDigest } from "./fixtures/chainReceipt.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CallToolResultSchema } from "@modelcontextprotocol/core";
 import { type CallToolResult } from "@modelcontextprotocol/client";
-import { Client } from "@modelcontextprotocol/client";
+import { Client, ProtocolError, ProtocolErrorCode, SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import { McpServer } from "@modelcontextprotocol/server";
 import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
@@ -1291,8 +1291,9 @@ it("shows English loading in the graph area and stops on a saved Chart read erro
   const failure = { ...running, state: "closed" as const, reason: "completed" as const, revision: 2,
     data: { status: "source_unavailable", reason: "source_timeout" } };
   const app = host(async () => { throw Error("No input authority"); });
-  app.readServerResource.mockResolvedValueOnce(savedResource(running)).mockRejectedValueOnce(Error("fixture timeout"))
-    .mockResolvedValueOnce(savedResource(failure));
+  const timeout = new SdkError(SdkErrorCode.RequestTimeout, "Request timed out");
+  app.readServerResource.mockResolvedValueOnce(savedResource(running)).mockRejectedValueOnce(timeout)
+    .mockRejectedValueOnce(timeout).mockResolvedValueOnce(savedResource(failure));
   startCard("chart", chartRenderer);
   expect(root.textContent).toContain("Opening chart…");
   app.ontoolresult!(result(running));
@@ -1302,12 +1303,48 @@ it("shows English loading in the graph area and stops on a saved Chart read erro
   expect(root.textContent).toContain("Couldn’t refresh this chart.");
   expect(root.textContent).not.toContain("Loading chart data");
   await vi.advanceTimersByTimeAsync(running.pollAfterMs);
-  expect(app.readServerResource).toHaveBeenCalledTimes(2);
-  recoveryButton("Check status")!.click();
+  expect(app.readServerResource).toHaveBeenCalledTimes(3);
+  expect(recoveryButton("Check status")).toBeUndefined();
+  recoveryButton("Retry")!.click();
   await vi.waitFor(() => expect(root.textContent).toContain("The chart data source did not respond in time."));
   expect(root.textContent).not.toMatch(/Loaded \d|Couldn’t refresh|Loading chart data/);
   expect(app.callServerTool).not.toHaveBeenCalled();
   await app.onteardown!();
+});
+
+it("ends an unsupported chart resource read without a manual or automatic replay", async () => {
+  const running = state("chart", { state: "running", input: { poolName: "SUI_USDC" } });
+  const app = host(async () => { throw Error("No input authority"); });
+  app.readServerResource.mockResolvedValueOnce(savedResource(running))
+    .mockRejectedValue(new ProtocolError(ProtocolErrorCode.MethodNotFound, "Method not found"));
+  startCard("chart", chartRenderer); app.ontoolresult!(result(running));
+  await vi.waitFor(() => expect(root.textContent).toContain("Loading chart data"));
+  await vi.advanceTimersByTimeAsync(running.pollAfterMs);
+  expect(root.textContent).toContain("This connection cannot use resources/read");
+  expect(recoveryButton("Retry")).toBeUndefined();
+  expect(recoveryButton("Check status")).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(running.pollAfterMs);
+  expect(app.readServerResource).toHaveBeenCalledTimes(2);
+  expect(app.callServerTool).not.toHaveBeenCalled();
+  await app.onteardown!();
+});
+
+it.each([
+  ["2026-11-25T23:59:59.999Z", true],
+  ["2026-11-26T00:00:00.000Z", false]
+] as const)("uses the indexer's saved retrieval time %s for the forming-candle label", (fetchedAt, wasForming) => {
+  const poolId = "0x" + "1".repeat(64);
+  const start = "2026-11-25T00:00:00.000Z";
+  const card = state("chart", { state: "closed", reason: "completed", data: {
+    status: "ok", query: { poolName: "SUI_USDC", interval: "1d", limit: 500 },
+    source: { endpoint: "ohclv", poolName: "SUI_USDC", catalogPoolId: poolId, fetchedAt },
+    pair: { poolName: "SUI_USDC", poolId, baseAsset: { symbol: "SUI" }, quoteAsset: { symbol: "USDC" } },
+    candleCount: 1, candles: [{ start, end: "2026-11-26T00:00:00.000Z", timestampMs: Date.parse(start),
+      open: "1", high: "2", low: "1", close: "2", volume: "3" }]
+  } });
+  vi.setSystemTime(new Date("2026-12-01T00:00:00Z"));
+  const view = chartRenderer.result(card);
+  expect(view.node.textContent?.includes("still forming")).toBe(wasForming);
 });
 
 it.each(["resource_link", "text_link"] as const)("restores a missing snapshot from a %s without granting input authority", async (format) => {

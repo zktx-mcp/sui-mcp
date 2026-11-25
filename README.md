@@ -103,7 +103,7 @@ executed graph, observed asset changes and net network fee. Details supplements
 the same facts. Missing graph or receipt data is marked unavailable.
 
 **DeepBook USDC chart.** `ui_open_chart` opens an internal MCP Apps card with
-pool-bound DeepBook candles and volume for one selected USDC pool. With no time range, it shows up to 500 candles from the past seven days, adding verified candles as the scan proceeds.
+candles and volume for one USDC market. A market name or a selection from the menu uses DeepBook Indexer when listed. An explicit pool ID uses onchain fills. With no time range, it shows up to 500 candles from the past seven days.
 The saved result shows the selected pair, interval, UTC period and source time. Limited and empty results are identified.
 
 ## Current Limits

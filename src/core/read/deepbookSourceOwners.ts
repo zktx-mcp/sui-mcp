@@ -19,7 +19,11 @@ export const DEEPBOOK_SOURCE_OWNER_GROUPS = {
   },
   onchainFillHistory: {
     label: "Sui mainnet DeepBook fill aggregation",
-    owns: ["USDC-quoted candle history", "price-at-time candles", "chart candles", "account-timeline USDC candle references"]
+    owns: ["USDC-quoted candle history", "price-at-time candles", "explicit-ID and unindexed-market chart candles", "account-timeline USDC candle references"]
+  },
+  indexedCharts: {
+    label: "DeepBook Indexer",
+    owns: ["indexed market chart candles"]
   },
   localTransactionActivity: {
     label: "local SQLite transaction activity plus local protocol rules",
@@ -80,7 +84,7 @@ export const DEEPBOOK_CANDLE_CANDLE_USE = {
 export const DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING = {
   chainCandleData: "pool-bound DeepBook candle data",
   chainCandleReferences: "pool-bound DeepBook candle references",
-  chainUsdcDenominatedCandles: "pool-bound DeepBook USDC-denominated candles",
+  chartCandles: "DeepBook Indexer candles for named markets and menu selections, and pool-bound candles for explicit pool IDs or markets outside the Indexer",
   pinnedSdkSnapshots: "pinned-SDK snapshots",
   usdcNotFiatUsdAndNotPeg: "not fiat USD and not a USDC/USD peg guarantee"
 } as const;

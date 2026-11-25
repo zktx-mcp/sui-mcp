@@ -1,3 +1,4 @@
+import { DeepbookChartIndexer } from "../core/read/deepbookChartIndexer.js";
 import { withRpcDeadline } from "../core/suiEndpoint.js";
 import { verifyInstalledMinimum } from "../adapters/reviewAdapters.js";
 import { createRuntimeReviewDependencies } from "./reviewDependencies.js";
@@ -187,7 +188,7 @@ export async function createRuntimeApplication(bootConfig: BootConfig, logger: L
     settings.recoverOwner();
     await workflow.start();
 
-    chart = createDeepbookUsdcChartService({ source: marketSource, assertCurrent: access.assertCurrent });
+    chart = createDeepbookUsdcChartService({ source: marketSource, indexer: new DeepbookChartIndexer(() => marketSource!.signal), assertCurrent: access.assertCurrent });
     cards = createCardStore({ readService, publicChainReceiptReader, chart, records: cardRecords, ownerId, assertCurrent: access.assertCurrent, logger, workflow, settings });
     const transactionActivityService = new TransactionActivityService({
         activityStore: store,

@@ -622,7 +622,7 @@ describe("MCP discoverability", () => {
       const limitations = (payload.data.limitations as string[] | undefined)?.join("\n") ?? "";
       expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.chainCandleData);
       expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.chainCandleReferences);
-      expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.chainUsdcDenominatedCandles);
+      expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.chartCandles);
       expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.pinnedSdkSnapshots);
       expect(limitations).toContain(DEEPBOOK_SOURCE_OWNER_RUNTIME_WORDING.usdcNotFiatUsdAndNotPeg);
       expect(limitations).not.toMatch(

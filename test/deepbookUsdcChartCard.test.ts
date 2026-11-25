@@ -155,9 +155,11 @@ describe("DeepBook chart input and display", () => {
   });
   it("reports a display failure and only announces completion after a successful layout and draw", () => {
     const { result, container, flushFrame } = prepareLayout();
-    chartApi.create.mockImplementationOnce(() => { throw Error("canvas unavailable"); });
+    const unavailable = () => { throw Error("canvas unavailable"); };
+    chartApi.create.mockImplementationOnce(unavailable).mockImplementationOnce(unavailable);
     container.isConnected = true; container.clientWidth = 800; container.clientHeight = 360;
     result.mount!();
+    flushFrame();
     expect(result.displayRecovery?.()?.message).toBe("Couldn’t display the chart.");
     expect(result.statusText?.()).not.toContain("Loaded");
     result.displayRecovery?.()?.retry();

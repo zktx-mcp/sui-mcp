@@ -7,8 +7,13 @@ export const DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE =
 export const DEEPBOOK_CANDLE_PRICE_CONVENTION = "USDC_PER_BASE";
 export const DEEPBOOK_CANDLE_SOURCE_STATEMENT =
   "Sui MCP aggregates DeepBook OrderFilled events from Sui mainnet for the identified pool.";
+export const DEEPBOOK_REGISTRY_SOURCE_STATEMENT = "Sui mainnet supplied the DeepBook market information.";
 export const DEEPBOOK_CANDLE_CANDLE_TIMESTAMP_BOUNDARY = "open" as const;
 export const DEEPBOOK_CANDLE_INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"] as const;
+// The 0.8.2 indexer's OHCLV_DEFAULT_WINDOW_MS was seven days. Its default
+// window selected bucket starts, independently of the maximum number of rows.
+export const DEFAULT_CHART_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
 export const DEFAULT_DEEPBOOK_CANDLE_INTERVAL = "15m" as const;
 
 const SUI_OBJECT_ID_PATTERN = /^0x[0-9a-f]{64}$/i;
@@ -93,7 +98,7 @@ export type DeepbookCandleSourceEvidence = {
   readEndpoints?: string[]; coveredFrom?: string; coveredUntil?: string; indexedCheckpoint?: number; indexedAt?: string;
   url: string;
   fetchedAt: string;
-  sourceStatement: typeof DEEPBOOK_CANDLE_SOURCE_STATEMENT;
+  sourceStatement: typeof DEEPBOOK_CANDLE_SOURCE_STATEMENT | typeof DEEPBOOK_REGISTRY_SOURCE_STATEMENT;
   poolName?: string | undefined;
   interval?: DeepbookCandleInterval | undefined;
   startTimeMs?: number | undefined;
@@ -139,7 +144,7 @@ export type DeepbookCandleSourceClient = {
   currentPoolId?(base: string, quote: string): Promise<string>;
   fetchMenuPools?(): Promise<DeepbookCandlePoolsResult>;
   fetchPools(poolId?: string, checkRegistration?: boolean, signal?: AbortSignal, baseTypes?: readonly string[]): Promise<DeepbookCandlePoolsResult>;
-  fetchCandles(input: DeepbookCandleQuery, signal?: AbortSignal, preview?: (value: ReadCandlePreview) => void): Promise<DeepbookCandleResult>;
+  fetchCandles(input: DeepbookCandleQuery, signal?: AbortSignal, preview?: (value: ReadCandlePreview) => void, requestedAt?: number): Promise<DeepbookCandleResult>;
 };
 
 export function parseDeepbookCandleInterval(value: string): DeepbookCandleInterval {
@@ -179,6 +184,17 @@ export function candleBucketStart(ms: number, interval: DeepbookCandleInterval) 
   const duration = deepbookCandleIntervalDurationMs(interval);
   const origin = interval === "1w" ? 4 * 86_400_000 : 0;
   return origin + Math.floor((ms - origin) / duration) * duration;
+}
+
+// Bucket selection belongs to the requested window. Retention and indexed
+// coverage are separate facts supplied by the chain reader.
+export function candleQueryWindow(query: DeepbookCandleQuery, defaultEnd: number) {
+  const end = query.window === "history" ? query.endTimeMs - 1 : query.endTimeMs ?? defaultEnd;
+  const start = query.startTimeMs ?? Math.max(0, end - DEFAULT_CHART_WINDOW_MS);
+  const bucket = candleBucketStart(start, query.interval);
+  const selectOpens = query.window === "history" || query.startTimeMs === undefined;
+  const firstBucket = selectOpens && bucket < start ? bucket + deepbookCandleIntervalDurationMs(query.interval) : bucket;
+  return { start, end, firstBucket, lastBucket: candleBucketStart(end, query.interval) };
 }
 
 export function validatePoolCandles(candles: DeepbookTradeCandle[], input: DeepbookCandleQuery) {

@@ -251,7 +251,7 @@ The same record contains a model-safe result and, for receipts, separately valid
 
 Input TTL is not a result-retention deadline. Completed results survive restart and remain until explicit local data reset/import; there is no automatic age-based deletion or per-card size cap. Existing query limits still apply. DB size can therefore grow with usage. Reset/import affects other local data too and must retain its explicit confirmation and failure-atomicity contract.
 
-The market history cache contains public pool aggregates independent of account activity. It is separate from the wallet database and excluded from Settings export and restore.
+A new Chart reads its candle source. Concurrent requests can share the same in-progress candle read. Once it ends, only the saved card keeps its price and volume result for reopening in that conversation. Market directory observations stay in memory for market selection and outage recovery.
 
 ### Wallet and request ownership
 

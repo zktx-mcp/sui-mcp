@@ -1,3 +1,4 @@
+import { chartMarketBindingSchema } from "./chartMarketBinding.js";
 import { suiChainReceiptEffectsStatusSchema } from "../action/suiChainReceiptEvidence.js";
 import { z } from "zod";
 import { assertNoForbiddenMcpFields } from "../action/forbiddenFields.js";
@@ -22,8 +23,8 @@ export function projectReadCardResult(kind: CardKind, input: Record<string, unkn
 } {
   if (kind === "chart" && source && typeof source === "object" && "status" in source &&
       (source.status === "ok" || source.status === "empty_result" || source.status === "partial_coverage" || source.status === "preview")) {
-    const result = z.object({ pair: z.object({ poolId: z.string() }), source: z.object({ endpoint: z.literal("order_fills"), poolId: z.string() }) }).parse(source);
-    if (result.pair.poolId !== result.source.poolId || input.poolId && input.poolId !== result.source.poolId) throw new Error("Chart market identity mismatch.");
+    const result = chartMarketBindingSchema.parse(source);
+    if (input.poolId && input.poolId !== result.pair.poolId || input.poolName && result.source.endpoint === "ohclv" && input.poolName !== result.source.poolName) throw new Error("Chart market identity mismatch.");
   }
   if (kind === "receipt" && source && typeof source === "object" && "status" in source && source.status === "observed") {
     const minimal = z.object({ status: z.literal("observed"), txDigest: suiTransactionDigestSchema, effectsStatus: suiChainReceiptEffectsStatusSchema,

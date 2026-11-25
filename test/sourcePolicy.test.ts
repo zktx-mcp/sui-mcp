@@ -805,7 +805,7 @@ describe("source policy", () => {
       runtimeWordingReference("chainCandleReferences")
     );
     expect(guidanceByFile["src/mcp/serverInfo.ts"]).toContain(
-      runtimeWordingReference("chainUsdcDenominatedCandles")
+      runtimeWordingReference("chartCandles")
     );
     expect(guidanceByFile["src/mcp/serverInfo.ts"]).toContain(runtimeWordingReference("pinnedSdkSnapshots"));
     expect(guidanceByFile["src/mcp/serverInfo.ts"]).toContain(runtimeWordingReference("usdcNotFiatUsdAndNotPeg"));

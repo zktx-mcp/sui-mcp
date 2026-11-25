@@ -6,8 +6,10 @@ import { normalizeStructTag, parseStructTag } from "@mysten/sui/utils";
 import { z } from "zod";
 import { SUI_MAINNET_CHAIN_IDENTIFIER } from "../suiEndpoint.js";
 import {
+  candleQueryWindow,
   DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
   DEEPBOOK_CANDLE_SOURCE_STATEMENT,
+  DEEPBOOK_REGISTRY_SOURCE_STATEMENT,
   DeepbookCandleSourceError,
   candleBucketStart,
   deepbookCandleIntervalDurationMs,
@@ -74,29 +76,20 @@ class MarketDiscoveryError extends Error {
 
 const sdkNames = new Map(Object.entries(mainnetPools).map(([name, pool]) => [pool.address, name]));
 
-// The 0.8.2 indexer's OHCLV_DEFAULT_WINDOW_MS was seven days. Its default
-// window selected bucket starts, independently of the maximum number of rows.
-const DEFAULT_CHART_WINDOW_MS = 7 * 24 * 60 * 60_000;
-
 function resolveCandleWindow(query: DeepbookCandleQuery, birth: number, indexedAt: number, requestedAt: number) {
   const interval = query.interval;
   const width = deepbookCandleIntervalDurationMs(interval);
   const history = query.window === "history";
   const defaultStart = query.startTimeMs === undefined;
-  const end = history ? query.endTimeMs - 1 : query.endTimeMs ?? (defaultStart ? requestedAt : indexedAt);
-  const start = query.startTimeMs ?? Math.max(0, end - DEFAULT_CHART_WINDOW_MS);
-  const bucket = candleBucketStart(start, interval);
-  // An explicit Chart start still includes its overlapping bucket. History
-  // and the default seven-day window select bucket starts within the range.
-  const firstBucket = (history || defaultStart) && bucket < start ? bucket + width : bucket;
+  const { start, end, firstBucket, lastBucket } = candleQueryWindow(query, defaultStart ? requestedAt : indexedAt);
   const partial = end > indexedAt;
   if (!history && end < birth)
     throw new DeepbookCandleSourceError("market_not_created", "The requested period precedes this pool.");
   if (start > indexedAt || (!history && query.endTimeMs !== undefined && query.endMode !== "latest_indexed" &&
-      partial && candleBucketStart(end, interval) > candleBucketStart(indexedAt, interval))) {
+      partial && lastBucket > candleBucketStart(indexedAt, interval))) {
     throw new DeepbookCandleSourceError("source_unavailable", "The requested period extends beyond indexed chain data.");
   }
-  const readUntil = Math.min(indexedAt + 1, candleBucketStart(end, interval) + width);
+  const readUntil = Math.min(indexedAt + 1, lastBucket + width);
   const observedEnd = Math.min(end, indexedAt);
   // Buckets ending before creation are provably empty without reading any fills.
   const empty = (history || defaultStart) && (readUntil <= birth || firstBucket > observedEnd);
@@ -148,7 +141,7 @@ export class ChainCandleSource {
       endpoint,
       url,
       fetchedAt: new Date().toISOString(),
-      sourceStatement: DEEPBOOK_CANDLE_SOURCE_STATEMENT,
+      sourceStatement: endpoint === "pool_registry" ? DEEPBOOK_REGISTRY_SOURCE_STATEMENT : DEEPBOOK_CANDLE_SOURCE_STATEMENT,
     };
   }
 
@@ -281,8 +274,7 @@ export class ChainCandleSource {
     };
   }
 
-  async fetchCandles(query: DeepbookCandleQuery, caller?: AbortSignal, preview?: (value: ReadCandlePreview) => void) {
-    const requestedAt = Date.now();
+  async fetchCandles(query: DeepbookCandleQuery, caller?: AbortSignal, preview?: (value: ReadCandlePreview) => void, requestedAt = Date.now()) {
     const { market } = query;
     if (!market?.initialSharedVersion || market.pool_id !== query.poolId)
       throw new Error("A verified pool object is required.");

@@ -27,14 +27,16 @@ describe("DeepBook source owner contract", () => {
     expect(Object.keys(DEEPBOOK_SOURCE_OWNER_GROUPS).sort()).toEqual([
       "directSuiGrpcAndLocalMaterial",
       "guidanceOnly",
+      "indexedCharts",
       "localTransactionActivity",
       "onchainFillHistory",
       "pinnedSdkMetadata",
       "sdkSimulation"
     ]);
     expect(DEEPBOOK_SOURCE_OWNER_GROUPS.onchainFillHistory.owns).toEqual(
-      expect.arrayContaining(["USDC-quoted candle history", "chart candles"])
+      expect.arrayContaining(["USDC-quoted candle history", "explicit-ID and unindexed-market chart candles"])
     );
+    expect(DEEPBOOK_SOURCE_OWNER_GROUPS.indexedCharts.owns).toContain("indexed market chart candles");
     expect(JSON.stringify(DEEPBOOK_SOURCE_OWNER_GROUPS)).not.toMatch(/FlowX/i);
   });
 

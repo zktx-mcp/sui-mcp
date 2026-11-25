@@ -1,9 +1,12 @@
-import { chartInputSchema } from "../src/core/read/readCardInputs.js";
+import { DeepbookChartIndexer } from "../src/core/read/deepbookChartIndexer.js";
+import { projectReadCardResult } from "../src/core/read/readCardResult.js";
+import { chartInputSchema, offeredChartMarket } from "../src/core/read/readCardInputs.js";
 import { mainnetCoins } from "@mysten/deepbook-v3";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE,
   DEEPBOOK_CANDLE_SOURCE_STATEMENT,
+  DEEPBOOK_REGISTRY_SOURCE_STATEMENT,
   DeepbookCandleSourceError,
   type DeepbookTradeCandle,
   type DeepbookCandleQuery,
@@ -11,7 +14,6 @@ import {
   type DeepbookCandlePool,
   type DeepbookCandleSourceClient
 } from "../src/core/read/deepbookCandleSource.js";
-import { DEEPBOOK_CANDLE_SOURCE_BASE } from "../src/core/read/deepbookSourceOwners.js";
 import {
   createDeepbookUsdcChartService,
   prepareChartRead,
@@ -34,7 +36,197 @@ function prepared(input: unknown) {
 }
 
 describe("DeepBook USDC chart service", () => {
-  it("lists official USDC-quoted pools with source metadata and disclaimers", async () => {
+  it("uses the same indexer read for a named and menu chart while preserving exact-ID reads and market changes", async () => {
+    const calls: URL[] = [];
+    const pools = officialPools();
+    const day = Date.parse("2026-06-27T00:00:00Z");
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async input => {
+      const url = new URL(String(input));
+      calls.push(url);
+      return Response.json(url.pathname === "/get_pools" ? pools : { candles: [[day, 2, 3, 1, 2.5, 17]] });
+    });
+    const api = createDeepbookUsdcChartService({ indexer, source: fakeSource(), now: () => new Date(day + 60000) });
+    const selected = { poolId: suiPoolId, poolName: "SUI_USDC", baseAsset: { coinType: suiCoinType },
+      quoteAsset: { coinType: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE } };
+    const byName = prepared({ poolName: "SUI_USDC", interval: "1d" });
+    const byId = prepared({ poolId: suiPoolId, interval: "1d" });
+    const [named, chosen] = await Promise.all([api.readCandles(byName), api.readCandles(byId, selected)]);
+    for (const result of [named, chosen]) {
+      expect(result).toMatchObject({ status: "ok", candles: [{ start: fetchedAt, close: "2.5", volume: "17" }],
+        source: { endpoint: "ohclv", catalogPoolId: suiPoolId }, quantitySemantics: { chainRecomputedBySuiMcp: false } });
+      expect(projectReadCardResult("chart", { poolId: suiPoolId }, result).data).toBe(result);
+    }
+    expect(calls.map(u => u.pathname)).toEqual(["/get_pools", "/ohclv/SUI_USDC"]);
+    expect(calls[1]!.searchParams.get("start_time")).toBe(String(Date.parse("2026-06-21T00:00:00Z")));
+    expect(calls[1]!.searchParams.get("end_time")).toBe(String(Date.parse("2026-06-27T00:01:00Z")));
+    expect(calls[1]!.searchParams.get("limit")).toBe("500");
+    expect(await api.readCandles(prepared({ poolId: suiPoolId }))).toMatchObject({ source: { endpoint: "order_fills" } });
+
+    pools[0] = { ...pools[0]!, pool_id: nonUsdcPoolId };
+    expect(await api.readCandles(byId, selected)).toMatchObject({ reason: "selected_market_changed" });
+    expect(calls.filter(u => u.pathname.startsWith("/ohclv"))).toHaveLength(1);
+  });
+
+  it("rejects a conflicting name across both catalogs and recovers after their identities agree", async () => {
+    const registry = officialPools();
+    let indexedId = suiPoolId, candleReads = 0;
+    const extraMarkets: DeepbookCandlePool[] = [];
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async input => {
+      if (new URL(String(input)).pathname === "/get_pools") return Response.json([{ ...registry[0], pool_id: indexedId }, ...extraMarkets]);
+      candleReads++;
+      return Response.json({ candles: [] });
+    });
+    const source = fakeSource({ onFetchCandles: () => { candleReads++; } });
+    const api = createDeepbookUsdcChartService({ indexer, source: { ...source, async fetchPools() {
+      return { ...await source.fetchPools(), unavailablePools: [{ poolId: "0x" + "f".repeat(64),
+        baseCoinType: mainnetCoins.WAL!.type, quoteCoinType: registry[0]!.quote_asset_id,
+        unavailableReason: "coin_metadata_unavailable" as const }] };
+    } } });
+    const byName = prepared({ poolName: "SUI_USDC" }), byId = chartInputSchema.parse({ poolId: suiPoolId });
+    const before = offeredChartMarket(byId, await api.getPools())!;
+    indexedId = nonUsdcPoolId;
+    const menu = await api.getPools();
+    expect(menu).toMatchObject({ status: "ok", unavailablePools: expect.arrayContaining([
+      expect.objectContaining({ poolId: suiPoolId, poolName: "SUI_USDC" }),
+      expect.objectContaining({ poolId: indexedId, poolName: "SUI_USDC" })
+    ]) });
+    expect(offeredChartMarket(byId, menu)).toBeUndefined();
+    expect(await api.readCandles(byName)).toMatchObject({ status: "unsupported_pool", reason: "ambiguous_pool_name" });
+    expect(await api.readCandles(prepared(byId), before)).toMatchObject({ status: "unsupported_pool", reason: "selected_market_changed" });
+    expect(candleReads).toBe(0);
+    // Filling the other menu slots does not resolve this market's two IDs.
+    for (const [i, symbol] of ["DEEP", "WAL", "NS", "IKA", "XBTC", "USDT"].entries()) {
+      extraMarkets.push({ ...registry[0]!, pool_name: symbol + "_USDC", pool_id: "0x" + (i + 8).toString(16).repeat(64),
+        base_asset_id: mainnetCoins[symbol]!.type, base_asset_symbol: symbol });
+    }
+    expect(await api.readCandles(byName)).toMatchObject({ reason: "ambiguous_pool_name" });
+    expect(candleReads).toBe(0);
+    indexedId = suiPoolId;
+    const restored = offeredChartMarket(byId, await api.getPools())!;
+    for (const result of await Promise.all([api.readCandles(byName), api.readCandles(prepared(byId), restored)])) {
+      expect(result).toMatchObject({ status: "empty_result", source: { endpoint: "ohclv", catalogPoolId: suiPoolId } });
+    }
+    expect(candleReads).toBe(1);
+  });
+
+  it("compares registered types from an outage menu when the indexer returns", async () => {
+    const pairs = ["SUI", "DEEP", "WAL", "NS", "IKA", "XBTC", "USDT"].map((symbol, i) => ({
+      ...officialPools()[0]!, pool_id: "0x" + String(i + 1).repeat(64), pool_name: symbol + "_USDC",
+      base_asset_id: mainnetCoins[symbol]!.type, base_asset_symbol: symbol
+    }));
+    const unavailable = { poolId: suiPoolId, baseCoinType: deepCoinType,
+      quoteCoinType: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE, unavailableReason: "coin_metadata_unavailable" as const };
+    const registry = { source: sourceMetadata("pool_registry", baseUrl), pools: [pairs[1]!], unavailablePools: [unavailable] };
+    let offline = true;
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async input => {
+      expect(new URL(String(input)).pathname).toBe("/get_pools");
+      return offline ? new Response(null, { status: 503 }) : Response.json(pairs);
+    });
+    const api = createDeepbookUsdcChartService({ indexer, source: {
+      ...fakeSource(), fetchMenuPools: async () => registry, fetchPools: async () => registry
+    } });
+    expect(await api.getPools()).toMatchObject({ unavailablePools: [unavailable] });
+    offline = false;
+    expect(await api.readCandles(prepared({ poolName: "SUI_USDC" }))).toMatchObject({ reason: "ambiguous_pool_name" });
+    const menu = await api.getPools();
+    expect(offeredChartMarket(chartInputSchema.parse({ poolId: suiPoolId }), menu)).toBeUndefined();
+    expect(offeredChartMarket(chartInputSchema.parse({ poolId: deepPoolId }), menu)?.poolName).toBe("DEEP_USDC");
+  });
+
+  it("pins a recent one-minute window across the minute boundary and keeps distinct in-flight windows separate", async () => {
+    const ends: string[] = [];
+    const gate = Promise.withResolvers<void>();
+    const firstRequest = Promise.withResolvers<void>();
+    const booking = "2026-11-25T13:27:59.752Z";
+    let clock = Date.parse(booking);
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async input => {
+      const url = new URL(String(input));
+      if (url.pathname === "/get_pools") return Response.json(officialPools());
+      const end = url.searchParams.get("end_time");
+      ends.push(end!);
+      firstRequest.resolve();
+      await gate.promise;
+      const open = Number(end) >= Date.parse("2026-11-25T13:28:00Z") ? "13:28" : "13:27";
+      return Response.json({ candles: [[Date.parse("2026-11-25T" + open + ":00Z"), 1, 1, 1, 1, 9]] });
+    });
+    const api = createDeepbookUsdcChartService({ indexer, source: fakeSource(), now: () => new Date(clock) });
+    const read = () => api.readCandles(prepared({ poolName: "SUI_USDC", interval: "1m", limit: 1 }));
+    const previous = read(); await firstRequest.promise;
+    clock = Date.parse("2026-11-25T13:28:07.002Z");
+    const next = read();
+    try {
+      await vi.waitFor(() => expect(ends).toHaveLength(2));
+    } finally { gate.resolve(); }
+    expect(ends).toEqual([String(Date.parse(booking)), String(clock)]);
+    for (const [result, start] of [[await previous, "13:27"], [await next, "13:28"]] as const) {
+      expect(result).toMatchObject({ status: "ok", candleCount: 1, candles: [{ start: "2026-11-25T" + start + ":00.000Z" }] });
+    }
+  });
+
+  it("keeps unlisted markets onchain and an unavailable indexed candle request retryable at its own source", async () => {
+    let fail = true;
+    const requests: URL[] = [];
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async input => {
+      const url = new URL(String(input)); requests.push(url);
+      if (url.pathname === "/get_pools") return Response.json([officialPools()[0]]);
+      if (fail) return new Response(null, { status: 503 });
+      return Response.json({ candles: [] });
+    });
+    const chainReads: DeepbookCandleQuery[] = [];
+    const api = createDeepbookUsdcChartService({ indexer, source: fakeSource({ onFetchCandles: q => chainReads.push(q) }) });
+    const named = prepared({ poolName: "SUI_USDC", interval: "1h",
+      startTimeMs: Date.parse("2026-06-26T01:17:00Z"), endTimeMs: Date.parse("2026-06-26T01:18:00Z") });
+    expect(await api.readCandles(named)).toMatchObject({ status: "source_unavailable", reason: "source_http_error" });
+    expect(chainReads).toHaveLength(0);
+    fail = false;
+    expect(await api.readCandles(named)).toMatchObject({ status: "empty_result", source: { endpoint: "ohclv" } });
+    const url = requests.at(-1)!;
+    expect(url.searchParams.get("start_time")).toBe(String(Date.parse("2026-06-26T01:00:00Z")));
+    expect(url.searchParams.get("end_time")).toBe(String(Date.parse("2026-06-26T01:18:00Z")));
+    expect(await api.readCandles(prepared({ poolName: "DEEP_USDC" }))).toMatchObject({
+      status: "ok", source: { endpoint: "order_fills", poolId: deepPoolId }
+    });
+    expect(chainReads.map(q => q.poolId)).toEqual([deepPoolId]);
+  });
+
+  it("retains the offered market source through an indexer catalog outage and recovery", async () => {
+    let outage = false, catalogReads = 0;
+    const indexer = new DeepbookChartIndexer(() => new AbortController().signal, async input => {
+      if (new URL(String(input)).pathname !== "/get_pools") return Response.json({ candles: [] });
+      catalogReads++;
+      return outage ? new Response(null, { status: 503 }) : Response.json([officialPools()[0]]);
+    });
+    const api = createDeepbookUsdcChartService({ indexer, source: fakeSource() });
+    const sui = chartInputSchema.parse({ poolId: suiPoolId });
+    const deep = chartInputSchema.parse({ poolId: deepPoolId });
+    const deepName = prepared({ poolName: "DEEP_USDC" });
+    const mixed = await api.getPools();
+    const indexedOffer = offeredChartMarket(sui, mixed)!;
+    expect(indexedOffer.catalogEndpoint).toBe("get_pools");
+    expect(offeredChartMarket(deep, mixed)?.catalogEndpoint).toBe("pool_registry");
+    expect(await api.readCandles(deepName)).toMatchObject({ source: { endpoint: "order_fills" } });
+
+    outage = true;
+    const registryMenu = await api.getPools();
+    const registryOffer = offeredChartMarket(sui, registryMenu)!;
+    expect(registryOffer.catalogEndpoint).toBe("pool_registry");
+    const before = catalogReads;
+    expect(await api.readCandles(prepared(sui), registryOffer)).toMatchObject({
+      status: "ok", source: { endpoint: "order_fills", poolId: suiPoolId }
+    });
+    expect(catalogReads).toBe(before);
+    expect(await api.readCandles(prepared(sui), indexedOffer)).toMatchObject({ status: "source_unavailable" });
+    expect(await api.readCandles(deepName)).toMatchObject({ source: { endpoint: "order_fills", poolId: deepPoolId } });
+    expect(await api.readCandles(prepared({ poolName: "SUI_USDC" }))).toMatchObject({ status: "source_unavailable" });
+    api.clearCache();
+    expect(await api.readCandles(deepName)).toMatchObject({ status: "source_unavailable" });
+
+    outage = false;
+    const refreshed = offeredChartMarket(sui, await api.getPools())!;
+    expect(await api.readCandles(prepared(sui), refreshed)).toMatchObject({ source: { endpoint: "ohclv" } });
+  });
+
+  it("describes the available markets without claiming to have read candles", async () => {
     const api = createDeepbookUsdcChartService({ source: fakeSource(), now: () => new Date(fetchedAt) });
 
     const result = await api.getPools();
@@ -42,13 +234,9 @@ describe("DeepBook USDC chart service", () => {
       status: "ok",
       poolCount: 2,
       responseSummary: {
-        sourceStatement: DEEPBOOK_CANDLE_SOURCE_STATEMENT,
+        evidenceKind: "market_list",
+        sourceStatement: "Only market choices were retrieved.",
         usdcDisclaimer: expect.stringContaining("not fiat USD")
-      },
-      quantitySemantics: {
-        source: DEEPBOOK_CANDLE_SOURCE_BASE.kind,
-        usdcIsFiatUsd: false,
-        chainRecomputedBySuiMcp: true
       },
       unsupportedClaims: expect.arrayContaining(["fiat_usd_cash_out", "profit_or_pnl", "signing_readiness"]),
       source: {
@@ -56,6 +244,7 @@ describe("DeepBook USDC chart service", () => {
         url: `${baseUrl}/get_pools`
       }
     });
+    expect(result).not.toHaveProperty("quantitySemantics");
     if (result.status !== "ok") {
       throw new Error("expected pools ok");
     }
@@ -139,8 +328,9 @@ describe("DeepBook USDC chart service", () => {
       const read = await first.promise;
       expect(read()).toMatchObject({status:"preview", candleCount:1, candles:[{start:"2026-06-27T06:45:00.000Z"}],pair:{poolId:suiPoolId}});
       const joined = api.readCandles(prepareChartRead(query, new Date(fetchedAt)), undefined, replay.resolve);
-      const byName = api.readCandles(prepared({poolName:"SUI_USDC",interval:"15m"}));
-      const readJoined = await replay.promise;
+      const namedPreview = Promise.withResolvers<() => DeepbookUsdcChartResult>();
+      const byName = api.readCandles(prepared({poolName:"SUI_USDC",interval:"15m"}), undefined, namedPreview.resolve);
+      const [readJoined] = await Promise.all([replay.promise, namedPreview.promise]);
       loaded = 2;
       expect(read()).toMatchObject({status:"preview", candleCount:2, candles:[{close:"0.71404"},{start:"2026-06-27T06:45:00.000Z"}]});
       expect(readJoined()).toEqual(read());
@@ -261,10 +451,11 @@ describe("DeepBook USDC chart service", () => {
   it("rejects a replaced market from an open selection before reading candles and still allows a direct lookup", async () => {
     let candleReads = 0;
     const upstream = fakeSource({ onFetchCandles: () => { candleReads++; } });
+    const replacementId = "0x" + "4".repeat(64);
     let replaced = false;
     const api = createDeepbookUsdcChartService({ cacheTtlMs: 0, source: { ...upstream, async fetchPools() {
       const page = await upstream.fetchPools();
-      if (replaced) page.pools = page.pools.map(row => row.pool_name === "SUI_USDC" ? { ...row, pool_id: nonUsdcPoolId } : row);
+      if (replaced) page.pools = page.pools.map(row => row.pool_name === "SUI_USDC" ? { ...row, pool_id: replacementId } : row);
       return page;
     } } });
     const offered = await api.getPools();
@@ -274,11 +465,11 @@ describe("DeepBook USDC chart service", () => {
     const query = chartInputSchema.parse({ poolName: selected.poolName });
     expect(await api.readCandles(prepareChartRead(query, new Date(fetchedAt)), selected)).toMatchObject({ status: "unsupported_pool", reason: "selected_market_changed" });
     expect(candleReads).toBe(0);
-    expect(await api.readCandles(prepareChartRead(query, new Date(fetchedAt)))).toMatchObject({ status: "ok", pair: { poolId: nonUsdcPoolId } });
+    expect(await api.readCandles(prepareChartRead(query, new Date(fetchedAt)))).toMatchObject({ status: "ok", pair: { poolId: replacementId } });
     expect(candleReads).toBe(1);
   });
 
-  it("caches schema-validated pool and candle source results within the process TTL", async () => {
+  it("reuses current market metadata and reads candles anew after completion", async () => {
     let current = new Date("2026-06-27T00:00:00.000Z");
     let poolFetches = 0;
     let candleFetches = 0;
@@ -296,13 +487,13 @@ describe("DeepBook USDC chart service", () => {
     await api.readCandles(prepared({ poolName: "SUI_USDC", limit: 2 }));
     await api.readCandles(prepared({ poolName: "SUI_USDC", limit: 2 }));
     expect(poolFetches).toBe(1);
-    expect(candleFetches).toBe(1);
+    expect(candleFetches).toBe(2);
 
     current = new Date("2026-06-27T00:02:00.000Z");
     await api.getPools();
     await api.readCandles(prepared({ poolName: "SUI_USDC", limit: 2 }));
     expect(poolFetches).toBe(2);
-    expect(candleFetches).toBe(2);
+    expect(candleFetches).toBe(3);
   });
 });
 
@@ -360,7 +551,7 @@ function sourceMetadata(
     poolId: input.poolId,
     url,
     fetchedAt,
-    sourceStatement: DEEPBOOK_CANDLE_SOURCE_STATEMENT,
+    sourceStatement: endpoint === "pool_registry" ? DEEPBOOK_REGISTRY_SOURCE_STATEMENT : DEEPBOOK_CANDLE_SOURCE_STATEMENT,
     ...input
   };
 }

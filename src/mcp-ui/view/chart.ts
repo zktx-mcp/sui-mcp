@@ -1,3 +1,4 @@
+import { chartMarketBindingSchema } from "../../core/read/chartMarketBinding.js";
 import { z } from "zod";
 import { createChart, CandlestickSeries, HistogramSeries, type CandlestickData, type HistogramData, type UTCTimestamp, type WhitespaceData } from "lightweight-charts";
 import { element, link, button, input, select, field, accordion, row, timeValue } from "../../../review-app/src/ui/ui.js";
@@ -14,6 +15,7 @@ const chartFailureLabels: Record<Extract<DeepbookUsdcChartCandlesResponse, { rea
   pool_list_incomplete: "Some markets could not be identified.",
   source_timeout: "The chart data source did not respond in time.",
   source_http_error: "The chart data source returned an error.",
+  invalid_indexer_candle_evidence: "The indexer returned chart data that could not be used.",
   invalid_chain_candle_evidence: "The chart data source returned information that could not be used.",
   ambiguous_pool_name: "The source returned multiple markets under this pool name.",
   missing_pool_name: "No trading pair was selected.",
@@ -31,20 +33,20 @@ export const DEEPBOOK_USDC_CHART_SHORTCUTS = ["Recent", "Last 24h", "Last 7d", "
 export type DeepbookUsdcChartShortcut = (typeof DEEPBOOK_USDC_CHART_SHORTCUTS)[number];
 const marketReadFailureLabels = {
   coin_metadata_unavailable: "Coin metadata unavailable",
-  pool_identity_mismatch: "Pool object differs from its registered identity",
+  pool_identity_mismatch: "Market identity mismatch",
   pool_object_unavailable: "Pool object unavailable"
 } as const;
 const marketReason = z.enum(["coin_metadata_unavailable", "pool_identity_mismatch", "pool_object_unavailable"]).optional();
-const poolsSchema = z.object({ status: z.literal("ok"), unavailablePools: z.array(z.object({poolId:z.string(), unavailableReason:marketReason})).optional(), pools: z.array(z.object({ poolId: z.string(), poolName: z.string(),
+const poolsSchema = z.object({ status: z.literal("ok"), unavailablePools: z.array(z.object({poolId:z.string(), poolName:z.string().optional(), unavailableReason:marketReason})).optional(), pools: z.array(z.object({ poolId: z.string(), poolName: z.string(), catalogEndpoint: z.enum(["get_pools", "pool_registry"]).optional(),
   baseAsset: z.object({ symbol: z.string() }) })), intervals: z.array(z.string()), defaultInterval: z.string(), defaultLimit: z.number().int().positive(), maxCandles: z.number().int().positive() });
 export const chartResultSchema = z.object({ status: z.enum(["ok", "empty_result", "preview", "partial_coverage"]), candles: z.array(candleSchema), candleCount: z.number().int().nonnegative(),
   query: z.object({ poolName: z.string(), interval: z.string(),
     startTimeMs: z.number().int().nonnegative().optional(), endTimeMs: z.number().int().nonnegative().optional(),
-    limit: z.number().int().positive() }), source: z.object({ endpoint: z.literal("order_fills"), poolId: z.string(), fetchedAt: z.string(), startTimeMs: z.number().int().optional(), endTimeMs: z.number().int().optional(), coveredUntil: z.iso.datetime().optional(), indexedAt: z.iso.datetime().optional(), indexedCheckpoint: z.number().optional() }),
-  pair: z.object({ poolId: z.string(), baseAsset: z.object({ symbol: z.string() }), quoteAsset: z.object({ symbol: z.literal("USDC") }) }) })
+    limit: z.number().int().positive() }), source: z.object({ endpoint: z.enum(["order_fills", "ohclv"]), poolId: z.string().optional(), poolName: z.string().optional(), catalogPoolId: z.string().optional(), fetchedAt: z.string(), startTimeMs: z.number().int().optional(), endTimeMs: z.number().int().optional(), coveredUntil: z.iso.datetime().optional(), indexedAt: z.iso.datetime().optional(), indexedCheckpoint: z.number().optional() }),
+  pair: z.object({ poolId: z.string(), poolName: z.string().optional(), baseAsset: z.object({ symbol: z.string() }), quoteAsset: z.object({ symbol: z.literal("USDC") }) }) })
   .refine(value => value.status !== "partial_coverage" || value.source.coveredUntil !== undefined, "Partial coverage requires an indexed cutoff.")
   .refine(value => value.status !== "preview" || value.candleCount > 0, "A chart preview needs closed candles.")
-  .refine(value => value.source.poolId === value.pair.poolId, "Market identity mismatch.")
+  .refine(value => chartMarketBindingSchema.safeParse(value).success, "Market identity mismatch.")
   .refine((value) => value.candleCount === value.candles.length, "Candle count differs from returned rows.");
 
 export const chartRenderer = {
@@ -54,7 +56,9 @@ export const chartRenderer = {
   controls(snapshot, submit) {
     const choices = poolsSchema.parse(snapshot.data);
     const form = document.createElement("form"); form.className = "ui-form";
-    const pool = select({ choices: [{ label: "Choose a pair", value: "" }, ...choices.pools.map((item) => ({ label: `${item.baseAsset.symbol} / USDC`, value: item.poolId }))] }); pool.required = true;
+    const pool = select({ choices: [{ label: "Choose a pair", value: "" }, ...choices.pools.map((item) => ({
+      label: `${item.baseAsset.symbol} / USDC${item.catalogEndpoint === "pool_registry" ? " · Onchain" : ""}`, value: item.poolId
+    }))] }); pool.required = true;
     const interval = select({ choices: choices.intervals.map((value) => ({ label: value, value })) });
     interval.value = typeof snapshot.input.interval === "string" ? snapshot.input.interval : choices.defaultInterval;
     const start = input({ placeholder: "YYYY-MM-DDTHH:mm or epoch ms" });
@@ -99,7 +103,7 @@ export const chartRenderer = {
     form.append(element("p", "ui-note", "Set the time range and interval before choosing a pair, if needed."),
       field("Choose a pair to open the chart", pool), options.details, error);
     for (const market of choices.unavailablePools ?? []) {
-      form.append(row(market.unavailableReason ? marketReadFailureLabels[market.unavailableReason] : "Unavailable market", market.poolId));
+      form.append(row(market.unavailableReason ? marketReadFailureLabels[market.unavailableReason] : "Unavailable market", [market.poolName, market.poolId].filter(Boolean).join(" · ")));
     }
     function submitSelection(): void {
       if (!pool.value) return;
@@ -159,7 +163,7 @@ export const chartRenderer = {
     );
     const detail = accordion("Details");
     const checked = element("p", "ui-note", `${t.common.retrievedAt}: `); checked.append(timeValue(data.source.fetchedAt)); detail.body.append(checked);
-    detail.body.append(row("Pool ID", data.source.poolId));
+    detail.body.append(row(data.source.endpoint === "ohclv" ? "Catalog pool ID" : "Pool ID", data.pair.poolId));
     if (data.source.indexedAt) detail.body.append(row("Indexed through",timeValue(data.source.indexedAt)));
     if (data.source.coveredUntil) detail.body.append(row("Coverage through", timeValue(data.source.coveredUntil)));
     const exactTime = (value: number | undefined) => value === undefined ? "not specified" :
@@ -170,21 +174,26 @@ export const chartRenderer = {
       ? `Data verified through ${data.source.indexedAt}.`
       : `Data verified before ${data.source.coveredUntil!}.`));
     if (data.status !== "preview" && data.candleCount >= data.query.limit) node.append(element("p", "ui-note", `This view is limited to ${data.query.limit} candles; the requested period may contain more.`));
-    const boundary = element("p", "ui-note", `${t.chart.boundaryUsdc} ${t.chart.boundaryScope} ${t.chart.source}`);
+    const boundary = element("p", "ui-note", `${t.chart.boundaryUsdc} ${t.chart.boundaryScope} ${data.source.endpoint === "ohclv" ? "Source: DeepBook Indexer." : t.chart.source}`);
     const attribution = link(t.chart.library, "https://www.tradingview.com/");
     attribution.target = "_blank"; attribution.rel = "noopener noreferrer";
     boundary.append(` ${t.chart.renderedWith} `, attribution, ".");
     if (data.candles.length === 0) { detail.body.append(boundary); node.append(detail.details); return {
-      node, statusText: () => data.status === "partial_coverage" ? "No trades in the verified portion." : "No trades in the selected period."
+      node, statusText: () => data.status === "partial_coverage" ? "No trades in the verified portion." : data.source.endpoint === "ohclv" ? "No candles returned for this period." : "No trades in the selected period."
     }; }
     const container = element("div", "card-chart"); const legend = element("p", "ui-note");
     const last = data.candles.at(-1)!;
     const describe = (candle: ChartCandle) => `${formatUtc(candle.start)} · Open ${candle.open} · High ${candle.high} · Low ${candle.low} · Close ${candle.close} · Volume ${candle.volume}`;
     const preview = data.status === "preview";
-    if (data.source.indexedAt && data.source.coveredUntil && last.timestampMs <= Date.parse(data.source.indexedAt) &&
+    const fetchedAt = Date.parse(data.source.fetchedAt);
+    const openAtRetrieval = data.source.endpoint === "ohclv" && last.end !== undefined &&
+      last.timestampMs <= fetchedAt && fetchedAt < Date.parse(last.end);
+    const openAtCheckpoint = data.source.endpoint === "order_fills" && data.source.indexedAt &&
+        data.source.coveredUntil && last.timestampMs <= Date.parse(data.source.indexedAt) &&
         Date.parse(data.source.indexedAt) + 1 === Date.parse(data.source.coveredUntil) &&
-        last.end && Date.parse(last.end) > Date.parse(data.source.coveredUntil)) {
-      node.append(element("p", "ui-note", "The latest candle is still forming."));
+        last.end && Date.parse(last.end) > Date.parse(data.source.coveredUntil);
+    if (openAtRetrieval || openAtCheckpoint) {
+      node.append(element("p", "ui-note", "The latest candle was still forming at the recorded source time."));
     }
     legend.textContent = describe(last); detail.body.append(legend, boundary); node.append(container, detail.details);
     let chart: ReturnType<typeof createChart> | undefined;
@@ -194,6 +203,7 @@ export const chartRenderer = {
     let mounted = false, disposed = false, drawn = false, drawFailed = false;
     let updateSeries: ((fit: boolean) => void) | undefined;
     let previousWidth = 0, previousHeight = 0;
+    let automaticRedrawAvailable = true;
     const theme = () => {
       const style = getComputedStyle(document.documentElement);
       const color = (name: string) => style.getPropertyValue(name).trim();
@@ -251,7 +261,13 @@ export const chartRenderer = {
         if (drawnFrame !== undefined) { cancelAnimationFrame(drawnFrame); drawnFrame = undefined; }
         resizeObserver?.disconnect(); themeObserver?.disconnect(); chart?.remove(); chart = undefined;
         updateSeries = undefined; drawn = false; previousWidth = 0; previousHeight = 0;
-        queueMicrotask(() => { if (!disposed) context?.onDisplayChange?.(); });
+        if (automaticRedrawAvailable) {
+          automaticRedrawAvailable = false;
+          resizeFrame = requestAnimationFrame(() => {
+            resizeFrame = undefined;
+            if (!disposed) retryDraw();
+          });
+        } else queueMicrotask(() => { if (!disposed) context?.onDisplayChange?.(); });
       }
     };
     const mount = () => {
@@ -268,13 +284,17 @@ export const chartRenderer = {
       resizeObserver.observe(container);
       resize();
     };
+    function retryDraw() {
+      drawFailed = false;
+      mounted = false;
+      mount();
+    }
+    const recovery = { message: "Couldn’t display the chart.", retry: retryDraw };
     return { node, mount, statusText: () => {
       if (!drawn) return "Drawing chart…";
       const count = `${data.candleCount} ${preview ? "verified closed " : ""}${data.candleCount === 1 ? "candle" : "candles"}`;
       return preview ? `Showing ${count}. Reading older trades…` : `Loaded ${count}.`;
-    }, displayRecovery: () => drawFailed ? {message: "Couldn’t display the chart.", retry: () => {
-      drawFailed = false; mounted = false; mount();
-    }} : undefined, update: (next) => {
+    }, displayRecovery: () => drawFailed && resizeFrame === undefined ? recovery : undefined, update: (next) => {
       if (!preview || disposed || next.state !== "running") return false;
       const updated = chartResultSchema.parse(next.data);
       if (updated.status !== "preview" || updated.pair.poolId !== data.pair.poolId || updated.query.interval !== data.query.interval) return false;

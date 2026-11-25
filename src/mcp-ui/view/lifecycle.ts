@@ -1,6 +1,6 @@
 import { App } from "@modelcontextprotocol/ext-apps";
 import { CallToolResultSchema } from "@modelcontextprotocol/core";
-import { type CallToolResult } from "@modelcontextprotocol/client";
+import { ProtocolErrorCode, SdkErrorCode, type CallToolResult } from "@modelcontextprotocol/client";
 import { button } from "../../../review-app/src/ui/ui.js";
 import { automaticWorkflowActionSchema, workflowActionSchema, workflowViewSchema } from "../../core/session/workflowView.js";
 import { settingsViewSchema, settingsDraftSchema, type SettingsDraft } from "../../core/session/settingsOperation.js";
@@ -12,6 +12,19 @@ import "../../../review-app/public/ui.css";
 import "./style.css";
 
 declare const __SUI_MCP_VERSION__: string;
+type ChartReadFailure = "unavailable" | "temporary" | "unsupported" | "denied" | "cancelled" | "failed";
+
+function classifyChartReadFailure(error: unknown): ChartReadFailure {
+  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  if (code === ProtocolErrorCode.MethodNotFound || code === SdkErrorCode.MethodNotSupportedByProtocolVersion ||
+      code === SdkErrorCode.CapabilityNotSupported) return "unsupported";
+  if (error instanceof Error && error.name === "AbortError") return "cancelled";
+  if (code === SdkErrorCode.ClientHttpAuthentication || code === SdkErrorCode.ClientHttpForbidden ||
+      (error instanceof Error && (error.name === "NotAllowedError" || error.name === "SecurityError"))) return "denied";
+  if (code === SdkErrorCode.RequestTimeout || code === SdkErrorCode.SendFailed) return "temporary";
+  return "failed";
+}
+
 export type CardDisplayRecovery = { message: string; retry: () => void };
 export type CardConfirmation = "disconnect";
 export type CardContent = {
@@ -202,7 +215,7 @@ function responseParts(result: Record<string, unknown>) {
   const wallet = walletValue === undefined ? undefined : cardWalletDisplaySchema.parse(walletValue);
   if (wallet && (!snapshot || snapshot.kind !== "connect" || wallet.cardId !== snapshot.cardId || wallet.revision !== snapshot.revision ||
       wallet.connectionId !== object(object(snapshot.data)?.operation)?.connectionId)) throw new Error("The connection QR code does not match this card.");
-  return { snapshot, display, wallet, inputRequired: inputRequired?.success ? inputRequired.data : undefined,
+  return { snapshot, display, wallet, errorKind: object(payload?.error)?.kind, inputRequired: inputRequired?.success ? inputRequired.data : undefined,
     error: typeof error?.message === "string" ? error.message : typeof error?.reason === "string" ? error.reason : undefined };
 }
 
@@ -226,7 +239,8 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
 
   type Confirmation = { status: "unconfirmed" | "confirmed" } |
     { status: "needed"; afterRead: number; automatic: boolean } |
-    { status: "read_failed" | "rejected"; message: string };
+    { status: "read_failed"; message: string; chartFailure?: ChartReadFailure } |
+    { status: "rejected"; message: string };
   type ReadOutcome = { kind: "accepted"; snapshot: CardSnapshot; id: number; requestStartedAt: number } |
     { kind: "ignored" | "failed" | "disposed"; id: number };
   type ReadFlight = { id: number; promise: Promise<ReadOutcome> };
@@ -403,14 +417,16 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
         data?.phase === "draft" && object(data.draft)?.kind !== undefined && object(data.draft)?.kind !== "import_local_data" && !permitted.includes("settings_prepare"));
     let recover: "read" | "retry" | "selection" | undefined;
     if (!ended && cardId) {
-      if (confirmation.status === "read_failed" || openingError || confirmation.status === "unconfirmed") recover = "read";
-      else if (confirmation.status === "needed") { if (!confirmation.automatic) recover = "read"; }
+      if (confirmation.status === "read_failed") {
+        if (!confirmation.chartFailure || confirmation.chartFailure === "temporary") recover = "read";
+      } else if (openingError || confirmation.status === "unconfirmed") recover = "read";
+      else if (confirmation.status === "needed") { if (!confirmation.automatic && kind !== "chart") recover = "read"; }
       else if (displayError || partialDisplayFailure) recover = "read";
       else if (!terminal && settings && ["pending", "failed"].includes(String(data?.temporaryFileCleanup))) recover = "read";
       else if (!terminal && (localSave?.status === "saving" || localSave?.status === "needs_consent" && !permitted.includes("settings_store_backup") ||
           localSave?.status === "failed" && localSave.failure === "not_published" && !download?.endReason && !permitted.includes("settings_store_backup"))) recover = "read";
       else if (settingsInputBlocked) recover = "read";
-      else if (!reference) { if (snapshot?.state !== "closed" || displayError) recover = "read"; }
+      else if (!reference) { if (kind !== "chart" && snapshot?.state !== "closed") recover = "read"; }
       else if (!terminal && object(data?.progress)?.status === "unavailable") recover = "read";
       else if (!terminal && object(data?.walletAvailability)?.status === "initializing" && object(data?.walletAvailability)?.stage === "state_sync") recover = "read";
       else if (!terminal && !paused && retryTarget()) recover = "retry";
@@ -438,7 +454,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
       reviewHint: reviewPeriodElapsed ? undefined : reviewUpdatePending ? (displayPending || review?.preparing || commandFlight?.input.action === "prepare_review" ? "Updating review…" : "Checking status…") :
         reviewInput && object(review?.state)?.refreshReason === "review_evidence_stale" ? "Review details are out of date." : undefined,
       errors: [confirmation.status === "rejected" ? confirmation.message : confirmation.status === "read_failed"
-        ? kind === "chart" ? "Couldn’t refresh this chart." : `This card's status could not be checked. Reported message: “${confirmation.message}”` : undefined,
+        ? kind === "chart" ? confirmation.message : `This card's status could not be checked. Reported message: “${confirmation.message}”` : undefined,
         openingError && confirmation.status !== "rejected" ? `This card could not be opened. Reported message: “${openingError}”` : undefined,
         activeFailure && failedCommand ? `Message for this ${commandLabel(failedCommand)}: “${failedCommand.message}”` : undefined,
         displayError, partialDisplayFailure?.message],
@@ -452,7 +468,7 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   function recoveryLabel(d: Decision): string | undefined {
     return d.recover === "retry" ? failedCommand?.input.action === "connect" ? "Retry connection" : "Retry review"
       : d.recover === "selection" ? displayedView?.selectionRecovery?.label
-      : d.recover === "read" ? "Check status" : undefined;
+      : d.recover === "read" ? (kind === "chart" ? "Retry" : "Check status") : undefined;
   }
   // The frame owns confirmation/recovery; renderers describe the domain and
   // the selection they actually display. Neither description grants authority.
@@ -461,10 +477,12 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
     const recoveryNeeded = d.errors.some(Boolean) || d.recover !== undefined ||
       !!snapshot && !reference && snapshot.state !== "closed" || snapshot?.state === "closed" && snapshot.reason !== "completed";
     const recoveryInstruction = d.errors.some(Boolean) || confirmation.status !== "confirmed" || d.recover === "retry" || d.settingsInputBlocked;
+    if (confirmation.status === "read_failed" && confirmation.chartFailure && confirmation.chartFailure !== "temporary") return "";
     if (recoveryNeeded && recoveryInstruction && confirmation.status !== "rejected") {
       if (reading || d.read) return "Checking status…";
       const label = recoveryLabel(d);
       if (d.recover === "selection" && label) return `Use ${label} to try the current selection again.`;
+      if (kind === "chart" && label === "Retry") return "";
       if (label) return label === "Check status" ? displayError || d.partialDisplayFailure
         ? "Use Check status to read this card and try displaying it again." : "Use Check status to read this card again."
         : label === "Retry connection" ? "Use Retry connection to try connecting your wallet again."
@@ -711,6 +729,11 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   }
   async function recoverDisplay(): Promise<void> {
     const view = displayedView, failure = view?.displayRecovery?.();
+    if (kind === "chart" && confirmation.status === "confirmed" && !displayError && failure) {
+      failure.retry();
+      publish();
+      return;
+    }
     const result = await requestRead(true);
     // A successful current read retries a failed whole render in publish(). A
     // partial resource needs this explicit intent, not every poll or visibility
@@ -764,25 +787,40 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
   function requestRead(explicit: boolean): Promise<ReadOutcome | undefined> {
     if (lifetime.signal.aborted || confirmation.status === "rejected" || !cardId || !connected) return Promise.resolve(undefined);
     if (reading) return reading.promise;
-    if (confirmation.status === "read_failed" && !explicit) return Promise.resolve(undefined);
+    if (confirmation.status === "read_failed" && (!explicit || (confirmation.chartFailure && confirmation.chartFailure !== "temporary"))) return Promise.resolve(undefined);
     readRequested = explicit ? "explicit" : "background";
     publish();
     return (reading as ReadFlight | undefined)?.promise ?? Promise.resolve(undefined);
+  }
+  async function readFromHost<T>(read: () => Promise<T>): Promise<T> {
+    try { return await read(); }
+    catch (error) {
+      // Retry a transport interruption once. This only re-reads an existing
+      // card; it cannot repeat a selection, price lookup or wallet operation.
+      if (kind !== "chart" || lifetime.signal.aborted || document.visibilityState === "hidden") throw error;
+      if (classifyChartReadFailure(error) !== "temporary") throw error;
+      return read();
+    }
   }
   function startRead(): void {
     const id = ++readSerial, requestStartedAt = performance.now();
     // Install the complete single-flight handle before a Host call can re-enter.
     const work = Promise.resolve().then(async (): Promise<ReadOutcome> => {
+      let toolFailure: ChartReadFailure | undefined;
       try {
         let next: CardSnapshot, details: CardReceiptDisplay | undefined, wallet: CardWalletDisplay | undefined;
         if (reference) {
-          const result = responseParts(await call(CARD_TOOLS.read, { ...reference }));
+          const target = reference;
+          const response = await readFromHost(() => app.callServerTool({ name: CARD_TOOLS.read, arguments: { ...target } }, { signal: lifetime.signal }));
+          const result = responseParts(unwrap(response));
+          if (result.errorKind === "input_invalid") toolFailure = "unavailable";
+          if (result.errorKind === "request_aborted") toolFailure = "cancelled";
           if (!result.snapshot) throw new Error(result.error ?? "Saved card data is unavailable.");
           if (result.error) throw new Error(result.error);
           next = result.snapshot; details = result.display; wallet = result.wallet;
         } else {
           const uri = `${CARD_RESOURCE_PREFIX}${encodeURIComponent(cardId!)}`;
-          const saved = await app.readServerResource({ uri }, { signal: lifetime.signal });
+          const saved = await readFromHost(() => app.readServerResource({ uri }, { signal: lifetime.signal }));
           const item = saved.contents.find((entry) => entry.uri === uri && "text" in entry);
           if (!item || !("text" in item)) throw new Error("Saved card data is unavailable.");
           next = cardSnapshotSchema.parse(JSON.parse(item.text));
@@ -800,7 +838,22 @@ export function startCard(kind: CardKind, renderer: CardRenderer): void {
         return accepted && confirmation.status === "confirmed" ? { kind: "accepted", snapshot: next, id, requestStartedAt } : { kind: "ignored", id };
       } catch (error) {
         if (lifetime.signal.aborted) return { kind: "disposed", id };
-        if (confirmation.status !== "rejected") confirmation = { status: "read_failed", message: error instanceof Error ? error.message : "Saved card data could not be read. The last displayed result is unchanged." };
+        if (confirmation.status !== "rejected") {
+          const message = error instanceof Error ? error.message : "Saved card data could not be read. The last displayed result is unchanged.";
+          if (kind === "chart") {
+            const chartFailure = toolFailure ?? classifyChartReadFailure(error);
+            const method = reference ? CARD_TOOLS.read : "resources/read";
+            const messages: Record<ChartReadFailure, string> = {
+              unavailable: "This chart is unavailable with the current reference. Ask in chat for a new chart.",
+              temporary: "Couldn’t refresh this chart.",
+              unsupported: `This connection cannot use ${method} to read this chart. Reopen the chart with a compatible connection.`,
+              denied: "Access to this chart was denied.",
+              cancelled: "Reading this chart was cancelled.",
+              failed: `${message} Ask in chat for a new chart.`
+            };
+            confirmation = { status: "read_failed", chartFailure, message: messages[chartFailure] };
+          } else confirmation = { status: "read_failed", message };
+        }
         return { kind: "failed", id };
       }
     });
