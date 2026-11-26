@@ -6,7 +6,7 @@ It does not define tool field contracts or response wording. Use `docs/MCP_TOOLS
 
 The normal path is **install once with npm → register the command in each app → ask your first question**. No source checkout or special installation folder is required.
 
-These instructions describe `@zktx.io/sui-mcp@0.9.4`. Check the version available from npm before installing or changing an existing registration. For a different release, use its versioned guide, such as the [0.9.3 setup guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.9.3/docs/MCP_SETUP.md).
+These instructions describe `@zktx.io/sui-mcp@0.9.5`. Check the version available from npm before installing or changing an existing registration. For a different release, use its versioned guide, such as the [0.9.4 setup guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.9.4/docs/MCP_SETUP.md).
 
 Already using Sui MCP? Follow [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation) before replacing a running installation.
 
@@ -40,15 +40,15 @@ Interactive cards require the app's MCP Apps support. A local stdio connection a
 Check that the version described by this guide is available:
 
 ```sh
-npm view @zktx.io/sui-mcp@0.9.4 version
+npm view @zktx.io/sui-mcp@0.9.5 version
 ```
 
-Continue below when the result is `0.9.4`. On a 404, run `npm view @zktx.io/sui-mcp@latest version` to find the public stable version. If that prints `0.9.3`, use the [0.9.3 guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.9.3/docs/MCP_SETUP.md) to install it. To use 0.9.4 specifically, see [version availability](#npm-command-returns-404) or the optional [developer checkout](#developer-checkout-setup).
+Continue below when the result is `0.9.5`. On a 404, run `npm view @zktx.io/sui-mcp@latest version` to find the public stable version. If that prints `0.9.4`, use the [0.9.4 guide](https://github.com/zktx-mcp/sui-mcp/blob/v0.9.4/docs/MCP_SETUP.md) to install it. To use 0.9.5 specifically, see [version availability](#npm-command-returns-404) or the optional [developer checkout](#developer-checkout-setup).
 
 Install the published package:
 
 ```sh
-npm install -g @zktx.io/sui-mcp@0.9.4
+npm install -g @zktx.io/sui-mcp@0.9.5
 ```
 
 Install once in the Node/npm environment your apps use, then register each app separately. `-g` makes the executable available across projects; it does not automatically configure every app or grant access to other operating-system users. The installed version stays in place until you explicitly update it.
@@ -181,7 +181,7 @@ After registering your app, paste this into a new chat, not a terminal:
 Use Sui MCP to show its package name, server name, version and network.
 ```
 
-The app should call `read_get_server_status`. Confirm `packageName` is `@zktx.io/sui-mcp`, `serverName` is `sui-mcp`, `version` is `0.9.4` and `network` is `mainnet`. These are the expected identifiers, not a sample observation. If the version differs, use [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation) rather than assuming the new installation replaced a running server.
+The app should call `read_get_server_status`. Confirm `packageName` is `@zktx.io/sui-mcp`, `serverName` is `sui-mcp`, `version` is `0.9.5` and `network` is `mainnet`. These are the expected identifiers, not a sample observation. If the version differs, use [Updating an Existing Sui MCP Installation](#updating-an-existing-sui-mcp-installation) rather than assuming the new installation replaced a running server.
 
 ### 2. Try a read without connecting a wallet
 
@@ -330,7 +330,7 @@ npm run smoke:mainnet
 
 ## Install from the MCP Registry
 
-When installing through the MCP Registry, select `io.github.zktx-mcp/sui-mcp` version `0.9.4`. Its stdio package is `@zktx.io/sui-mcp@0.9.4` on npm. After registration, confirm the running version with `read_get_server_status`.
+When installing through the MCP Registry, select `io.github.zktx-mcp/sui-mcp` version `0.9.5`. Its stdio package is `@zktx.io/sui-mcp@0.9.5` on npm. After registration, confirm the running version with `read_get_server_status`.
 
 ## Download on demand (npx)
 
@@ -339,7 +339,7 @@ Use this alternative if you do not want a global install. Replace the global com
 ```json
 {
   "command": "npx",
-  "args": ["-y", "@zktx.io/sui-mcp@0.9.4"]
+  "args": ["-y", "@zktx.io/sui-mcp@0.9.5"]
 }
 ```
 
@@ -348,24 +348,24 @@ For Codex, the equivalent is:
 ```toml
 [mcp_servers.sui-mcp]
 command = "npx"
-args = ["-y", "@zktx.io/sui-mcp@0.9.4"]
+args = ["-y", "@zktx.io/sui-mcp@0.9.5"]
 ```
 
-This downloads the requested published package as needed. On native Windows clients that require the command shim, use `cmd` as the command and `["/c", "npx", "-y", "@zktx.io/sui-mcp@0.9.4"]` as its arguments. A cold cache can exceed the app's startup timeout. The global install avoids per-launch package resolution. Keep the exact version in every app's configuration.
+This downloads the requested published package as needed. On native Windows clients that require the command shim, use `cmd` as the command and `["/c", "npx", "-y", "@zktx.io/sui-mcp@0.9.5"]` as its arguments. A cold cache can exceed the app's startup timeout. The global install avoids per-launch package resolution. Keep the exact version in every app's configuration.
 
 ## Switching the Installed Package
 
 ### Updating an Existing Sui MCP Installation
 
-For **0.8.2 → 0.9.4**, the database and backup formats differ. At step 3, choose whether to keep or discard the old local records. Either choice works with the default app registration.
+For **0.8.2 → 0.9.5**, the database and backup formats differ. At step 3, choose whether to keep or discard the old local records. Either choice works with the default app registration.
 
-When updating **0.9.0, 0.9.1, 0.9.2, or 0.9.3 to 0.9.4**, keep your current data directory, settings and wallet connection records. Follow the restart and version checks below and skip step 3.
+When updating to **0.9.5** from **0.9.0 through 0.9.4**, keep your current data directory, settings and wallet connection records. Follow the restart and version checks below and skip step 3.
 
 1. Check that npm has the exact version you intend to install. Before closing your current installation, settle pending wallet prompts. For an admitted transaction with an unknown outcome, keep the attempt ID and look up the same transaction digest. Resending a swap could execute it twice.
 2. Disable Sui MCP in every participating app or fully quit those apps. Wait for the shared backend to exit. Closing just a chat or window can leave the old process running.
 3. **Only when upgrading from 0.8.2:** Move the entire old Sui MCP data folder aside to keep it, or delete that folder if you explicitly choose to discard its contents. On restart the server creates a fresh folder at the same path. If you prefer to leave the old folder in place, point every participating app to the same empty directory instead. See [folder locations and deletion effects](#database-format-mismatch).
-4. For a global install, run `npm install -g @zktx.io/sui-mcp@0.9.4` once and keep the `sui-mcp` launch command. If you use npx, update the exact package version in each registration.
-5. Reopen the connections. In each app ask for the running package, server name, version and network. Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.9.4` and `mainnet`. A fresh data folder starts with default settings. Reapply any custom endpoints or networks you use there and connect a wallet when needed.
+4. For a global install, run `npm install -g @zktx.io/sui-mcp@0.9.5` once and keep the `sui-mcp` launch command. If you use npx, update the exact package version in each registration.
+5. Reopen the connections. In each app ask for the running package, server name, version and network. Expect `@zktx.io/sui-mcp`, `sui-mcp`, `0.9.5` and `mainnet`. A fresh data folder starts with default settings. Reapply any custom endpoints or networks you use there and connect a wallet when needed.
 
 **Optional: use a different data location.** Only change the registration if you want Sui MCP to use a different path. Replace `/absolute/path/to/sui-data` below with the same absolute path in each app. On Windows, for example, use `C:/local-data/sui-data`. The folder name is yours to choose. Preserve the other settings.
 
@@ -394,7 +394,7 @@ When updating **0.9.0, 0.9.1, 0.9.2, or 0.9.3 to 0.9.4**, keep your current data
 
 If startup reports a [database format mismatch](#database-format-mismatch), check which data directory the failing app actually uses. Reinstalling npm leaves the database intact. Deleting old data or settings requires a separate choice by the user.
 
-For agents reading stored activity, 0.9.4 returns account amounts under `accountCoinFlows.rows`. Its transaction counts describe the completeness of the returned transactions, and `rowsTruncated` describes the list of asset types. Live scan `analysis.coinFlows` remains transaction-wide. [Activity tool contracts](MCP_TOOLS.md)
+For agents reading stored activity, 0.9.5 returns account amounts under `accountCoinFlows.rows`. Its transaction counts describe the completeness of the returned transactions, and `rowsTruncated` describes the list of asset types. Live scan `analysis.coinFlows` remains transaction-wide. [Activity tool contracts](MCP_TOOLS.md)
 
 ### Switching from a Different Package
 
@@ -415,7 +415,7 @@ restart first. A previous wallet pairing can remain in the wallet app; remove
 an unwanted pairing there rather than assuming new local storage disconnected it.
 
 Replace the old registration instead of adding a second one. Use
-`sui-mcp` as the default registration name. Install `@zktx.io/sui-mcp@0.9.4`
+`sui-mcp` as the default registration name. Install `@zktx.io/sui-mcp@0.9.5`
 globally and register the `sui-mcp` command, or use the exact-version
 [npx alternative](#download-on-demand-npx). A client-defined alias does not change the package,
 server identity or permissions. Remove obsolete runtime environment overrides. If you set
@@ -795,7 +795,7 @@ separate condition and does not by itself shut down the parent read service.
 
 ### Database format mismatch
 
-The startup error `Local database format does not match this runtime` means Sui MCP refused to open the database before writing to it. Reinstalling the package leaves that database in place. This applies when opening a 0.8.2 database with 0.9.4. A working 0.9.0, 0.9.1, 0.9.2, or 0.9.3 database can stay in place.
+The startup error `Local database format does not match this runtime` means Sui MCP refused to open the database before writing to it. Reinstalling the package leaves that database in place. This applies when opening a 0.8.2 database with 0.9.5. Databases from versions 0.9.0 through 0.9.4 can stay in place.
 
 1. Resolve outstanding wallet requests and recheck any unconfirmed submission using its original digest. Stop Sui MCP in every participating app and wait for the shared backend to exit.
 2. Locate the **old Sui MCP data folder**. If the old installation used `SUI_MCP_DATA_DIR`, that setting identifies the folder. Otherwise use your platform’s default:
@@ -807,7 +807,7 @@ The startup error `Local database format does not match this runtime` means Sui 
    | Linux | `$XDG_DATA_HOME/sui-mcp`, or `~/.local/share/sui-mcp` when `XDG_DATA_HOME` is unset |
 
 3. Choose what happens to the old records:
-   - **Keep them:** Move or rename the entire old folder to an unused location. Keeping it together preserves the database, its companion files and backups for use with the old version. To leave it exactly where it is, set the [optional per-app data path](#updating-an-existing-sui-mcp-installation) to the same empty directory in every app instead. An old-format backup cannot be imported into 0.9.4.
+   - **Keep them:** Move or rename the entire old folder to an unused location. Keeping it together preserves the database, its companion files and backups for use with the old version. To leave it exactly where it is, set the [optional per-app data path](#updating-an-existing-sui-mcp-installation) to the same empty directory in every app instead. An old-format backup cannot be imported into 0.9.5.
    - **Discard them:** Delete only that old Sui MCP folder. This removes its activity history, saved cards, addresses, network and endpoint settings, WalletConnect sessions and keys, and backups stored inside it. An agent may delete it only when the user explicitly chooses to discard those records.
 4. Reopen the apps with the same data path and review port. Sui MCP creates a fresh database automatically. Existing default registrations need no edits if you moved or deleted the old folder.
 5. Ask for the [running package and version](#1-confirm-the-running-server) in each app. Wallet-dependent features require a new connection in the fresh profile.
@@ -834,7 +834,7 @@ If the user supplied a specific Sui address for `read_summarize_wallet_assets` o
 
 A 404 means the requested package or version could not be retrieved from the
 selected registry. Confirm the exact name and version, for example with
-`npm view @zktx.io/sui-mcp@0.9.4 version --registry=https://registry.npmjs.org`.
+`npm view @zktx.io/sui-mcp@0.9.5 version --registry=https://registry.npmjs.org`.
 A new version may not have been published or become visible yet; a mistyped name
 or an alternate/private registry can also explain the response. Check the
 publication result and registry configuration before retrying. Do not assume

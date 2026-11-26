@@ -624,7 +624,7 @@ export function createDeepbookUsdcChartService(options: DeepbookUsdcChartService
       if (indexed && options.indexer) {
         const window = indexedChartWindow(marketQuery, now().getTime());
         const key = JSON.stringify([revision, pool.pool_name, pool.pool_id, pair.baseAsset.coinType, pair.quoteAsset.coinType,
-          query.interval, query.startTimeMs, query.endTimeMs, window.firstBucket, window.lastBucket, window.lastBucketClosed, query.limit]);
+          query.interval, query.startTimeMs, query.endTimeMs, window.firstBucket, window.lastBucket, window.lastBucketClosed, window.requestLimit]);
         let shared = indexedReads.get(key);
         if (!shared) {
           shared = options.indexer.fetchCandles(marketQuery, pool.pool_id, window).finally(() => {

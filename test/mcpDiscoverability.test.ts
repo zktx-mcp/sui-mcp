@@ -442,7 +442,12 @@ describe("MCP discoverability", () => {
     try {
       expect(client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
       expect(client.getInstructions()).toContain("mainnet-only");
-      expect(client.getInstructions()).toMatch(/DeepBook candles from finalized mainnet fills by pool ID/);
+      expect(client.getInstructions()).toContain("For pair charts use poolName alone. Use poolId only for a user-specified ID.");
+      const chart = (await client.listTools()).tools.find(tool => tool.name === "ui_open_chart");
+      expect(chart?.inputSchema.properties).toMatchObject({
+        poolName: { description: expect.stringContaining("Market name for a pair chart") },
+        poolId: { description: expect.stringContaining("Exact onchain pool ID specified by the user") }
+      });
       expect(client.getInstructions()).toContain("Ordinary MCP tools return evidence or internal cards");
       expect(client.getInstructions()).toContain("never signing authority, bytes or signatures");
       expect(client.getInstructions()).toContain("Only user card input and wallet approval authorize WalletConnect");

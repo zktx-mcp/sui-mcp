@@ -18,7 +18,10 @@ const validWindow = (value: { startTimeMs?: number | undefined; endTimeMs?: numb
   (!value.endMode || value.endTimeMs !== undefined) && (value.startTimeMs === undefined || value.endTimeMs === undefined || value.startTimeMs < value.endTimeMs);
 export const chartInputSchema = chartInputBaseSchema.extend({ poolId: normalizedSuiAddressSchema.optional() })
   .refine(v => !!v.poolId || !!v.poolName, "A market is required.").refine(validWindow, "Start must precede end.");
-export const chartOpenInputSchema = chartInputBaseSchema.omit({endMode:true}).partial().refine(validWindow, "Start must precede end.");
+export const chartOpenInputSchema = chartInputBaseSchema.omit({ endMode: true }).partial().extend({
+  poolName: chartInputBaseSchema.shape.poolName.describe("Market name for a pair chart, such as SUI_USDC."),
+  poolId: chartInputBaseSchema.shape.poolId.describe("Exact onchain pool ID specified by the user. Providing this field selects onchain fills even when poolName is present.")
+}).refine(validWindow, "Start must precede end.");
 export type ChartCardInput = z.output<typeof chartInputSchema>;
 const admittedAccount = accountInputSchema.extend({ account: normalizedSuiAddressSchema });
 const marketOffer = z.object({

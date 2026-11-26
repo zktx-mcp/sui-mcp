@@ -19,8 +19,11 @@ const decimalFormat = new Intl.NumberFormat("en-US", { useGrouping: false, maxim
 // cutoff on the source rows used to build those buckets.
 export function indexedChartWindow(query: DeepbookCandleQuery, requestedAt: number) {
   const window = candleQueryWindow(query, requestedAt);
-  const nextBucket = window.lastBucket + deepbookCandleIntervalDurationMs(query.interval);
-  return { ...window, requestedAt, lastBucketClosed: nextBucket <= requestedAt,
+  const width = deepbookCandleIntervalDurationMs(query.interval);
+  const nextBucket = window.lastBucket + width;
+  const bucketCount = (nextBucket - window.firstBucket) / width;
+  const requestLimit = Math.min(query.limit ?? bucketCount, bucketCount);
+  return { ...window, requestedAt, requestLimit, lastBucketClosed: nextBucket <= requestedAt,
     aggregateThrough: Math.min(requestedAt, nextBucket - 1) };
 }
 
@@ -65,12 +68,12 @@ export class DeepbookChartIndexer {
     url.searchParams.set("interval", interval);
     url.searchParams.set("start_time", String(Math.max(0, first)));
     url.searchParams.set("end_time", String(window.aggregateThrough));
-    if (query.limit !== undefined) url.searchParams.set("limit", String(query.limit));
     const candles: DeepbookTradeCandle[] = [];
-    if (first <= endTimeMs) {
+    if (window.requestLimit > 0) {
+      url.searchParams.set("limit", String(window.requestLimit));
       const parsed = responseSchema.safeParse(await this.json(url));
       if (!parsed.success) throw new DeepbookCandleSourceError("invalid_payload", "Invalid indexed candle data.");
-      if (query.limit !== undefined && parsed.data.candles.length > query.limit) {
+      if (parsed.data.candles.length > window.requestLimit) {
         throw new DeepbookCandleSourceError("invalid_payload", "Indexed candles exceed the requested limit.");
       }
       for (const [timestampMs, open, high, low, close, volume] of parsed.data.candles) {

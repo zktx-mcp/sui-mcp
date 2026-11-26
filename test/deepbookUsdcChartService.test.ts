@@ -50,7 +50,7 @@ describe("DeepBook USDC chart service", () => {
     const selected = { poolId: suiPoolId, poolName: "SUI_USDC", baseAsset: { coinType: suiCoinType },
       quoteAsset: { coinType: DEEPBOOK_CANDLE_CANONICAL_USDC_COIN_TYPE } };
     const byName = prepared({ poolName: "SUI_USDC", interval: "1d" });
-    const byId = prepared({ poolId: suiPoolId, interval: "1d" });
+    const byId = prepared({ poolId: suiPoolId, interval: "1d", limit: 200 });
     const [named, chosen] = await Promise.all([api.readCandles(byName), api.readCandles(byId, selected)]);
     for (const result of [named, chosen]) {
       expect(result).toMatchObject({ status: "ok", candles: [{ start: fetchedAt, close: "2.5", volume: "17" }],
@@ -60,7 +60,9 @@ describe("DeepBook USDC chart service", () => {
     expect(calls.map(u => u.pathname)).toEqual(["/get_pools", "/ohclv/SUI_USDC"]);
     expect(calls[1]!.searchParams.get("start_time")).toBe(String(Date.parse("2026-06-21T00:00:00Z")));
     expect(calls[1]!.searchParams.get("end_time")).toBe(String(Date.parse("2026-06-27T00:01:00Z")));
-    expect(calls[1]!.searchParams.get("limit")).toBe("500");
+    expect(calls[1]!.searchParams.get("limit")).toBe("7");
+    expect(named).toMatchObject({ query: { limit: 500 } });
+    expect(chosen).toMatchObject({ query: { limit: 200 } });
     expect(await api.readCandles(prepared({ poolId: suiPoolId }))).toMatchObject({ source: { endpoint: "order_fills" } });
 
     pools[0] = { ...pools[0]!, pool_id: nonUsdcPoolId };
